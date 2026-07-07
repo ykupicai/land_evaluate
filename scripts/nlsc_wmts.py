@@ -52,10 +52,12 @@ def _pick_zoom(xmin, ymin, xmax, ymax):
 
 
 def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
-                  cache_dir=None, buffer_ratio=0.0):
+                  cache_dir=None, buffer_ratio=0.0, keep_alpha=False):
     """下載涵蓋 extent 的 NLSC 圖磚拼成 GeoTIFF（EPSG:3857）。
 
     extent_3826: (xmin, ymin, xmax, ymax) in EPSG:3826
+    keep_alpha=True：輸出 4 波段 RGBA（供背景透明的疊圖層，如 EMAP2 通用電子地圖透明版；
+        未取得的區域 alpha=0 透明）。keep_alpha=False：輸出 3 波段、白底。
     回傳 out_tif 路徑；全部圖磚皆抓不到時回傳 None。
     """
     xmin, ymin, xmax, ymax = extent_3826
@@ -74,7 +76,11 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
     pix = tile_m / 256.0
     ox = col_min * tile_m - ORIGIN
     oy = ORIGIN - row_min * tile_m
-    mosaic = np.full((3, H, W), 255, dtype=np.uint8)
+    nb = 4 if keep_alpha else 3
+    if keep_alpha:
+        mosaic = np.zeros((4, H, W), dtype=np.uint8)   # 全透明底
+    else:
+        mosaic = np.full((3, H, W), 255, dtype=np.uint8)  # 白底
 
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
@@ -113,7 +119,17 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
                 if arr.ndim == 2:
                     arr = np.stack([arr] * 3)
                 y0 = (r - row_min) * 256; x0 = (c - col_min) * 256
-                mosaic[:, y0:y0 + 256, x0:x0 + 256] = arr[:3]
+                if keep_alpha:
+                    nbnd = arr.shape[0]
+                    rgb = arr[:3]
+                    if nbnd >= 4:
+                        a = arr[3]
+                    else:
+                        a = np.full((256, 256), 255, dtype=np.uint8)
+                    mosaic[:3, y0:y0 + 256, x0:x0 + 256] = rgb
+                    mosaic[3, y0:y0 + 256, x0:x0 + 256] = a
+                else:
+                    mosaic[:, y0:y0 + 256, x0:x0 + 256] = arr[:3]
                 ok += 1
             except Exception:
                 continue
@@ -121,13 +137,15 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
     if ok == 0:
         return None
     drv = gdal.GetDriverByName("GTiff")
-    out = drv.Create(out_tif, W, H, 3, gdal.GDT_Byte,
+    out = drv.Create(out_tif, W, H, nb, gdal.GDT_Byte,
                      options=["COMPRESS=DEFLATE", "TILED=YES"])
     out.SetGeoTransform((ox, pix, 0, oy, 0, -pix))
     srs = osr.SpatialReference(); srs.ImportFromEPSG(3857)
     out.SetProjection(srs.ExportToWkt())
-    for b in range(3):
+    for b in range(nb):
         out.GetRasterBand(b + 1).WriteArray(mosaic[b])
+    if keep_alpha:
+        out.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
     out.FlushCache()
     out = None
     return out_tif

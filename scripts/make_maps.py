@@ -98,8 +98,8 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 # 圖面（A4 橫式 297x210mm）
 MAP_X, MAP_Y, MAP_W, MAP_H = 6.0, 14.0, 200.0, 190.0  # mm
 PANEL_X = 210.0
-SCALE_LEVELS = [500, 1000, 2500, 5000]
-BBOX_EXPAND = 1.25  # 基地 bbox 外擴 25%（可調）
+SCALE_LEVELS = [500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000]
+BBOX_EXPAND = 1.12  # 基地 dissolve 範圍外擴約 12%（盡量放大基地以利辨識）
 NEIGH_EXPAND = 0.08  # 周邊地籍再外擴比例（相對出圖範圍寬度）
 EXPORT_DPI = 300
 FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
@@ -789,6 +789,10 @@ def main() -> None:
                 if not ok:
                     warnings.append(f"都市計畫 QML 套用失敗：{urban_qml_path}")
             urban_lyr_landtype.setOpacity(URBAN_LANDTYPE_OPACITY)
+            # 都市計畫每個 polygon 標其使用分區名（zone 欄）；PAL 自動避讓，僅標範圍內
+            urban_lyr_zoning.setLabeling(
+                label_settings(URBAN_ZONE_FIELD, size=7.5, color=(40, 40, 40)))
+            urban_lyr_zoning.setLabelsEnabled(True)
         else:
             warnings.append(f"都市計畫圖層載入失敗：{urban_shp_path}（使用分區/使用地編定圖將無都市底色）")
         color_to_names = load_urban_color_names(REPO_ROOT / URBAN_LEGEND_YAML)
@@ -839,9 +843,8 @@ def main() -> None:
                 if not ok and not qml_warned:
                     warnings.append(f"QML 套用失敗：{qml}")
                     qml_warned = True
-                l.setLabeling(label_settings(NEIGH_LABEL_EXPR, size=7.0,
-                                             is_expression=True, color=(70, 70, 70)))
-                l.setLabelsEnabled(True)
+                # 周邊宗地不標地號（僅基地宗地由 l_red 標；依使用者指示地號只呈現基地範圍）
+                l.setLabelsEnabled(False)
             # 地籍界線（使用者符號多無外框，疊一層細灰界線；主題3/4 亦作周邊淡灰線）
             l_gray = QgsVectorLayer(neigh_uri, "周邊地籍界線", "ogr")
             l_gray.setSubsetString(subset)
@@ -897,14 +900,14 @@ def main() -> None:
                 p_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_PHOTO2.tif"),
                                       layer="PHOTO2", cache_dir=str(tile_cache),
                                       buffer_ratio=0.05)
-                e_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_EMAP.tif"),
-                                      layer="EMAP", cache_dir=str(tile_cache),
-                                      buffer_ratio=0.05)
+                e_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_EMAP2.tif"),
+                                      layer="EMAP2", cache_dir=str(tile_cache),
+                                      buffer_ratio=0.05, keep_alpha=True)
                 if p_tif:
                     photo_rl = QgsRasterLayer(p_tif, "正射影像(NLSC PHOTO2)")
                 if e_tif:
-                    emap_rl = QgsRasterLayer(e_tif, "通用電子地圖(NLSC EMAP)")
-                    emap_rl.setOpacity(0.5)
+                    emap_rl = QgsRasterLayer(e_tif, "通用電子地圖透明版(NLSC EMAP2)")
+                    emap_rl.setOpacity(0.85)  # EMAP2 背景已透明，僅道路/註記；略降不遮擋影像
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"{cid} 底圖下載失敗：{type(exc).__name__}: {exc}")
             case_wmts_ok = photo_rl is not None and photo_rl.isValid()
@@ -926,7 +929,7 @@ def main() -> None:
                                  common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）",
                                  None),
                 "正射套疊": (overlay_layers, [l_red], set(),
-                             common_note + "\n底圖：NLSC 正射影像(PHOTO2)\n＋通用電子地圖(EMAP) 半透明50%",
+                             common_note + "\n底圖：NLSC 正射影像(PHOTO2)\n＋通用電子地圖透明版(EMAP2) 疊加",
                              None),
             }
 
