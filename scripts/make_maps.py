@@ -46,6 +46,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
 from zone_utils import normalize_zone
+from nlsc_wmts import build_basemap
 
 from qgis.core import (
     Qgis,
@@ -56,6 +57,7 @@ from qgis.core import (
     QgsFeature,
     QgsFeatureRequest,
     QgsFillSymbol,
+    QgsGeometry,
     QgsLayerTree,
     QgsLayoutExporter,
     QgsLayoutItemLabel,
@@ -82,7 +84,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
-from qgis.PyQt.QtCore import QRectF, QSize
+from qgis.PyQt.QtCore import QRectF, QSize, Qt
 from qgis.PyQt.QtGui import QColor, QFont
 
 # ---------------------------------------------------------------------------
@@ -105,13 +107,22 @@ FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 WMTS_URL = "https://wmts.nlsc.gov.tw/wmts"
 URBAN_LABEL = "都市土地（使用分區另查）"
 
-# 主題（key=檔名用、title=圖名）
+# 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
+URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
+URBAN_ZONE_FIELD = "zone"
+URBAN_COLOR_FIELD = "Color1"
+URBAN_QML = "都市計畫.qml"
+URBAN_LEGEND_YAML = "config/urban_plan_legend.yaml"
+URBAN_LAYER_NAME = "都市計畫土地使用分區"
+URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分區（依使用者圖說）
+
+# 主題（key=檔名用、title=圖名/圖說）
 THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊"]
 THEME_TITLES = {
-    "使用分區": "使用分區圖",
-    "使用地編定": "使用地編定圖",
+    "使用分區": "非都市土地使用分區及都市計畫土地使用分區圖",
+    "使用地編定": "非都市土地使用地變更編定及都市計畫土地使用分區圖",
     "國土功能分區": "國土功能分區圖",
-    "正射套疊": "正射影像套疊圖",
+    "正射套疊": "正射影像及通用電子地圖套疊圖",
 }
 
 # 有「總圖/合併檔」的縣市只用合併檔（與 scripts/match_parcels.py 的 PREFERRED_ZONE_FILES 一致）
@@ -341,6 +352,7 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
                 warnings.append(f"{c['id']} {c['error']}")
                 continue
             c["scale"], c["extent"] = compute_scale_extent(bbox)
+            c["has_urban_rows"] = any(row["使分"] is None for row in c["rows"])
             # 周邊地籍：出圖範圍再外擴 NEIGH_EXPAND 內的所有宗地，帶 地號/使分/使類；
             # 基地宗地也在內（是否基地=Y，供標註規則排除、避免與基地紅框層重複標地號）
             case_fids = set(fids)
@@ -492,6 +504,57 @@ def label_settings(field: str = "地號", size: float = 9.0, is_expression: bool
 NEIGH_LABEL_EXPR = "CASE WHEN \"是否基地\" = 'Y' THEN NULL ELSE \"地號\" END"
 
 
+def load_urban_color_names(yaml_path: Path) -> dict[str, list[str]]:
+    """都市計畫官方圖例 Color1(\"R,G,B\") → 分區/用地名清單（同色多名時全列出）。"""
+    with yaml_path.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    out: dict[str, list[str]] = {}
+    for name, rgb in cfg.get("zones", {}).items():
+        key = ",".join(str(x) for x in rgb)
+        out.setdefault(key, []).append(name)
+    return out
+
+
+def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
+                            color_to_names: dict[str, list[str]],
+                            keep_alive: list) -> QgsVectorLayer | None:
+    """建圖例專用小圖層：案場出圖範圍內實際出現的都市計畫 Color1 → 分區名清單。
+    不掛進地圖圖層清單（不渲染），只放進 legend_layers 供圖例面板顯示；
+    每類別放 1 個位於 extent 中心的假幾何，確保 setLegendFilterByMapEnabled 不會濾掉它。"""
+    if not urban_lyr.isValid():
+        return None
+    i_color = urban_lyr.fields().indexOf(URBAN_COLOR_FIELD)
+    i_zone = urban_lyr.fields().indexOf(URBAN_ZONE_FIELD)
+    if i_color < 0:
+        return None
+    req = QgsFeatureRequest().setFilterRect(extent)
+    attrs = [i for i in (i_color, i_zone) if i >= 0]
+    req.setSubsetOfAttributes(attrs)
+    seen: dict[str, str] = {}
+    for f in urban_lyr.getFeatures(req):
+        color = attr_str(f[i_color])
+        if not color or color in seen:
+            continue
+        names = color_to_names.get(color)
+        label = "／".join(names) if names else (attr_str(f[i_zone]) if i_zone >= 0 else color)
+        seen[color] = label
+    if not seen:
+        return None
+    lyr = QgsVectorLayer(f"MultiPolygon?crs={CRS_3826}&field=cat:string", URBAN_LAYER_NAME, "memory")
+    cx, cy = extent.center().x(), extent.center().y()
+    half = max(extent.width(), extent.height()) * 0.001
+    cats = []
+    for i, (color, label) in enumerate(seen.items()):
+        r, g, b = (int(x) for x in color.split(","))
+        sym = fill_symbol((r, g, b), outline="120,120,120,255", width="0.1")
+        cats.append(QgsRendererCategory(str(i), sym, label))
+        geom = QgsGeometry.fromRect(QgsRectangle(cx - half, cy - half, cx + half, cy + half))
+        add_feat(lyr, geom, [str(i)])
+    lyr.setRenderer(QgsCategorizedSymbolRenderer("cat", cats))
+    keep_alive.append(lyr)
+    return lyr
+
+
 def save_styles(styles_dir: Path) -> None:
     """輸出 QML 樣式檔供 QGIS 手動微調時套用。
     注意：使用分區.qml／使用地編定.qml 由 scripts/build_legend_styles.py 從使用者
@@ -535,7 +598,8 @@ def _set_label_font(item: QgsLayoutItemLabel, size: float, bold: bool = False) -
 
 def build_layout(project: QgsProject, name: str, title: str, layers: list,
                  legend_layers: list, legend_hide_title: set, scale: int,
-                 extent: QgsRectangle, notes: str, keep_alive: list) -> QgsPrintLayout:
+                 extent: QgsRectangle, notes: str, keep_alive: list,
+                 map_overlay: str | None = None) -> QgsPrintLayout:
     layout = QgsPrintLayout(project)
     layout.initializeDefaults()
     layout.setName(name)
@@ -568,6 +632,26 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
     na.attemptSetSceneRect(QRectF(276, 16, 11, 17))
     na.setLinkedMap(m)
     layout.addLayoutItem(na)
+
+    # 圖面加註橫幅（如：都市土地無使用地編定）
+    if map_overlay:
+        ov = QgsLayoutItemLabel(layout)
+        ov.setText(map_overlay)
+        ov.setBackgroundEnabled(True)
+        ov.setBackgroundColor(QColor(255, 255, 255, 210))
+        try:
+            ov.setHAlign(Qt.AlignHCenter)
+        except Exception:
+            pass
+        _set_label_font(ov, 13, bold=True)
+        try:
+            fmt = ov.textFormat()
+            fmt.setColor(QColor(200, 0, 0))
+            ov.setTextFormat(fmt)
+        except Exception:
+            pass
+        ov.attemptSetSceneRect(QRectF(MAP_X + 10, MAP_Y + MAP_H - 20, MAP_W - 20, 10))
+        layout.addLayoutItem(ov)
 
     # 圖例
     leg = QgsLayoutItemLegend(layout)
@@ -685,23 +769,34 @@ def main() -> None:
         zones_lyr = QgsVectorLayer(f"{gpkg}|layername=功能分區", "國土功能分區", "ogr")
         zones_lyr.setRenderer(zone_renderer())
         zones_lyr.setOpacity(0.6)
-        photo2 = QgsRasterLayer(
-            f"crs=EPSG:3857&dpiMode=7&format=image/jpeg&layers=PHOTO2&styles=default"
-            f"&tileMatrixSet=GoogleMapsCompatible&url={WMTS_URL}",
-            "正射影像(NLSC PHOTO2)", "wms")
-        emap = QgsRasterLayer(
-            f"crs=EPSG:3857&dpiMode=7&format=image/png&layers=EMAP&styles=default"
-            f"&tileMatrixSet=GoogleMapsCompatible&url={WMTS_URL}",
-            "通用電子地圖(NLSC EMAP)", "wms")
-        emap.setOpacity(0.5)
-        wmts_ok = photo2.isValid() and emap.isValid()
-        print(f"WMTS 圖層：PHOTO2 {'OK' if photo2.isValid() else '失敗'}、"
-              f"EMAP {'OK' if emap.isValid() else '失敗'}", flush=True)
+        # NLSC 正射/電子地圖底圖改用圖磚拼接（nlsc_wmts.build_basemap），逐案場產 GeoTIFF；
+        # 不再用 QGIS WMS provider（會卡住/逾時）。這裡只準備快取資料夾。
+        basemap_dir = out_dir / "底圖"
+        basemap_dir.mkdir(parents=True, exist_ok=True)
+        tile_cache = basemap_dir / "_tilecache"
+        wmts_ok = True  # 逐案場嘗試，失敗於該案場 05 清單標記
 
-        for lyr in (zones_lyr, photo2, emap):
+        # 都市計畫土地使用分區（補都市土地 使分/使類=None 缺口；Color1 官方色 data-defined）
+        urban_shp_path = REPO_ROOT / URBAN_SHP
+        urban_qml_path = str(styles_dir / URBAN_QML)
+        urban_lyr_zoning = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
+        urban_lyr_landtype = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
+        urban_ok = urban_lyr_zoning.isValid() and urban_lyr_landtype.isValid()
+        if urban_ok:
+            ensure_qix(urban_lyr_zoning, urban_shp_path)
+            for lyr in (urban_lyr_zoning, urban_lyr_landtype):
+                _, ok = lyr.loadNamedStyle(urban_qml_path)
+                if not ok:
+                    warnings.append(f"都市計畫 QML 套用失敗：{urban_qml_path}")
+            urban_lyr_landtype.setOpacity(URBAN_LANDTYPE_OPACITY)
+        else:
+            warnings.append(f"都市計畫圖層載入失敗：{urban_shp_path}（使用分區/使用地編定圖將無都市底色）")
+        color_to_names = load_urban_color_names(REPO_ROOT / URBAN_LEGEND_YAML)
+
+        for lyr in (zones_lyr, urban_lyr_zoning, urban_lyr_landtype):
             project.addMapLayer(lyr, False)
         shared_grp = project.layerTreeRoot().addGroup("共用圖層")
-        for lyr in (zones_lyr, photo2, emap):
+        for lyr in (zones_lyr, urban_lyr_zoning, urban_lyr_landtype):
             node = shared_grp.addLayer(lyr)
             node.setItemVisibilityChecked(False)
         shared_grp.setExpanded(False)
@@ -763,31 +858,85 @@ def main() -> None:
             loc = f"{c['county']}{c['town']}"
             common_note = (f"位置：{loc}\n涵蓋地號：{pt}\n"
                            f"出圖日期：{TODAY}\n地籍圖資：內政部（版本 111年2月）")
+
+            is_urban = bool(c.get("has_urban_rows")) and urban_ok
+            urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
+                                                        color_to_names, keep_alive)
+                                if is_urban else None)
+
+            zoning_layers = [l_red, l_gray, l_nz]
+            zoning_legend = [l_nz, l_red]
+            zoning_note = common_note + "\n（使分空值＝都市土地，詳都市計畫分區）"
+            if is_urban:
+                zoning_layers = [l_red, l_gray, l_nz, urban_lyr_zoning]
+                if urban_legend_lyr is not None:
+                    zoning_legend = [l_nz, urban_legend_lyr, l_red]
+                zoning_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
+
+            landtype_layers = [l_red, l_gray, l_nt]
+            landtype_legend = [l_nt, l_red]
+            landtype_note = common_note + "\n（使類空值＝都市土地，詳都市計畫分區）"
+            if is_urban:
+                landtype_layers = [l_red, l_gray, l_nt, urban_lyr_zoning]
+                if urban_legend_lyr is not None:
+                    landtype_legend = [l_nt, urban_legend_lyr, l_red]
+                landtype_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
+
+            # NLSC 底圖（逐案場圖磚拼接）：正射(PHOTO2)為底＋電子地圖(EMAP)半透明50%
+            ext = c["extent"]
+            ext_3826 = (ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum())
+            photo_rl = emap_rl = None
+            try:
+                p_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_PHOTO2.tif"),
+                                      layer="PHOTO2", cache_dir=str(tile_cache),
+                                      buffer_ratio=0.05)
+                e_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_EMAP.tif"),
+                                      layer="EMAP", cache_dir=str(tile_cache),
+                                      buffer_ratio=0.05)
+                if p_tif:
+                    photo_rl = QgsRasterLayer(p_tif, "正射影像(NLSC PHOTO2)")
+                if e_tif:
+                    emap_rl = QgsRasterLayer(e_tif, "通用電子地圖(NLSC EMAP)")
+                    emap_rl.setOpacity(0.5)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"{cid} 底圖下載失敗：{type(exc).__name__}: {exc}")
+            case_wmts_ok = photo_rl is not None and photo_rl.isValid()
+            overlay_layers = [l_red]
+            if emap_rl is not None and emap_rl.isValid():
+                overlay_layers.append(emap_rl)
+            if photo_rl is not None:
+                overlay_layers.append(photo_rl)
+            for rl in (photo_rl, emap_rl):
+                if rl is not None:
+                    project.addMapLayer(rl, False)
+                    keep_alive.append(rl)
+
             theme_defs = {
-                "使用分區": ([l_red, l_gray, l_nz], [l_nz, l_red], {"宗地-使用分區"},
-                             common_note + "\n（使分空值＝都市土地，使用分區另查）"),
-                "使用地編定": ([l_red, l_gray, l_nt], [l_nt, l_red], {"宗地-使用地編定"},
-                               common_note + "\n（使類空值＝都市土地，編定另查）"),
+                "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
+                "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
+                               None),
                 "國土功能分區": ([l_red, l_gray, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
-                                 common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）"),
-                "正射套疊": ([l_red, emap, photo2], [l_red], set(),
-                             common_note + "\n底圖：NLSC WMTS 正射影像(PHOTO2)\n＋通用電子地圖(EMAP) 半透明50%"),
+                                 common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）",
+                                 None),
+                "正射套疊": (overlay_layers, [l_red], set(),
+                             common_note + "\n底圖：NLSC 正射影像(PHOTO2)\n＋通用電子地圖(EMAP) 半透明50%",
+                             None),
             }
 
             for theme in THEMES:
-                layers, leg_layers, hide, note = theme_defs[theme]
+                layers, leg_layers, hide, note, overlay = theme_defs[theme]
                 fname = f"{cid}_{sanitize(c['name'])}_{theme}.png"
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-                if theme == "正射套疊" and not wmts_ok:
+                if theme == "正射套疊" and not case_wmts_ok:
                     records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
-                                    "失敗", "WMTS 圖層載入失敗"])
+                                    "失敗", "NLSC 底圖下載失敗"])
                     n_fail += 1
                     continue
                 try:
                     title = f"{c['name']}　{THEME_TITLES[theme]}"
                     layout = build_layout(project, f"{cid}_{theme}", title, layers,
                                           leg_layers, hide, c["scale"], c["extent"],
-                                          note, keep_alive)
+                                          note, keep_alive, map_overlay=overlay)
                     exporter = QgsLayoutExporter(layout)
                     st = QgsLayoutExporter.ImageExportSettings()
                     st.dpi = EXPORT_DPI

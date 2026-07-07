@@ -22,8 +22,8 @@
       <category symbol="17" value="墳墓用地" label="墳墓用地" render="true" type="string" />
       <category symbol="18" value="特定目的事業用地" label="特定目的事業用地" render="true" type="string" />
       <category symbol="19" value="暫未編定" label="暫未編定" render="true" type="string" />
-      <category symbol="20" value="都市土地（使用分區另查）" label="都市土地（使用分區另查）" render="true" type="string" />
-      <category symbol="21" value="" label="其他" render="true" type="string" />
+      <category symbol="20" value="都市土地（使用分區另查）" label="都市土地（詳都市計畫分區圖例）" render="false" type="string" />
+      <category symbol="21" value="" label="其他" render="false" type="string" />
     </categories>
     <symbols>
       <symbol clip_to_extent="1" type="fill" name="0" alpha="1" force_rhr="0">
@@ -645,8 +645,8 @@
       </symbol>
       <symbol type="fill" alpha="1" force_rhr="0" clip_to_extent="1" name="20">
         <layer class="SimpleFill" enabled="1" locked="0" pass="0">
-          <prop v="200,200,200,255" k="color" />
-          <prop v="solid" k="style" />
+          <prop v="255,255,255,255" k="color" />
+          <prop v="no" k="style" />
           <prop v="35,35,35,0" k="outline_color" />
           <prop v="solid" k="outline_style" />
           <prop v="0.2" k="outline_width" />
