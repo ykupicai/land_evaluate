@@ -536,7 +536,11 @@ def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
         if not color or color in seen:
             continue
         names = color_to_names.get(color)
-        label = "／".join(names) if names else (attr_str(f[i_zone]) if i_zone >= 0 else color)
+        if names:
+            # 圖例只列代表名（同色多分區取前2個＋等），完整分區名已標在各 polygon 上
+            label = "／".join(names[:2]) + ("　等" if len(names) > 2 else "")
+        else:
+            label = attr_str(f[i_zone]) if i_zone >= 0 else color
         seen[color] = label
     if not seen:
         return None
@@ -666,6 +670,10 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
     leg.model().setRootGroup(root)
     leg.setLegendFilterByMapEnabled(True)
     leg.setTitle("圖例")
+    try:
+        leg.setWrapString("／")   # 長標籤依「／」換行，避免超出邊框
+    except Exception:
+        pass
     for style, size, bold in ((QgsLegendStyle.Title, 11, True),
                               (QgsLegendStyle.Subgroup, 9, False),
                               (QgsLegendStyle.SymbolLabel, 9, False)):
@@ -681,7 +689,7 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
                 leg.setStyleFont(style, f)
             except Exception:
                 pass
-    leg.attemptSetSceneRect(QRectF(PANEL_X, 16, 62, 100))
+    leg.attemptSetSceneRect(QRectF(PANEL_X, 16, 84, 118))
     layout.addLayoutItem(leg)
 
     # 比例尺文字＋比例尺
@@ -711,7 +719,7 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
     n.setText(notes)
     _set_label_font(n, 8)
     n.setMode(QgsLayoutItemLabel.ModeFont) if hasattr(QgsLayoutItemLabel, "ModeFont") else None
-    n.attemptSetSceneRect(QRectF(PANEL_X, 160, 81, 47))
+    n.attemptSetSceneRect(QRectF(PANEL_X, 160, 84, 47))
     layout.addLayoutItem(n)
 
     project.layoutManager().addLayout(layout)
@@ -859,8 +867,7 @@ def main() -> None:
             grp.setExpanded(False)
 
             loc = f"{c['county']}{c['town']}"
-            common_note = (f"位置：{loc}\n涵蓋地號：{pt}\n"
-                           f"出圖日期：{TODAY}\n地籍圖資：內政部（版本 111年2月）")
+            common_note = f"位置：{loc}\n涵蓋地號：{pt}"
 
             is_urban = bool(c.get("has_urban_rows")) and urban_ok
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
@@ -928,9 +935,7 @@ def main() -> None:
                 "國土功能分區": ([l_red, l_gray, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
                                  common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）",
                                  None),
-                "正射套疊": (overlay_layers, [l_red], set(),
-                             common_note + "\n底圖：NLSC 正射影像(PHOTO2)\n＋通用電子地圖透明版(EMAP2) 疊加",
-                             None),
+                "正射套疊": (overlay_layers, [l_red], set(), common_note, None),
             }
 
             for theme in THEMES:
