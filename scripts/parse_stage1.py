@@ -34,6 +34,8 @@ from parse_helpers import (
     landno_display,
     normalize_county,
     parse_landno_verbose,
+    tai_norm as _tai_norm,
+    town_matches,
 )
 
 CASE_NAME = "20260707-清潔隊部資訊"
@@ -53,15 +55,21 @@ RANGE_EXPAND_LIMIT = 60
 # ---------------------------------------------------------------------------
 OVERRIDES: dict[int, dict] = {
     9: {
-        "note": "「(地先)」為地籍慣用註記（該地號臨接之未登錄地），非正式地號",
+        "pre": lambda s: s.replace("、1053(地先)", ""),
+        "note": "「1053(地先)」經使用者核示以1053為準，已併入1053(部分)該筆（2026-07-07核示）",
+        "confirmed": True,
     },
     10: {
         "pre": lambda s: s.replace(".", "、"),
         "note": "原文以「.」分隔（13-1.80.80-2），已視為頓號分隔",
     },
+    21: {
+        "note": "「坑子口段後壁厝小段」地籍查無，使用者核示：走新舊地號查詢（2026-07-07核示）",
+        "confirmed": True,
+    },
     27: {
         "parcel_notes": {
-            "77": ("國土功能分區欄提及「地號79」，與地號欄之77不一致，請確認是77或79", True),
+            "77": ("原表國土功能分區欄提及「地號79」；使用者核示以77為準（2026-07-07核示）", False),
         },
     },
     48: {
@@ -69,7 +77,8 @@ OVERRIDES: dict[int, dict] = {
         "note": "原文「彰化市安溪518…」缺「段」字，依彰化市地籍判定為安溪段",
     },
     55: {
-        "note": "「2-1~7-1」之展開方式（2-1、3-1…7-1）為推測，請確認",
+        "note": "「2-1~7-1」展開為2-1、3-1…7-1共6筆，使用者已核示無誤（2026-07-07核示）",
+        "confirmed": True,
     },
     57: {
         "pre": lambda s: s.replace("186-193", "186~193"),
@@ -80,17 +89,20 @@ OVERRIDES: dict[int, dict] = {
         "pre": lambda s: s.replace("番路村番路段", "番路段"),
         "note": "原文段名前綴「番路村」為村名（番路鄉轄下），非鄉鎮名，已移除",
         "parcel_notes": {
-            "63-116": ("「63-116」可能為63-116地號、也可能為63~116範圍，請確認", True),
+            "63-116": ("使用者核示：63-116為單一地號（2026-07-07核示）", False),
         },
     },
     82: {
+        "pre": lambda s: s.replace("頂加芝來段", "頂茄芝來段"),
+        "note": "原表「頂加芝來段」為誤字，依地籍更正為「頂茄芝來段」",
         "parcel_notes": {
-            "1-3": ("「1-3」可能為1-3地號、也可能為1~3範圍，請確認", True),
+            "1-3": ("使用者核示：1-3為單一地號（2026-07-07核示）", False),
         },
     },
     86: {
-        "note": "段藉索引查無高樹鄉「東振段」，僅有「東振新」段；原表國土功能分區欄亦註明系統查無，請確認段名",
-        "low": True,
+        "note": "使用者核示：東振段無誤，比對不到時走新舊地號查詢（2026-07-07核示）；"
+        "地籍現行索引僅有高樹鄉「東振新」段",
+        "confirmed": True,
     },
     90: {
         "pre": lambda s: s.replace("-資收", ""),
@@ -290,10 +302,6 @@ def extract_site_rows(pdf_path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _tai_norm(s):
-    return s.replace("台", "臺") if isinstance(s, str) else s
-
-
 def clean_town(town: str, county: str) -> str:
     """鄉鎮欄清理：異體字「巿」→「市」、去除縣市名前綴（如 桃園市觀音區 → 觀音區）。"""
     t = _clean_cell(town).replace("巿", "市")
@@ -315,34 +323,6 @@ def load_current_section_index() -> pd.DataFrame:
     for col in ("縣市", "鄉鎮", "段", "小段"):
         df[f"{col}_t"] = df[col].map(_tai_norm)
     return df
-
-
-def _town_base(t: str) -> str:
-    return t[:-1] if t and t[-1] in "鄉鎮市區" else t
-
-
-def _is_subsequence(a: str, b: str) -> bool:
-    it = iter(b)
-    return all(ch in it for ch in a)
-
-
-def town_matches(index_town: str, input_town: str) -> bool:
-    """鄉鎮名寬鬆比對。
-
-    容忍兩類已知差異（比對階段以段碼為準，不受影響）：
-    - 行政區改制字尾不同：員林鎮(地籍舊制) vs 員林市
-    - 地籍 Big5 轉檔缺字：蘆區(缺「竹」) vs 蘆竹區
-    """
-    if not isinstance(index_town, str) or not isinstance(input_town, str):
-        return False
-    a, b = _tai_norm(index_town), _tai_norm(input_town)
-    if a == b:
-        return True
-    ab, bb = _town_base(a), _town_base(b)
-    if ab == bb:
-        return True
-    # 缺字容忍：索引名為輸入名的子序列且僅少一字
-    return len(ab) >= 1 and len(bb) - len(ab) == 1 and _is_subsequence(ab, bb)
 
 
 def _suggest_sections(sec_df: pd.DataFrame, county_n: str, town_n: str, sec_name: str) -> str:
@@ -489,6 +469,10 @@ def main() -> None:
                 notes.append(sec_note)
             if sec_low:
                 conf_low = True
+
+            # 使用者已核示的案場：解析疑義視為已排除（解析失敗仍標低）
+            if ov.get("confirmed") and p["mother"] is not None:
+                conf_low = False
 
             if p["mother"] is None:
                 display = ""

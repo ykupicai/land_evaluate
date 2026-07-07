@@ -285,7 +285,45 @@ def resolve_section(
 
 
 # ---------------------------------------------------------------------------
-# 6. 宗地母/宗地子 -> 顯示字串
+# 6. 鄉鎮名寬鬆比對（供段名驗證/比對用）
+# ---------------------------------------------------------------------------
+
+
+def tai_norm(s):
+    """字串中的「台」正規化為「臺」（比對用；不動原始資料）。"""
+    return s.replace("台", "臺") if isinstance(s, str) else s
+
+
+def _town_base(t: str) -> str:
+    return t[:-1] if t and t[-1] in "鄉鎮市區" else t
+
+
+def _is_subsequence(a: str, b: str) -> bool:
+    it = iter(b)
+    return all(ch in it for ch in a)
+
+
+def town_matches(index_town, input_town) -> bool:
+    """鄉鎮名寬鬆比對（地籍 shp 的鄉鎮欄 vs 輸入文件的鄉鎮名）。
+
+    容忍兩類已知差異（實際比對以段碼為準，不受影響）：
+    - 行政區改制字尾不同：員林鎮（地籍舊制）vs 員林市
+    - 地籍 Big5 轉檔缺字：蘆區（缺「竹」）vs 蘆竹區
+    """
+    if not isinstance(index_town, str) or not isinstance(input_town, str):
+        return False
+    a, b = tai_norm(index_town), tai_norm(input_town)
+    if a == b:
+        return True
+    ab, bb = _town_base(a), _town_base(b)
+    if ab == bb:
+        return True
+    # 缺字容忍：索引名為輸入名的子序列且僅少一字
+    return len(ab) >= 1 and len(bb) - len(ab) == 1 and _is_subsequence(ab, bb)
+
+
+# ---------------------------------------------------------------------------
+# 7. 宗地母/宗地子 -> 顯示字串
 # ---------------------------------------------------------------------------
 
 
