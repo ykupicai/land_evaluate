@@ -10,13 +10,18 @@
 1. 讀 02_比對結果.xlsx（僅取「比對狀態=成功」列；--exclude 案場整案跳過）
 2. 依「圖資FID」直接從縣市地籍 shp 取宗地幾何（免重新比對），寫入 outputs/<案子>/圖層.gpkg
    - 基地（含 案場ID/地號/使分/使類；都市土地以「都市土地（使用分區另查）」表示）
-   - 周邊地籍（各案場出圖範圍內的鄰近宗地，僅外框線）
+   - 周邊地籍（出圖範圍再外擴內的**所有**宗地，含 地號/使分/使類/是否基地——
+     使用分區圖與使用地編定圖靠它讓周邊宗地也上底色）
    - 功能分區（各縣市功能分區 shp 於出圖範圍之要素，分區名以 zone_utils.normalize_zone 標準化；
      載入清單/CRS 修正邏輯與 scripts/match_parcels.py 的 load_county_zones() 一致）
 3. 每案場 4 張主題圖（A4 橫式、EPSG:3826）：
-   1 使用分區、2 使用地編定、3 國土功能分區（配色依 國土功能分區/圖例.xml）、
+   1 使用分區、2 使用地編定（此二張套 styles/使用分區.qml、使用地編定.qml——由
+     scripts/build_legend_styles.py 從使用者 QGIS 樣式庫 symbology-style.db 產出，
+     含 LinePatternFill 紋理；周邊宗地與基地都上色、基地另疊粗紅框）、
+   3 國土功能分區（配色依 國土功能分區/圖例.xml）、
    4 NLSC WMTS 正射影像 PHOTO2 ＋ EMAP 半透明 50% 套疊
-4. 比例尺：案場 bbox 外擴 20% 後就近取整（1/500、1/1000、1/2500、1/5000，超出取實際值進位至千）
+4. 比例尺：案場 bbox 外擴 25%（BBOX_EXPAND 可調）後就近取整
+   （1/500、1/1000、1/2500、1/5000，超出取實際值進位至千）；4 張圖同一範圍
 5. 輸出：圖檔/<案場ID>_<案場名>_<主題>.png、<案子>.qgz（圖層依案場分組＋每張圖一個 Layout）、
    05_出圖清單.xlsx；單張失敗記入清單續跑不中斷。
 """
@@ -25,7 +30,9 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 import sys
+import time
 import traceback
 from collections import defaultdict
 from datetime import datetime
@@ -59,6 +66,8 @@ from qgis.core import (
     QgsLayoutSize,
     QgsLegendRenderer,
     QgsLegendStyle,
+    QgsMapRendererSequentialJob,
+    QgsMapSettings,
     QgsPalLayerSettings,
     QgsPrintLayout,
     QgsProject,
@@ -73,7 +82,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
 )
-from qgis.PyQt.QtCore import QRectF
+from qgis.PyQt.QtCore import QRectF, QSize
 from qgis.PyQt.QtGui import QColor, QFont
 
 # ---------------------------------------------------------------------------
@@ -88,7 +97,8 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 MAP_X, MAP_Y, MAP_W, MAP_H = 6.0, 14.0, 200.0, 190.0  # mm
 PANEL_X = 210.0
 SCALE_LEVELS = [500, 1000, 2500, 5000]
-BBOX_EXPAND = 1.2   # bbox 外擴 20%
+BBOX_EXPAND = 1.25  # 基地 bbox 外擴 25%（可調）
+NEIGH_EXPAND = 0.08  # 周邊地籍再外擴比例（相對出圖範圍寬度）
 EXPORT_DPI = 300
 FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 
@@ -135,51 +145,29 @@ ZONE_COLORS = {
     "海洋資源地區第三類": (218, 252, 253),
 }
 
-# 非都市土地使用分區（使分）配色
-USE_ZONING_COLORS = {
-    "特定農業區": (255, 224, 102),
-    "一般農業區": (255, 255, 153),
-    "鄉村區": (255, 190, 120),
-    "工業區": (200, 140, 200),
-    "森林區": (56, 140, 60),
-    "山坡地保育區": (170, 215, 130),
-    "風景區": (255, 160, 190),
-    "國家公園區": (130, 200, 180),
-    "河川區": (150, 200, 255),
-    "海域區": (100, 180, 255),
-    "特定專用區": (180, 180, 220),
-    URBAN_LABEL: (190, 190, 190),
-}
-
-# 使用地類別（使類）配色
-USE_TYPE_COLORS = {
-    "甲種建築用地": (240, 130, 100),
-    "乙種建築用地": (250, 160, 120),
-    "丙種建築用地": (255, 200, 120),
-    "丁種建築用地": (200, 120, 200),
-    "農牧用地": (255, 255, 150),
-    "林業用地": (100, 175, 90),
-    "養殖用地": (120, 200, 255),
-    "鹽業用地": (230, 230, 255),
-    "礦業用地": (170, 140, 110),
-    "窯業用地": (200, 150, 120),
-    "交通用地": (255, 85, 85),
-    "水利用地": (85, 140, 255),
-    "遊憩用地": (255, 180, 220),
-    "古蹟保存用地": (180, 120, 60),
-    "生態保護用地": (0, 160, 130),
-    "國土保安用地": (140, 190, 140),
-    "墳墓用地": (150, 150, 180),
-    "殯葬用地": (150, 150, 180),
-    "特定目的事業用地": (190, 160, 220),
-    URBAN_LABEL: (190, 190, 190),
-}
-
 OUT05_COLUMNS = ["案場ID", "案場名稱", "主題", "檔名", "比例尺", "涵蓋地號", "產出時間", "狀態", "備註"]
 
 
 def sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]+', "-", str(name)).strip("-")
+
+
+def attr_str(v) -> str:
+    """shp 屬性 → 乾淨字串（NULL/None → 空字串）。"""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return "" if s in ("NULL", "None", "nan") else s
+
+
+def landno_text(mother, child) -> str:
+    """宗地母/宗地子（4 位字串）還原地號顯示字串：0331/0001 → 331-1、0331/0000 → 331。"""
+    try:
+        m = int(attr_str(mother) or "0")
+        c = int(attr_str(child) or "0")
+    except ValueError:
+        return attr_str(mother)
+    return f"{m}-{c}" if c else f"{m}"
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +290,8 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
     warnings: list[str] = []
     base = mem_layer("基地", "field=案場ID:string&field=案場名稱:string&field=地號:string"
                             "&field=使分:string&field=使類:string")
-    neigh = mem_layer("周邊地籍", "field=案場ID:string")
+    neigh = mem_layer("周邊地籍", "field=案場ID:string&field=地號:string"
+                                 "&field=使分:string&field=使類:string&field=是否基地:string")
     zones = mem_layer("功能分區", "field=縣市:string&field=zone:string")
 
     by_county: dict[str, list[dict]] = defaultdict(list)
@@ -326,6 +315,7 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
         ensure_qix(lyr, shp)
         fld = lyr.fields()
         i_mother, i_child = fld.indexOf("宗地母"), fld.indexOf("宗地子")
+        i_zone, i_type = fld.indexOf("使分"), fld.indexOf("使類")
         print(f"{county}：{len(clist)} 案場", flush=True)
 
         for c in clist:
@@ -351,12 +341,23 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
                 warnings.append(f"{c['id']} {c['error']}")
                 continue
             c["scale"], c["extent"] = compute_scale_extent(bbox)
-            # 周邊地籍（出圖範圍外擴 5%）
-            rect = c["extent"].buffered(c["extent"].width() * 0.05)
-            req = QgsFeatureRequest().setFilterRect(rect).setSubsetOfAttributes([])
+            # 周邊地籍：出圖範圍再外擴 NEIGH_EXPAND 內的所有宗地，帶 地號/使分/使類；
+            # 基地宗地也在內（是否基地=Y，供標註規則排除、避免與基地紅框層重複標地號）
+            case_fids = set(fids)
+            rect = c["extent"].buffered(c["extent"].width() * NEIGH_EXPAND)
+            attrs_idx = [i for i in (i_mother, i_child, i_zone, i_type) if i >= 0]
+            req = QgsFeatureRequest().setFilterRect(rect).setSubsetOfAttributes(attrs_idx)
             n = 0
             for f in lyr.getFeatures(req):
-                add_feat(neigh, f.geometry(), [c["id"]])
+                zone = attr_str(f[i_zone]) if i_zone >= 0 else ""
+                typ = attr_str(f[i_type]) if i_type >= 0 else ""
+                add_feat(neigh, f.geometry(), [
+                    c["id"],
+                    landno_text(f[i_mother], f[i_child]) if i_mother >= 0 else "",
+                    zone or URBAN_LABEL,
+                    typ or URBAN_LABEL,
+                    "Y" if f.id() in case_fids else "",
+                ])
                 n += 1
             print(f"  {c['id']} {c['name']}：{len(fids)} 宗地、1/{c['scale']}、周邊 {n} 筆", flush=True)
 
@@ -458,17 +459,6 @@ def outline_symbol(color="255,0,0,255", width="0.9") -> QgsFillSymbol:
     })
 
 
-def cat_renderer(field: str, colors: dict, order: list[str] | None = None) -> QgsCategorizedSymbolRenderer:
-    cats = []
-    for val in (order or colors.keys()):
-        cats.append(QgsRendererCategory(val, fill_symbol(colors[val]), val))
-    other = QgsFillSymbol.createSimple({
-        "color": "225,225,225,255", "style": "solid",
-        "outline_color": "35,35,35,255", "outline_width": "0.2"})
-    cats.append(QgsRendererCategory(None, other, "其他"))
-    return QgsCategorizedSymbolRenderer(field, cats)
-
-
 def zone_renderer() -> QgsCategorizedSymbolRenderer:
     cats = []
     for val, rgb in ZONE_COLORS.items():
@@ -480,13 +470,15 @@ def zone_renderer() -> QgsCategorizedSymbolRenderer:
     return QgsCategorizedSymbolRenderer("zone", cats)
 
 
-def label_settings(field: str = "地號", size: float = 9.0) -> QgsVectorLayerSimpleLabeling:
+def label_settings(field: str = "地號", size: float = 9.0, is_expression: bool = False,
+                   color: tuple[int, int, int] = (0, 0, 0)) -> QgsVectorLayerSimpleLabeling:
     pal = QgsPalLayerSettings()
     pal.fieldName = field
+    pal.isExpression = is_expression
     fmt = QgsTextFormat()
     fmt.setFont(QFont(FONT_NAME))
     fmt.setSize(size)
-    fmt.setColor(QColor(0, 0, 0))
+    fmt.setColor(QColor(*color))
     buf = QgsTextBufferSettings()
     buf.setEnabled(True)
     buf.setSize(1.0)
@@ -496,12 +488,16 @@ def label_settings(field: str = "地號", size: float = 9.0) -> QgsVectorLayerSi
     return QgsVectorLayerSimpleLabeling(pal)
 
 
+# 周邊宗地標註：基地宗地交給紅框層標（避免重複）；PAL 自動避讓，擁擠處自動略label
+NEIGH_LABEL_EXPR = "CASE WHEN \"是否基地\" = 'Y' THEN NULL ELSE \"地號\" END"
+
+
 def save_styles(styles_dir: Path) -> None:
-    """輸出 QML 樣式檔供 QGIS 手動微調時套用。"""
+    """輸出 QML 樣式檔供 QGIS 手動微調時套用。
+    注意：使用分區.qml／使用地編定.qml 由 scripts/build_legend_styles.py 從使用者
+    樣式庫產出，這裡**不可**覆寫。"""
     styles_dir.mkdir(parents=True, exist_ok=True)
     specs = [
-        ("使用分區.qml", "field=使分:string", cat_renderer("使分", USE_ZONING_COLORS)),
-        ("使用地編定.qml", "field=使類:string", cat_renderer("使類", USE_TYPE_COLORS)),
         ("國土功能分區.qml", "field=zone:string", zone_renderer()),
         ("基地紅框.qml", "field=地號:string", None),
         ("周邊地籍.qml", "field=案場ID:string", None),
@@ -517,7 +513,7 @@ def save_styles(styles_dir: Path) -> None:
         else:
             tmp.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
         tmp.saveNamedStyle(str(styles_dir / fname))
-    print(f"樣式檔已輸出至 {styles_dir}", flush=True)
+    print(f"樣式檔已輸出至 {styles_dir}（使用分區/使用地編定.qml 由 build_legend_styles.py 管理）", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -710,9 +706,13 @@ def main() -> None:
             node.setItemVisibilityChecked(False)
         shared_grp.setExpanded(False)
 
-        renderer_zoning = cat_renderer("使分", USE_ZONING_COLORS)
-        renderer_type = cat_renderer("使類", USE_TYPE_COLORS)
+        qml_zoning = str(styles_dir / "使用分區.qml")
+        qml_type = str(styles_dir / "使用地編定.qml")
+        for p in (qml_zoning, qml_type):
+            if not Path(p).exists():
+                raise RuntimeError(f"缺樣式檔 {p}，請先跑 python -X utf8 scripts/build_legend_styles.py")
 
+        qml_warned = False
         n_done = n_fail = 0
         for cid in sorted(cases):
             c = cases[cid]
@@ -729,26 +729,33 @@ def main() -> None:
             neigh_uri = f"{gpkg}|layername=周邊地籍"
             subset = f"\"案場ID\" = '{cid}'"
 
-            l_zoning = QgsVectorLayer(base_uri, "基地-使用分區", "ogr")
-            l_zoning.setSubsetString(subset)
-            l_zoning.setRenderer(renderer_zoning.clone())
-            l_type = QgsVectorLayer(base_uri, "基地-使用地編定", "ogr")
-            l_type.setSubsetString(subset)
-            l_type.setRenderer(renderer_type.clone())
+            # 基地紅框（4 張圖共用最上層，標基地地號）
             l_red = QgsVectorLayer(base_uri, "基地（紅框標示）", "ogr")
             l_red.setSubsetString(subset)
             l_red.renderer().setSymbol(outline_symbol())
-            l_neigh = QgsVectorLayer(neigh_uri, "周邊地籍", "ogr")
-            l_neigh.setSubsetString(subset)
-            l_neigh.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
-            for l in (l_zoning, l_type, l_red):
-                l.setLabeling(label_settings())
+            l_red.setLabeling(label_settings())
+            l_red.setLabelsEnabled(True)
+            # 周邊+基地宗地上色（使用分區／使用地編定，各套使用者樣式庫 QML）
+            l_nz = QgsVectorLayer(neigh_uri, "宗地-使用分區", "ogr")
+            l_nt = QgsVectorLayer(neigh_uri, "宗地-使用地編定", "ogr")
+            for l, qml in ((l_nz, qml_zoning), (l_nt, qml_type)):
+                l.setSubsetString(subset)
+                _, ok = l.loadNamedStyle(qml)
+                if not ok and not qml_warned:
+                    warnings.append(f"QML 套用失敗：{qml}")
+                    qml_warned = True
+                l.setLabeling(label_settings(NEIGH_LABEL_EXPR, size=7.0,
+                                             is_expression=True, color=(70, 70, 70)))
                 l.setLabelsEnabled(True)
+            # 地籍界線（使用者符號多無外框，疊一層細灰界線；主題3/4 亦作周邊淡灰線）
+            l_gray = QgsVectorLayer(neigh_uri, "周邊地籍界線", "ogr")
+            l_gray.setSubsetString(subset)
+            l_gray.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
 
-            for l in (l_zoning, l_type, l_red, l_neigh):
+            for l in (l_red, l_nz, l_nt, l_gray):
                 project.addMapLayer(l, False)
             grp = project.layerTreeRoot().addGroup(f"{cid} {c['name']}")
-            for l in (l_red, l_zoning, l_type, l_neigh):
+            for l in (l_red, l_gray, l_nz, l_nt):
                 node = grp.addLayer(l)
                 node.setItemVisibilityChecked(False)
             grp.setExpanded(False)
@@ -757,11 +764,11 @@ def main() -> None:
             common_note = (f"位置：{loc}\n涵蓋地號：{pt}\n"
                            f"出圖日期：{TODAY}\n地籍圖資：內政部（版本 111年2月）")
             theme_defs = {
-                "使用分區": ([l_zoning, l_neigh], [l_zoning], {"基地-使用分區"},
+                "使用分區": ([l_red, l_gray, l_nz], [l_nz, l_red], {"宗地-使用分區"},
                              common_note + "\n（使分空值＝都市土地，使用分區另查）"),
-                "使用地編定": ([l_type, l_neigh], [l_type], {"基地-使用地編定"},
+                "使用地編定": ([l_red, l_gray, l_nt], [l_nt, l_red], {"宗地-使用地編定"},
                                common_note + "\n（使類空值＝都市土地，編定另查）"),
-                "國土功能分區": ([l_red, l_neigh, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
+                "國土功能分區": ([l_red, l_gray, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
                                  common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）"),
                 "正射套疊": ([l_red, emap, photo2], [l_red], set(),
                              common_note + "\n底圖：NLSC WMTS 正射影像(PHOTO2)\n＋通用電子地圖(EMAP) 半透明50%"),
@@ -784,14 +791,26 @@ def main() -> None:
                     exporter = QgsLayoutExporter(layout)
                     st = QgsLayoutExporter.ImageExportSettings()
                     st.dpi = EXPORT_DPI
-                    code = exporter.exportToImage(str(img_dir / fname), st)
+                    # WMTS 偶發逾時 → 正射套疊圖最多重試 3 次
+                    attempts = 3 if theme == "正射套疊" else 1
+                    code = last_err = None
+                    for att in range(attempts):
+                        try:
+                            code = exporter.exportToImage(str(img_dir / fname), st)
+                        except Exception as exc:  # noqa: BLE001
+                            code, last_err = None, f"{type(exc).__name__}: {exc}"
+                        if code == QgsLayoutExporter.Success:
+                            break
+                        if att + 1 < attempts:
+                            print(f"  [{cid}] {theme} 第{att + 1}次輸出失敗，重試…", flush=True)
                     if code == QgsLayoutExporter.Success:
                         records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
                                         pt, ts, "成功", ""])
                         n_done += 1
                     else:
                         records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
-                                        pt, ts, "失敗", f"exportToImage 回傳 {code}"])
+                                        pt, ts, "失敗",
+                                        last_err or f"exportToImage 回傳 {code}"])
                         n_fail += 1
                 except Exception as exc:  # noqa: BLE001 — 單張失敗續跑
                     records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
