@@ -10,11 +10,18 @@
 每個案場出 4 張 A4 橫式圖（使用分區、使用地編定、國土功能分區、正射影像+半透明電子地圖），
 另保留 QGIS 專案檔（.qgz）供手動微調。
 
-## 目前進度（2026-07-07）
+## 目前進度（2026-07-07 第2次更新）
 
 - [x] 需求釐清完成、設計文件已寫好並經使用者核可（細節全在設計文件，**必讀**）
-- [ ] 使用者審閱 spec → 用 `writing-plans` skill 寫實作計畫
-- [ ] 實作（尚未開始，repo 還沒有任何程式碼）
+- [x] `config/county_registry.yaml`（縣市圖資註冊表，`scripts/build_registry.py` 產出）
+- [x] `scripts/parse_helpers.py` ＋ 58 個單元測試（`python -X utf8 -m pytest tests/ -q`）
+- [x] `config/section_index.csv`（現行段小段索引，`scripts/build_section_index.py` 產出，見下方坑）
+- [x] 階段1：`scripts/parse_stage1.py` 解析清潔隊樣本 → `outputs/20260707-清潔隊部資訊/01_中繼檔.xlsx`
+      （105 案場 / 327 筆地號，12 筆低信心黃底標示）
+- [ ] ✋ **使用者核對 01_中繼檔.xlsx**（尤其黃底列：009/021/027/055/062/082/086）
+- [ ] 階段2：`scripts/match_parcels.py`（比對地籍＋功能分區空間交集 → 02/03 報表）
+- [ ] 階段2b：`scripts/query_landno.py`（新舊地號自動查詢 → 04 對照清單）
+- [ ] 階段3：`scripts/make_maps.py`（PyQGIS 出圖，先出 1 個案場驗證版面）
 
 ## 關鍵決策速記（詳見設計文件 §2）
 
@@ -36,6 +43,13 @@ docs/superpowers/specs/ # 設計文件
 
 ## 踩過的坑 / 重要事實（不要重新探勘）
 
+- **段藉.shp 是舊制段名索引，不能拿來驗證/解析現行段名**：缺重測後新段名
+  （例：深坑區賴仲段=段碼0869 在地籍 shp 有、段藉.shp 查無，段藉只有舊名
+  「土庫段賴仲坑小段」）。權威段名來源＝各縣市地籍 shp 屬性 →
+  已彙整為 `config/section_index.csv`（14,331 筆；圖資更新後重跑
+  `scripts/build_section_index.py`）。
+- 地籍 shp 的 `鄉鎮` 欄有舊制行政區名（員林**鎮**）與 Big5 轉檔缺字
+  （蘆竹區→「蘆區」），比對鄉鎮名要寬鬆處理（見 parse_stage1.town_matches）。
 - 地籍 shp：EPSG:3826，各縣市欄位一致；`宗地母`/`宗地子` 是 4 位數字字串
   （331-1 → `0331`/`0001`，無子號 `0000`）；使用分區欄叫 `使分`、使用地類別欄叫 `使類`，
   都市土地此二欄為 None；版本 `Ver`=111年2月（所以有異動時間差）。
@@ -60,7 +74,9 @@ docs/superpowers/specs/ # 設計文件
 
 ## 下一步（接手就做這個）
 
-1. 請使用者審閱設計文件，有修改就改。
-2. 核可後 invoke `writing-plans` skill 產實作計畫。
-3. 實作順序建議：county_registry 掃描建檔 → parse_helpers＋單測 → 階段1解析本次樣本
-   → match_parcels → make_maps（先出 1 個案場驗證版面）→ query_landno → 全案跑通驗收。
+1. ✋ 等使用者核對 `outputs/20260707-清潔隊部資訊/01_中繼檔.xlsx`（黃底=低信心，
+   備註欄寫了原因與建議；已知原表誤字：頂加芝來→頂**茄**芝來、東振→東振**新**）。
+2. 使用者核可（或改完中繼檔）後：寫 `scripts/match_parcels.py`（階段2）。
+   段名→段碼用 `config/section_index.csv`；鄉鎮寬鬆比對邏輯可從 parse_stage1
+   抽到 parse_helpers 共用。
+3. 之後：make_maps（先出 1 個案場驗證版面）→ query_landno → 全案跑通驗收。
