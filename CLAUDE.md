@@ -75,6 +75,13 @@ docs/superpowers/specs/ # 設計文件
   （QGIS 3.40.12 LTR；要用 PowerShell 呼叫，Git Bash 會因路徑空白失敗；
   另有 qgis_process-qgis-ltr.bat。機器上還裝了 3.6~3.24 多版，一律用 3.40.12）。
 - NLSC WMTS：https://wmts.nlsc.gov.tw/wmts，正射影像圖層 `PHOTO2`、通用電子地圖 `EMAP`。
+  **不要用 QGIS WMS/WMTS provider（會卡住/逾時）**；改用 `scripts/nlsc_wmts.py`
+  直接抓 GoogleMapsCompatible 圖磚拼 GeoTIFF（沿用先前 LANDUSE 專案 work/build_mosaic.py，
+  URL 模板 `.../wmts/{layer}/default/GoogleMapsCompatible/{z}/{row}/{col}`，快、穩）。
+- **知識庫（先前專案經驗，NAS）**：`\\192.168.1.134\Public-TN\8. AI協作\知識庫\衍古\01_AI協作共用知識`
+  （含 WMTS 圖磚拼接、QGIS 內建 Python/GDAL 工作流、LANDUSE 專案等，遇 GIS/WMTS 問題先查）。
+- **都市計畫圖資**：`都市計畫/全台都市計畫土地使用分區.shp`（201k筆），`Color1` 欄＝官方色，
+  用 `styles/都市計畫.qml`（data-defined）上色；官方圖例對照 `config/urban_plan_legend.yaml`。
 - 地段代碼線上查詢備援：https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx#gobox02
 
 ## 使用者的操作習慣
