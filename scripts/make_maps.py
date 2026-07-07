@@ -540,7 +540,7 @@ def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
         seen[color] = label
     if not seen:
         return None
-    lyr = QgsVectorLayer(f"MultiPolygon?crs={CRS_3826}&field=cat:string", URBAN_LAYER_NAME, "memory")
+    lyr = QgsVectorLayer(f"Polygon?crs={CRS_3826}&field=cat:string", URBAN_LAYER_NAME, "memory")
     cx, cy = extent.center().x(), extent.center().y()
     half = max(extent.width(), extent.height()) * 0.001
     cats = []
@@ -863,13 +863,19 @@ def main() -> None:
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
                                                         color_to_names, keep_alive)
                                 if is_urban else None)
+            if urban_legend_lyr is not None:
+                # 必須註冊進專案，圖例面板才能解析並顯示都市計畫分區節點
+                project.addMapLayer(urban_legend_lyr, False)
 
             zoning_layers = [l_red, l_gray, l_nz]
             zoning_legend = [l_nz, l_red]
             zoning_note = common_note + "\n（使分空值＝都市土地，詳都市計畫分區）"
             if is_urban:
+                # urban_legend_lyr 置於地圖最底層：被 urban_lyr_zoning 全覆蓋而不可見，
+                # 但納入地圖圖層清單，setLegendFilterByMapEnabled 才不會把它濾掉。
                 zoning_layers = [l_red, l_gray, l_nz, urban_lyr_zoning]
                 if urban_legend_lyr is not None:
+                    zoning_layers.append(urban_legend_lyr)
                     zoning_legend = [l_nz, urban_legend_lyr, l_red]
                 zoning_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
 
@@ -879,6 +885,7 @@ def main() -> None:
             if is_urban:
                 landtype_layers = [l_red, l_gray, l_nt, urban_lyr_zoning]
                 if urban_legend_lyr is not None:
+                    landtype_layers.append(urban_legend_lyr)
                     landtype_legend = [l_nt, urban_legend_lyr, l_red]
                 landtype_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
 
