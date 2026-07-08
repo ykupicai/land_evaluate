@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import re
 import sqlite3
@@ -106,6 +107,7 @@ FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 
 WMTS_URL = "https://wmts.nlsc.gov.tw/wmts"
 URBAN_LABEL = "都市土地（使用分區另查）"
+WRITE_QGZ = True  # 是否輸出 .qgz（可用 --no-qgz 關閉；大批次崩潰時先關）
 
 # 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
 URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
@@ -233,6 +235,29 @@ def parcels_text(case: dict) -> str:
             sec += row["小段"] + "小段"
         groups.setdefault(sec, []).append(row["地號"])
     return "；".join(f"{sec} {('、'.join(nums))}" for sec, nums in groups.items())
+
+
+def wrap_cjk(s: str, width: int = 22) -> str:
+    """中文長字串（以 、；空白 斷點）強制換行，避免版面標籤超出邊框被裁切。"""
+    out_lines, cur = [], ""
+    token = ""
+    for ch in s:
+        token += ch
+        if ch in "、； ":
+            if len(cur) + len(token) > width and cur:
+                out_lines.append(cur)
+                cur = token
+            else:
+                cur += token
+            token = ""
+    cur += token
+    if len(cur) > width and out_lines:
+        # 最後殘段仍過長就再拆
+        while len(cur) > width:
+            out_lines.append(cur[:width])
+            cur = cur[width:]
+    out_lines.append(cur)
+    return "\n".join(x for x in out_lines if x)
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +757,7 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
 
 
 def main() -> None:
+    global WRITE_QGZ
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
     only: set[str] | None = None
@@ -741,6 +767,8 @@ def main() -> None:
             only = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
         elif a.startswith("--exclude="):
             exclude = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
+        elif a == "--no-qgz":
+            WRITE_QGZ = False
         elif not a.startswith("--"):
             case_name = a
 
@@ -750,6 +778,7 @@ def main() -> None:
     gpkg = out_dir / "圖層.gpkg"
     qgz = out_dir / f"{case_name}.qgz"
     out05 = out_dir / "05_出圖清單.xlsx"
+    out05_csv = out_dir / "05_出圖清單.csv"
     styles_dir = REPO_ROOT / "styles"
 
     with (REPO_ROOT / "config" / "county_registry.yaml").open(encoding="utf-8") as f:
@@ -867,7 +896,7 @@ def main() -> None:
             grp.setExpanded(False)
 
             loc = f"{c['county']}{c['town']}"
-            common_note = f"位置：{loc}\n涵蓋地號：{pt}"
+            common_note = f"位置：{loc}\n涵蓋地號：\n{wrap_cjk(pt)}"
 
             is_urban = bool(c.get("has_urban_rows")) and urban_ok
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
@@ -982,36 +1011,53 @@ def main() -> None:
                     n_fail += 1
                     traceback.print_exc()
             print(f"[{cid}] {c['name']} 完成（累計 成功{n_done}/失敗{n_fail}）", flush=True)
+            # 逐案場即時寫出 05 CSV（不依賴脆弱的迴圈後段；重出時可續用）
+            try:
+                with open(out05_csv, "w", newline="", encoding="utf-8-sig") as fcsv:
+                    w = csv.writer(fcsv)
+                    w.writerow(OUT05_COLUMNS)
+                    w.writerows(records)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
 
-        # 05 清單
-        wb = Workbook()
-        ws = wb.active
-        ws.append(OUT05_COLUMNS)
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-        for r in records:
-            ws.append(r)
-        for i, w in enumerate([7, 18, 12, 40, 9, 50, 17, 8, 40], start=1):
-            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-        wrap = Alignment(wrap_text=True, vertical="top")
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
-                cell.alignment = wrap
-        ws.freeze_panes = "A2"
-        wb.save(out05)
-        print(f"已寫入 {out05}", flush=True)
-
-        project.setFileName(str(qgz))
-        if project.write():
-            print(f"已寫入 {qgz}", flush=True)
-        else:
-            print("[警告] .qgz 寫入失敗", flush=True)
-
+        # 05 清單（優先寫出並確保落地；即使後續 .qgz 崩潰也已保存）
+        print("開始寫 05 出圖清單…", flush=True)
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.append(OUT05_COLUMNS)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+            for r in records:
+                ws.append(r)
+            for i, w in enumerate([7, 18, 12, 40, 9, 50, 17, 8, 40], start=1):
+                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+            wrap = Alignment(wrap_text=True, vertical="top")
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.alignment = wrap
+            ws.freeze_panes = "A2"
+            wb.save(out05)
+            print(f"已寫入 {out05}", flush=True)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            sys.stdout.flush()
         print(f"\n=== 完成：成功 {n_done} 張、失敗 {n_fail} 張 ===", flush=True)
         if warnings:
             print("警告：", flush=True)
             for w in warnings:
                 print(f"  - {w}", flush=True)
+        sys.stdout.flush()
+
+        # .qgz（供手動微調；大批次含數百記憶體圖層時 project.write 可能崩潰，
+        # 故置於 05 之後並個別 try，崩潰也不影響已寫出的圖與 05）
+        if WRITE_QGZ:
+            try:
+                project.setFileName(str(qgz))
+                print(f"已寫入 {qgz}" if project.write() else "[警告] .qgz 寫入失敗",
+                      flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[警告] .qgz 寫入例外：{type(exc).__name__}: {exc}", flush=True)
     finally:
         app.exitQgis()
 
