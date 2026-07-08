@@ -82,6 +82,10 @@ docs/superpowers/specs/ # 設計文件
   （含 WMTS 圖磚拼接、QGIS 內建 Python/GDAL 工作流、LANDUSE 專案等，遇 GIS/WMTS 問題先查）。
 - **都市計畫圖資**：`都市計畫/全台都市計畫土地使用分區.shp`（201k筆），`Color1` 欄＝官方色，
   用 `styles/都市計畫.qml`（data-defined）上色；官方圖例對照 `config/urban_plan_legend.yaml`。
+- **openpyxl 不可在 PyQGIS 出圖進程內用**：openpyxl 依賴 lxml、與 GDAL 共用 libxml2；
+  大量圖磚(GDAL)處理後 libxml2 全域狀態損毀，openpyxl 建 Workbook 會存取違例硬崩潰
+  （faulthandler 實測）。故 make_maps 迴圈中把 05 清單寫 CSV，xlsx 交由獨立乾淨子進程
+  `scripts/csv_to_xlsx.py` 產。`.qgz`（project.write 走 Qt XML，非 libxml2）不受影響。
 - 地段代碼線上查詢備援：https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx#gobox02
 
 ## 使用者的操作習慣
