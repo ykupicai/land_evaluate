@@ -32,6 +32,7 @@ import csv
 import math
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import traceback
@@ -1020,28 +1021,11 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
 
-        # 05 清單（優先寫出並確保落地；即使後續 .qgz 崩潰也已保存）
-        print("開始寫 05 出圖清單…", flush=True)
-        try:
-            wb = Workbook()
-            ws = wb.active
-            ws.append(OUT05_COLUMNS)
-            for cell in ws[1]:
-                cell.font = Font(bold=True)
-            for r in records:
-                ws.append(r)
-            for i, w in enumerate([7, 18, 12, 40, 9, 50, 17, 8, 40], start=1):
-                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
-            wrap = Alignment(wrap_text=True, vertical="top")
-            for row in ws.iter_rows(min_row=2):
-                for cell in row:
-                    cell.alignment = wrap
-            ws.freeze_panes = "A2"
-            wb.save(out05)
-            print(f"已寫入 {out05}", flush=True)
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-            sys.stdout.flush()
+        # 05 出圖清單：已於迴圈中逐案場寫成 CSV。
+        # 不在本進程用 openpyxl 產 xlsx——openpyxl 依賴 lxml，與 GDAL 共用 libxml2，
+        # 大量圖磚(GDAL)處理後 libxml2 全域狀態損毀，openpyxl 一建立 Workbook 就
+        # 存取違例硬崩潰。xlsx 交由獨立乾淨進程 scripts/csv_to_xlsx.py 產生（見 main 末）。
+        print(f"05 清單(CSV)已即時寫出：{out05_csv}", flush=True)
         print(f"\n=== 完成：成功 {n_done} 張、失敗 {n_fail} 張 ===", flush=True)
         if warnings:
             print("警告：", flush=True)
@@ -1049,8 +1033,8 @@ def main() -> None:
                 print(f"  - {w}", flush=True)
         sys.stdout.flush()
 
-        # .qgz（供手動微調；大批次含數百記憶體圖層時 project.write 可能崩潰，
-        # 故置於 05 之後並個別 try，崩潰也不影響已寫出的圖與 05）
+        # .qgz（供手動微調）：project.write() 走 Qt XML(QDomDocument)，非 libxml2，
+        # 不受上述衝突影響；置於最後、單獨 try。
         if WRITE_QGZ:
             try:
                 project.setFileName(str(qgz))
@@ -1058,8 +1042,28 @@ def main() -> None:
                       flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[警告] .qgz 寫入例外：{type(exc).__name__}: {exc}", flush=True)
+        sys.stdout.flush()
     finally:
         app.exitQgis()
+
+    # QGIS 已結束，另起乾淨子進程把 CSV 轉成正式 xlsx（該子進程不載入 GDAL，無衝突）
+    _csv_to_xlsx(out05_csv, out05)
+
+
+def _csv_to_xlsx(csv_path: Path, xlsx_path: Path) -> None:
+    """以獨立子進程將 05 CSV 轉為格式化 xlsx（避免與 GDAL 的 libxml2 衝突）。"""
+    if not csv_path.exists():
+        print(f"[警告] 找不到 {csv_path}，略過 xlsx 轉換", flush=True)
+        return
+    conv = REPO_ROOT / "scripts" / "csv_to_xlsx.py"
+    try:
+        r = subprocess.run([sys.executable, str(conv), str(csv_path), str(xlsx_path)],
+                           capture_output=True, text=True, timeout=120)
+        print((r.stdout or "").strip() or f"已產生 {xlsx_path}", flush=True)
+        if r.returncode != 0:
+            print(f"[警告] xlsx 轉換非零回傳：{(r.stderr or '').strip()[:300]}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[警告] xlsx 轉換失敗：{type(exc).__name__}: {exc}（CSV 仍可用）", flush=True)
 
 
 if __name__ == "__main__":
