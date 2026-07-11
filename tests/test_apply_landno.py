@@ -23,7 +23,7 @@ def test_exact_backfill():
     lookup = [{"案場ID": "021", "原段/小段": "坑子口段後壁厝小段", "原地號": "1-1",
                "查得新段名": "後壁段", "查得新地號": "12", "查詢狀態": "成功", "備註": ""}]
     out, stats = apply_corrections(rows, lookup)
-    assert stats == {"exact": 1, "mother": 0, "skip": 0}
+    assert stats == {"exact": 1, "mother": 0, "skip": 0, "unmatched_lookup": []}
     r = out[0]
     assert (r["段"], r["小段"], r["地號原文"]) == ("後壁", "", "12")
     assert (r["宗地母"], r["宗地子"]) == ("0012", "0000")
@@ -36,7 +36,7 @@ def test_mother_fallback():
     lookup = [{"案場ID": "023", "原段/小段": "草漯段", "原地號": "2535-1",
                "查得新段名": "", "查得新地號": "", "查詢狀態": "查無", "備註": ""}]
     out, stats = apply_corrections(rows, lookup)
-    assert stats == {"exact": 0, "mother": 1, "skip": 0}
+    assert stats == {"exact": 0, "mother": 1, "skip": 0, "unmatched_lookup": []}
     r = out[0]
     assert r.get("比對模式") == "母號範圍"
     assert r["宗地母"] == "2535" and r["宗地子"] == ""
@@ -46,4 +46,22 @@ def test_mother_fallback():
 def test_untouched_rows_pass_through():
     rows = [_meta(landno="99", cid="001")]
     out, stats = apply_corrections(rows, [])
-    assert out == rows and stats == {"exact": 0, "mother": 0, "skip": 0}
+    assert out == rows and stats == {"exact": 0, "mother": 0, "skip": 0, "unmatched_lookup": []}
+
+
+def test_unmatched_lookup_reported():
+    rows = [_meta()]
+    lookup = [{"案場ID": "999", "原段/小段": "隨便段", "原地號": "888",
+               "查得新段名": "隨便段", "查得新地號": "1", "查詢狀態": "成功", "備註": ""}]
+    out, stats = apply_corrections(rows, lookup)
+    assert stats["unmatched_lookup"] == [("999", "888")]
+    assert out == rows
+
+
+def test_multivalue_skipped():
+    rows = [_meta()]
+    lookup = [{"案場ID": "021", "原段/小段": "坑子口段後壁厝小段", "原地號": "1-1",
+               "查得新段名": "後壁段", "查得新地號": "12、34", "查詢狀態": "成功", "備註": ""}]
+    out, stats = apply_corrections(rows, lookup)
+    assert stats["skip"] == 1
+    assert out[0] == rows[0]
