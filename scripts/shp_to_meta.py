@@ -71,6 +71,8 @@ def main():
     def_c, def_t = top(cnt_c), top(cnt_t)
     wb = Workbook(); ws = wb.active; ws.append(COLS)
     n = 0
+    hit = 0
+    cids_used = set()
     for r in recs:
         seg_code = g(r, ["段號"])            # DF434401220000
         if len(seg_code) < 14:
@@ -83,12 +85,25 @@ def main():
         seg = re.sub(r"段$", "", seg)  # section_index 段名不含「段」字尾
         zone = g(r, ["20251201_6"])          # 使分
         ltype = g(r, ["20251201_7"])         # 使類
-        cid, cname = sitemap.get(landno, ("001", name))
+        pair = sitemap.get(landno) if sitemap else None
+        if pair:
+            hit += 1
+            cid, cname = pair
+        else:
+            cid, cname = "001", name
+        cids_used.add(cid)
         ws.append([cid, cname, county, town, seg, "", landno,
                    mother, child, "", zone, ltype, "", "高", "由基地shp直接匯入"])
         n += 1
     wb.save(out / "01_中繼檔.xlsx")
-    print(f"已產生 {out/'01_中繼檔.xlsx'}（{n} 宗地，案場 001={name}）")
+    if sitemap:
+        if hit == 0:
+            print(f"已產生 {out/'01_中繼檔.xlsx'}（{n} 宗地，案場 001={name}）")
+            print("[警告] sitemap 全未命中，請檢查地號字串格式")
+        else:
+            print(f"已產生 {out/'01_中繼檔.xlsx'}（{n} 宗地，sitemap 命中 {hit}/{n}，分派 {len(cids_used)} 個案場）")
+    else:
+        print(f"已產生 {out/'01_中繼檔.xlsx'}（{n} 宗地，案場 001={name}）")
     print(f"縣市/鄉鎮/段 範例：{county}/{town}/{seg}")
 
 
