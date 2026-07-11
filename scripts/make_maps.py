@@ -122,13 +122,23 @@ URBAN_LEGEND_YAML = "config/urban_plan_legend.yaml"
 URBAN_LAYER_NAME = "都市計畫土地使用分區"
 URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分區（依使用者圖說）
 
+# 國土利用調查（LUIMAP）：fishpv 專案的官方色碼表 + features.geojson 分類結果
+FISHPV_ROOT = Path(r"C:\Users\user\Documents\Claude\Projects\漁電共生評估")
+LUIMAP_COLORTABLE = (FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
+                     / "resources" / "luimap_colortable.csv")
+LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
+
 # 主題（key=檔名用、title=圖名/圖說）
-THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊"]
+# 「臨路判定」實作於 Task 6；此處先加標題字串，THEMES 本身暫維持前 5 項
+# （Task 6 補上臨路判定的 theme_defs/守門後，再把 THEMES 補為 6 項）。
+THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊", "國土利用調查"]
 THEME_TITLES = {
     "使用分區": "非都市土地使用分區及都市計畫土地使用分區圖",
     "使用地編定": "非都市土地使用地變更編定及都市計畫土地使用分區圖",
     "國土功能分區": "國土功能分區圖",
     "正射套疊": "正射影像及通用電子地圖套疊圖",
+    "國土利用調查": "國土利用調查圖",
+    "臨路判定": "臨路判定圖",
 }
 
 # 有「總圖/合併檔」的縣市只用合併檔（與 scripts/match_parcels.py 的 PREFERRED_ZONE_FILES 一致）
@@ -607,6 +617,37 @@ def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
     return lyr
 
 
+def luimap_legend_categories(features_geojson: Path, colortable_csv: Path,
+                             extent: QgsRectangle) -> list:
+    """圖面範圍內實際出現的 LUIMAP 官方類別（依 features 面積佔比）。
+    回傳 [(lu_name, (r,g,b)), ...] 佔比由大到小，<LUIMAP_SHARE_MIN 不列。"""
+    colors = {}
+    with open(colortable_csv, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            colors[str(row["lu_code"]).strip()] = (
+                row["lu_name"].strip(),
+                (int(row["R"]), int(row["G"]), int(row["B"])))
+    lyr = QgsVectorLayer(str(features_geojson), "f", "ogr")
+    if not lyr.isValid():
+        return []
+    req = QgsFeatureRequest().setFilterRect(extent)
+    shares: dict[str, float] = defaultdict(float)
+    total = 0.0
+    for f in lyr.getFeatures(req):
+        code = attr_str(f["lu_code"])
+        a = f.geometry().area()
+        shares[code] += a
+        total += a
+    if total <= 0:
+        return []
+    out = []
+    for code, a in sorted(shares.items(), key=lambda x: -x[1]):
+        if a / total < LUIMAP_SHARE_MIN or code not in colors:
+            continue
+        out.append(colors[code])
+    return out
+
+
 def save_styles(styles_dir: Path) -> None:
     """輸出 QML 樣式檔供 QGIS 手動微調時套用。
     注意：使用分區.qml／使用地編定.qml 由 scripts/build_legend_styles.py 從使用者
@@ -843,6 +884,7 @@ def main() -> None:
     exclude: set[str] = set()
     skip_extract = False
     extract_only = overview_only = False
+    themes = list(THEMES)
     for a in args:
         if a.startswith("--cases="):
             only = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
@@ -858,6 +900,8 @@ def main() -> None:
             extract_only = True
         elif a == "--overview-only":
             overview_only = True
+        elif a == "--basic":
+            themes = THEMES[:4]
         elif not a.startswith("--"):
             case_name = a
 
@@ -969,7 +1013,7 @@ def main() -> None:
             c = cases[cid]
             pt = parcels_text(c)
             if "extent" not in c:
-                for theme in THEMES:
+                for theme in themes:
                     records.append([cid, c["name"], theme, "", "", pt,
                                     datetime.now().strftime("%Y-%m-%d %H:%M"), "失敗",
                                     c.get("error", "無圖面範圍")])
@@ -1075,6 +1119,40 @@ def main() -> None:
                     project.addMapLayer(rl, False)
                     keep_alive.append(rl)
 
+            # NLSC LUIMAP（國土利用調查）底圖＋圖面實際出現類別的圖例 proxy
+            luimap_rl = None
+            luimap_legend_lyr = None
+            fishpv_dir = out_dir / "臨路評估"
+            if "國土利用調查" in themes:
+                try:
+                    l_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_LUIMAP.tif"),
+                                          layer="LUIMAP", cache_dir=str(tile_cache),
+                                          buffer_ratio=0.05)
+                    if l_tif:
+                        luimap_rl = QgsRasterLayer(l_tif, "國土利用調查(NLSC LUIMAP)")
+                        project.addMapLayer(luimap_rl, False)
+                        keep_alive.append(luimap_rl)
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"{cid} LUIMAP 底圖失敗：{exc}")
+                cats = (luimap_legend_categories(fishpv_dir / "features.geojson",
+                                                 LUIMAP_COLORTABLE, c["extent"])
+                        if (fishpv_dir / "features.geojson").exists() else [])
+                if cats:
+                    plyr = QgsVectorLayer(f"Polygon?crs={CRS_3826}&field=cat:string",
+                                          "國土利用類別", "memory")
+                    cx, cy = c["extent"].center().x(), c["extent"].center().y()
+                    half = c["extent"].width() * 0.001
+                    rcats = []
+                    for i, (name, rgb) in enumerate(cats):
+                        sym = fill_symbol(rgb, outline="120,120,120,255", width="0.1")
+                        rcats.append(QgsRendererCategory(str(i), sym, name))
+                        add_feat(plyr, QgsGeometry.fromRect(QgsRectangle(
+                            cx - half, cy - half, cx + half, cy + half)), [str(i)])
+                    plyr.setRenderer(QgsCategorizedSymbolRenderer("cat", rcats))
+                    keep_alive.append(plyr)
+                    project.addMapLayer(plyr, False)
+                    luimap_legend_lyr = plyr
+
             theme_defs = {
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
@@ -1083,15 +1161,25 @@ def main() -> None:
                                  common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）",
                                  None),
                 "正射套疊": (overlay_layers, [l_red], set(), common_note, None),
+                "國土利用調查": ([l_red] + ([luimap_legend_lyr] if luimap_legend_lyr else [])
+                                 + ([luimap_rl] if luimap_rl else []),
+                                 ([luimap_legend_lyr] if luimap_legend_lyr else []) + [l_red],
+                                 set(), common_note + "\n國土利用調查：NLSC LUIMAP（官方色）",
+                                 None),
             }
 
-            for theme in THEMES:
+            for theme in themes:
                 layers, leg_layers, hide, note, overlay = theme_defs[theme]
                 fname = f"{cid}_{sanitize(c['name'])}_{theme}.png"
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
                 if theme == "正射套疊" and not case_wmts_ok:
                     records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
                                     "失敗", "NLSC 底圖下載失敗"])
+                    n_fail += 1
+                    continue
+                if theme == "國土利用調查" and luimap_rl is None:
+                    records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
+                                    "失敗", "LUIMAP 底圖下載失敗"])
                     n_fail += 1
                     continue
                 try:
