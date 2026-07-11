@@ -53,6 +53,46 @@ def find_from_index(steps: list, target: str) -> int | None:
     return None
 
 
+KNOWN_STEPS = {
+    "meta", "meta_sitemap", "parse", "match", "match2", "landno", "apply",
+    "extract", "fishpv", "digest", "overview", "maps", "STOP_MODE", "STOP_CHECK",
+}
+
+
+def execute_steps(steps: list, runner, art) -> list[str]:
+    """執行 steps（含 match 後 fallback 動態插入），回傳實際執行序（純函式邏輯，
+    副作用全部委派給 runner/art，方便單測不碰檔案系統）。
+
+    runner(step_name) -> bool：執行單一步驟的副作用；回傳 True 表示應立即停止
+    （對應舊版 main() 內遇到 parse/STOP_MODE/STOP_CHECK 時的 return）。
+    art() -> dict：artifacts 快照（同 main() 內 art()），用來判斷 match 後 03 是否
+    非空，才知道要不要動態補 landno/apply/match2。
+
+    steps 這個 list 物件會被就地修改（在「當前位置之後」插入補鏈步驟），需要保留
+    原始序列的呼叫端請自行先複製一份再傳入。
+    """
+    executed: list = []
+    i = 0
+    while i < len(steps):
+        s = steps[i]
+        if s not in KNOWN_STEPS:
+            print(f"[run_case] 警告：未知步驟 {s!r}，略過")
+            i += 1
+            continue
+        executed.append(s)
+        stop = runner(s)
+        if s == "match" and "landno" not in steps and art().get("03_nonempty"):
+            # 首次比對後才知道 03 是否非空 → 在「當前位置之後」插入 fallback，
+            # 確保執行序為 match→landno→apply→match2→(原後續)：
+            # 不會被後面的 STOP_MODE 擋住（append 到尾端會），也不會排到
+            # maps 之後（出圖才不會用到未修正的 02）。
+            steps[i + 1:i + 1] = ["landno", "apply", "match2"]
+        if stop:
+            break
+        i += 1
+    return executed
+
+
 def digest_fishpv(case_dir: Path) -> None:
     """成果.xlsx → sites_status.csv（給 make_maps）與 sitemap.csv（給 persite）。"""
     import pandas as pd
@@ -156,7 +196,9 @@ def main():
         steps = full_steps[idx:]
 
     print(f"[run_case] 案子={case} 步驟={steps}")
-    for s in steps:
+
+    def run_step(s: str) -> bool:
+        """執行單一步驟；回傳 True 表示本次流程應在此停止（等同舊版 main() 的 return）。"""
         if s == "meta":
             _run(["python", "-X", "utf8", REPO / "scripts" / "shp_to_meta.py",
                   dbf, case, case], label="shp_to_meta")
@@ -173,16 +215,10 @@ def main():
         elif s == "parse":
             print("[run_case] 清冊解析請先以既有流程產 01_中繼檔（換版式需 AI 寫解析），"
                  "完成人工核對後加 --resume 續跑")
-            return
+            return True
         elif s in ("match", "match2"):
             _run(["python", "-X", "utf8", REPO / "scripts" / "match_parcels.py", case],
                  label=s)
-            if s == "match" and "landno" not in steps and art()["03_nonempty"]:
-                # 首次比對後才知道 03 是否非空 → 動態補跑 fallback
-                # （已驗證：對 list 迭代中 append 的新元素會被本 for 迴圈繼續走到）
-                for extra in ("landno", "apply", "match2"):
-                    if extra not in steps:
-                        steps.append(extra)
         elif s == "landno":
             _run(["python", "-X", "utf8", REPO / "scripts" / "query_landno.py", case],
                  label="query_landno")
@@ -210,8 +246,14 @@ def main():
         elif s == "STOP_MODE":
             print(f"\n請看 {case_dir / '00_總區位圖.png'} 後選出圖單位，"
                   f"再跑同指令加 --mode single|persite")
-            return
-    print("\n[run_case] 完成")
+            return True
+        elif s == "STOP_CHECK":
+            return True
+        return False
+
+    executed = execute_steps(steps, run_step, art)
+    if not (executed and executed[-1] in ("parse", "STOP_MODE", "STOP_CHECK")):
+        print("\n[run_case] 完成")
 
 
 if __name__ == "__main__":
