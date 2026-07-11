@@ -92,6 +92,14 @@ def resolve_subsection_codes(sec_df, county, town, sec, sub) -> list[str]:
 CADASTRAL_ATTR_COLS = ["小段碼", "宗地母", "宗地子", "使分", "使類", "登面積"]
 
 
+def pick_fids(key_to_fids: dict, key_mother: dict, code: str,
+              mother: str, child: str, mode: str) -> list[int]:
+    """依比對模式取 fids：exact=(code,母,子)；母號範圍=(code,母)全部子號。"""
+    if mode == "母號範圍":
+        return list(key_mother.get((code, mother), []))
+    return list(key_to_fids.get((code, mother, child), []))
+
+
 def match_county_parcels(shp_path: Path, wanted: list[dict]) -> None:
     """就地更新 wanted 各列：找到→填 fids/使分/使類/登面積；找不到→維持未命中。
 
@@ -103,14 +111,17 @@ def match_county_parcels(shp_path: Path, wanted: list[dict]) -> None:
             str(shp_path), read_geometry=False, columns=CADASTRAL_ATTR_COLS
         )
     key_to_fids: dict[tuple, list[int]] = defaultdict(list)
+    key_mother: dict[tuple, list[int]] = defaultdict(list)
     for fid, (code, m, c) in enumerate(
         zip(attrs["小段碼"], attrs["宗地母"], attrs["宗地子"])
     ):
         key_to_fids[(code, m, c)].append(fid)
+        key_mother[(code, m)].append(fid)
 
     for w in wanted:
         for code in w["candidates"]:
-            fids = key_to_fids.get((code, w["宗地母"], w["宗地子"]))
+            fids = pick_fids(key_to_fids, key_mother, code,
+                             w["宗地母"], w.get("宗地子", ""), w.get("mode", ""))
             if fids:
                 rows = attrs.iloc[fids]
                 w["fids"] = fids
@@ -305,6 +316,10 @@ def main() -> None:
         w["使分"] = w["使類"] = w["登面積"] = None
         w["status"] = None
         w["zone_shares"] = []
+        raw_mode = r.get("比對模式")
+        w["mode"] = "" if pd.isna(raw_mode) else str(raw_mode).strip()
+        raw_child = w.get("宗地子")
+        w["宗地子"] = "" if pd.isna(raw_child) else str(raw_child).strip()
         county = r["縣市"]
         if pd.isna(w.get("宗地母")) or not str(w.get("宗地母")).strip():
             w["status"] = "其他"
