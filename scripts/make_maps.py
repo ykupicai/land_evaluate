@@ -129,9 +129,7 @@ LUIMAP_COLORTABLE = (FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
 LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
 
 # 主題（key=檔名用、title=圖名/圖說）
-# 「臨路判定」實作於 Task 6；此處先加標題字串，THEMES 本身暫維持前 5 項
-# （Task 6 補上臨路判定的 theme_defs/守門後，再把 THEMES 補為 6 項）。
-THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊", "國土利用調查"]
+THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊", "國土利用調查", "臨路判定"]
 THEME_TITLES = {
     "使用分區": "非都市土地使用分區及都市計畫土地使用分區圖",
     "使用地編定": "非都市土地使用地變更編定及都市計畫土地使用分區圖",
@@ -648,6 +646,31 @@ def luimap_legend_categories(features_geojson: Path, colortable_csv: Path,
     return out
 
 
+def road_status_color(status: str) -> tuple:
+    """臨路狀態文字 → 框色（純規則，見設計文件 Task6 brief）。"""
+    s = str(status or "")
+    if "不臨路" in s:
+        return (200, 0, 0)
+    if "直接臨路" in s:
+        return (0, 150, 0)
+    if "需搭橋" in s:
+        return (255, 140, 0)
+    return (120, 120, 120)
+
+
+def load_sites_status(csv_path: Path) -> dict:
+    """sites_status.csv → {site_id: (臨路狀態, 距離str, 註記)}。"""
+    out = {}
+    if not csv_path.exists():
+        return out
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            out[str(row["site_id"]).strip()] = (
+                str(row.get("臨路狀態", "")), str(row.get("臨路距離_m", "")),
+                str(row.get("臨路註記", "")))
+    return out
+
+
 def save_styles(styles_dir: Path) -> None:
     """輸出 QML 樣式檔供 QGIS 手動微調時套用。
     注意：使用分區.qml／使用地編定.qml 由 scripts/build_legend_styles.py 從使用者
@@ -1134,24 +1157,69 @@ def main() -> None:
                         keep_alive.append(luimap_rl)
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(f"{cid} LUIMAP 底圖失敗：{exc}")
-                cats = (luimap_legend_categories(fishpv_dir / "features.geojson",
-                                                 LUIMAP_COLORTABLE, c["extent"])
-                        if (fishpv_dir / "features.geojson").exists() else [])
-                if cats:
-                    plyr = QgsVectorLayer(f"Polygon?crs={CRS_3826}&field=cat:string",
-                                          "國土利用類別", "memory")
-                    cx, cy = c["extent"].center().x(), c["extent"].center().y()
-                    half = c["extent"].width() * 0.001
-                    rcats = []
-                    for i, (name, rgb) in enumerate(cats):
-                        sym = fill_symbol(rgb, outline="120,120,120,255", width="0.1")
-                        rcats.append(QgsRendererCategory(str(i), sym, name))
-                        add_feat(plyr, QgsGeometry.fromRect(QgsRectangle(
-                            cx - half, cy - half, cx + half, cy + half)), [str(i)])
-                    plyr.setRenderer(QgsCategorizedSymbolRenderer("cat", rcats))
-                    keep_alive.append(plyr)
-                    project.addMapLayer(plyr, False)
-                    luimap_legend_lyr = plyr
+                # fishpv 產物（features.geojson）非本工具管轄，schema 可能漂移；
+                # 圖例 proxy 產製失敗只降級（無圖例），不可拖垮整批出圖。
+                try:
+                    cats = (luimap_legend_categories(fishpv_dir / "features.geojson",
+                                                     LUIMAP_COLORTABLE, c["extent"])
+                            if (fishpv_dir / "features.geojson").exists() else [])
+                    if cats:
+                        plyr = QgsVectorLayer(f"Polygon?crs={CRS_3826}&field=cat:string",
+                                              "國土利用類別", "memory")
+                        cx, cy = c["extent"].center().x(), c["extent"].center().y()
+                        half = c["extent"].width() * 0.001
+                        rcats = []
+                        for i, (name, rgb) in enumerate(cats):
+                            sym = fill_symbol(rgb, outline="120,120,120,255", width="0.1")
+                            rcats.append(QgsRendererCategory(str(i), sym, name))
+                            add_feat(plyr, QgsGeometry.fromRect(QgsRectangle(
+                                cx - half, cy - half, cx + half, cy + half)), [str(i)])
+                        plyr.setRenderer(QgsCategorizedSymbolRenderer("cat", rcats))
+                        keep_alive.append(plyr)
+                        project.addMapLayer(plyr, False)
+                        luimap_legend_lyr = plyr
+                except Exception as exc:  # noqa: BLE001
+                    cats = []
+                    luimap_legend_lyr = None
+                    warnings.append(f"{cid} LUIMAP 圖例產製失敗：{exc}")
+
+            # 主題6「臨路判定」圖層（fishpv 臨路評估產物：sites.shp/sites_status.csv/
+            # features.geojson）；同樣視為外部產物，schema 漂移只讓本主題失敗，不中斷批次。
+            sites_lyr = roads_lyr = None
+            road_note_lines = []
+            if "臨路判定" in themes and (fishpv_dir / "sites.shp").exists():
+                try:
+                    status = load_sites_status(fishpv_dir / "sites_status.csv")
+                    sites_lyr = QgsVectorLayer(str(fishpv_dir / "sites.shp"), "宗基地(臨路)", "ogr")
+                    if not sites_lyr.isValid():
+                        raise RuntimeError("sites.shp 讀取失敗")
+                    scats = []
+                    for f in sites_lyr.getFeatures():
+                        sid = str(f["site_id"])
+                        st_, dist, _n = status.get(sid, ("", "", ""))
+                        rgb = road_status_color(st_)
+                        sym = outline_symbol(color=f"{rgb[0]},{rgb[1]},{rgb[2]},255", width="1.1")
+                        scats.append(QgsRendererCategory(sid, sym, f"{sid} {st_ or '無資料'}"))
+                        road_note_lines.append(
+                            f"{sid}:{st_ or '無資料'}"
+                            + (f"(距{dist}m)" if dist not in ("", "0.0", "0.00") else ""))
+                    sites_lyr.setRenderer(QgsCategorizedSymbolRenderer("site_id", scats))
+                    sites_lyr.setLabeling(label_settings("site_id", size=10.0))
+                    sites_lyr.setLabelsEnabled(True)
+                    roads_lyr = QgsVectorLayer(str(fishpv_dir / "features.geojson"), "道路地物", "ogr")
+                    if not roads_lyr.isValid():
+                        raise RuntimeError("features.geojson 讀取失敗")
+                    roads_lyr.setSubsetString("\"category\" = '道路'")
+                    roads_lyr.renderer().setSymbol(fill_symbol((255, 85, 0),
+                                                   outline="180,60,0,255", width="0.2"))
+                    roads_lyr.setOpacity(0.75)
+                    for l in (sites_lyr, roads_lyr):
+                        project.addMapLayer(l, False)
+                        keep_alive.append(l)
+                except Exception as exc:  # noqa: BLE001
+                    sites_lyr = roads_lyr = None
+                    road_note_lines = []
+                    warnings.append(f"{cid} 臨路判定圖層產製失敗：{exc}")
 
             theme_defs = {
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
@@ -1166,6 +1234,14 @@ def main() -> None:
                                  ([luimap_legend_lyr] if luimap_legend_lyr else []) + [l_red],
                                  set(), common_note + "\n國土利用調查：NLSC LUIMAP（官方色）",
                                  None),
+                # photo_rl 若為 None（正射底圖失敗）：拿掉即可，仍可出道路＋宗基地白底。
+                "臨路判定": (([sites_lyr, roads_lyr] + ([photo_rl] if photo_rl else []))
+                             if sites_lyr else [],
+                             [sites_lyr, roads_lyr] if sites_lyr else [],
+                             set(),
+                             common_note + "\n臨路判定(fishpv)：\n"
+                             + wrap_cjk("、".join(road_note_lines), 24),
+                             None),
             }
 
             for theme in themes:
@@ -1180,6 +1256,11 @@ def main() -> None:
                 if theme == "國土利用調查" and luimap_rl is None:
                     records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
                                     "失敗", "LUIMAP 底圖下載失敗"])
+                    n_fail += 1
+                    continue
+                if theme == "臨路判定" and sites_lyr is None:
+                    records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
+                                    "失敗", "無 fishpv 臨路評估產物"])
                     n_fail += 1
                     continue
                 try:
