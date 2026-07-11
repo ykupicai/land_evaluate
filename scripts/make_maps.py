@@ -109,6 +109,9 @@ FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 WMTS_URL = "https://wmts.nlsc.gov.tw/wmts"
 URBAN_LABEL = "都市土地（使用分區另查）"
 WRITE_QGZ = True  # 是否輸出 .qgz（可用 --no-qgz 關閉；大批次崩潰時先關）
+MATERIALIZE = False  # --mem：把每案場向量層轉記憶體層再算圖，解大單案(周邊上千筆)
+                     # 時同一 gpkg 多層平行算圖的 SQLite「unable to open」並發問題。
+                     # 記憶體層不會存進 .qgz，故通常與 --no-qgz 併用。
 
 # 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
 URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
@@ -187,6 +190,25 @@ def landno_text(mother, child) -> str:
 # ---------------------------------------------------------------------------
 # 讀 02 → 案場結構
 # ---------------------------------------------------------------------------
+
+
+def to_memory(src: QgsVectorLayer) -> QgsVectorLayer:
+    """把 gpkg 圖層(含 subset)materialize 成記憶體層，保留 renderer/labeling/opacity。
+    用於解大單案同一 gpkg 多層平行算圖的 SQLite 並發問題。"""
+    mem = src.materialize(QgsFeatureRequest())
+    mem.setName(src.name())
+    try:
+        mem.setRenderer(src.renderer().clone())
+    except Exception:
+        pass
+    try:
+        if src.labelsEnabled() and src.labeling() is not None:
+            mem.setLabeling(src.labeling().clone())
+            mem.setLabelsEnabled(True)
+    except Exception:
+        pass
+    mem.setOpacity(src.opacity())
+    return mem
 
 
 def read_cases(xlsx: Path, only: set[str] | None, exclude: set[str]) -> dict[str, dict]:
@@ -758,11 +780,12 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
 
 
 def main() -> None:
-    global WRITE_QGZ
+    global WRITE_QGZ, MATERIALIZE
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
     only: set[str] | None = None
     exclude: set[str] = set()
+    skip_extract = False
     for a in args:
         if a.startswith("--cases="):
             only = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
@@ -770,6 +793,10 @@ def main() -> None:
             exclude = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
         elif a == "--no-qgz":
             WRITE_QGZ = False
+        elif a == "--mem":
+            MATERIALIZE = True
+        elif a == "--skip-extract":
+            skip_extract = True
         elif not a.startswith("--"):
             case_name = a
 
@@ -800,13 +827,30 @@ def main() -> None:
     records: list[list] = []
     keep_alive: list = []
     try:
-        warnings = extract_layers(cases, registry, gpkg)
+        if skip_extract and gpkg.exists():
+            # 重用既有 gpkg（避開「同進程先寫後讀」的 SQLite 鎖）：extent 改由 gpkg 基地層算
+            warnings = []
+            print("略過 extract_layers，重用既有 圖層.gpkg", flush=True)
+            for cid, c in cases.items():
+                bl = QgsVectorLayer(f"{gpkg}|layername=基地", "b", "ogr")
+                bl.setSubsetString(f"\"案場ID\" = '{cid}'")
+                ext = bl.extent()
+                if ext.isEmpty():
+                    c["error"] = "gpkg 基地無此案場"
+                    continue
+                c["scale"], c["extent"] = compute_scale_extent(ext)
+                c["has_urban_rows"] = any(
+                    (r.get("使分") in (None, "", "None")) for r in c["rows"])
+        else:
+            warnings = extract_layers(cases, registry, gpkg)
         save_styles(styles_dir)
 
         # 共用圖層
         zones_lyr = QgsVectorLayer(f"{gpkg}|layername=功能分區", "國土功能分區", "ogr")
         zones_lyr.setRenderer(zone_renderer())
         zones_lyr.setOpacity(0.6)
+        if MATERIALIZE:
+            zones_lyr = to_memory(zones_lyr)
         # NLSC 正射/電子地圖底圖改用圖磚拼接（nlsc_wmts.build_basemap），逐案場產 GeoTIFF；
         # 不再用 QGIS WMS provider（會卡住/逾時）。這裡只準備快取資料夾。
         basemap_dir = out_dir / "底圖"
@@ -887,6 +931,9 @@ def main() -> None:
             l_gray = QgsVectorLayer(neigh_uri, "周邊地籍界線", "ogr")
             l_gray.setSubsetString(subset)
             l_gray.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
+
+            if MATERIALIZE:
+                l_red, l_nz, l_nt, l_gray = (to_memory(x) for x in (l_red, l_nz, l_nt, l_gray))
 
             for l in (l_red, l_nz, l_nt, l_gray):
                 project.addMapLayer(l, False)
