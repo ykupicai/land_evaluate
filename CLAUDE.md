@@ -89,6 +89,14 @@ docs/superpowers/specs/ # 設計文件
   大量圖磚(GDAL)處理後 libxml2 全域狀態損毀，openpyxl 建 Workbook 會存取違例硬崩潰
   （faulthandler 實測）。故 make_maps 迴圈中把 05 清單寫 CSV，xlsx 交由獨立乾淨子進程
   `scripts/csv_to_xlsx.py` 產。`.qgz`（project.write 走 Qt XML，非 libxml2）不受影響。
+- **出圖時桌面版 QGIS 不能開著同一案子的 gpkg/.qgz**：SQLite 鎖衝突會讓算圖讀不到
+  要素（log 見「unable to open database file」），主題色整片空白但紅框/灰線可能正常，
+  且 4 張都回報「成功」——很陰。解法：關桌面 QGIS 再跑，或 `--mem`（向量層 materialize
+  成記憶體層算圖，免疫鎖；因記憶體層不入 .qgz，搭配 `--no-qgz`）。
+- **直接給基地 shp 出圖**（免 PDF 解析）：`scripts/shp_to_meta.py <dbf路徑> <案子名> <案場名>`
+  → 產 01_中繼檔 → match_parcels → make_maps。需 shp 含 14 碼段號（小段碼+宗地母+宗地子）。
+  中文 dbf 欄名超過 DBF 10-byte 限制會截斷、pyogrio 讀不了 → 用 dbfread(utf-8, errors=replace)。
+  官田 40MW 案（番子渡頭段 133 宗地）已以此流程驗證。
 - 地段代碼線上查詢備援：https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx#gobox02
 
 ## 使用者的操作習慣
