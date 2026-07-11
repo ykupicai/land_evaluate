@@ -14,6 +14,7 @@ QGIS_BAT = Path(r"C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat")
 FISHPV_ROOT = Path(r"C:\Users\user\Documents\Claude\Projects\漁電共生評估")
 COLORTABLE = (FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
               / "resources" / "luimap_colortable.csv")
+FROM_STEPS = ("meta", "match", "fishpv", "overview", "maps")
 
 
 def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> list:
@@ -21,8 +22,11 @@ def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> li
     if mode_shp:
         if chosen_mode:
             steps = []
+            need_fishpv = not artifacts.get("fishpv")
             if not artifacts.get("01"):
                 steps.append("meta")
+            if need_fishpv:
+                steps += ["fishpv", "digest"]
             if chosen_mode == "persite":
                 steps.append("meta_sitemap")   # 重建 01 依 sitemap 分組
             steps += ["extract", "maps"]
@@ -41,19 +45,33 @@ def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> li
     return steps
 
 
+def find_from_index(steps: list, target: str) -> int | None:
+    """在 steps 中找 --from 目標的第一個相符索引；target=='match' 同時匹配 match/match2。"""
+    for i, s in enumerate(steps):
+        if s == target or (target == "match" and s == "match2"):
+            return i
+    return None
+
+
 def digest_fishpv(case_dir: Path) -> None:
     """成果.xlsx → sites_status.csv（給 make_maps）與 sitemap.csv（給 persite）。"""
     import pandas as pd
-    df = pd.read_excel(case_dir / "臨路評估" / "成果.xlsx", dtype=str)
+    xlsx = case_dir / "臨路評估" / "成果.xlsx"
+    df = pd.read_excel(xlsx, dtype=str)
+    required = ["site_id", "臨路狀態", "臨路距離_m", "臨路註記", "地號清單"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise SystemExit(f"[run_case] 成果.xlsx 缺欄位：{missing}")
     df[["site_id", "臨路狀態", "臨路距離_m", "臨路註記"]].to_csv(
         case_dir / "臨路評估" / "sites_status.csv", index=False, encoding="utf-8-sig")
     rows = []
     for _, r in df.iterrows():
         for no in str(r["地號清單"]).split(";"):
             no = no.strip()
-            if no:
-                rows.append({"地號": no, "案場ID": r["site_id"],
-                             "案場名稱": f"{r['site_id']}宗基地"})
+            if not no or no.lower() == "nan":
+                continue
+            rows.append({"地號": no, "案場ID": r["site_id"],
+                         "案場名稱": f"{r['site_id']}宗基地"})
     pd.DataFrame(rows).to_csv(case_dir / "臨路評估" / "sitemap.csv",
                               index=False, encoding="utf-8-sig")
     print(f"digest：sites_status.csv + sitemap.csv（{len(rows)} 地號）")
@@ -62,13 +80,15 @@ def digest_fishpv(case_dir: Path) -> None:
 def _run(cmd, cwd=None, label=""):
     print(f"\n=== {label or ' '.join(map(str, cmd))} ===", flush=True)
     r = subprocess.run([str(c) for c in cmd], cwd=cwd)
-    if r.returncode not in (0, 5):  # 5=QGIS 慣有結束碼
+    is_qgis = "python-qgis-ltr.bat" in str(cmd[0])
+    allowed = (0, 5) if is_qgis else (0,)   # 5=QGIS 慣有結束碼，僅 QGIS bat 步驟豁免
+    if r.returncode not in allowed:
         sys.exit(f"[run_case] 步驟失敗（{label}），returncode={r.returncode}")
 
 
 def main():
     args = sys.argv[1:]
-    shp = lst = case = chosen = None
+    shp = lst = case = chosen = from_step = None
     resume = False
     passthru = []
     i = 0
@@ -82,6 +102,8 @@ def main():
             case = args[i + 1]; i += 2
         elif a == "--mode":
             chosen = args[i + 1]; i += 2
+        elif a == "--from":
+            from_step = args[i + 1]; i += 2
         elif a == "--resume":
             resume = True; i += 1
         elif a in ("--no-qgz", "--mem", "--basic"):
@@ -92,6 +114,8 @@ def main():
         sys.exit("需 --shp <基地.shp> 或 --list <清冊>")
     if chosen not in (None, "single", "persite"):
         sys.exit("--mode 需為 single|persite")
+    if from_step is not None and from_step not in FROM_STEPS:
+        sys.exit(f"--from 需為 {'|'.join(FROM_STEPS)} 之一")
     mode_shp = shp is not None
     if not case:
         case = Path(shp or lst).stem
@@ -111,20 +135,45 @@ def main():
                 "fishpv": (fp / "成果.xlsx").exists(),
                 "overview": (case_dir / "00_總區位圖.png").exists()}
 
+    artifacts = art()
+    if not mode_shp and chosen and not artifacts["01"]:
+        sys.exit("[run_case] 清冊模式需先完成解析與人工核對（01_中繼檔），"
+                 "再用 --resume；之後才可 --mode 出圖")
+
     dbf = str(Path(shp).with_suffix(".dbf")) if shp else None
-    steps = plan_steps(mode_shp, resume, chosen, art())
+    steps = plan_steps(mode_shp, resume, chosen, artifacts)
+
+    if from_step is not None:
+        # --from：以「假裝所有產物都不存在」重算最大步驟序列，藉此跳過
+        # artifacts 導向的省略，再從第一個相符步驟截斷（強制重跑該點起）。
+        full_steps = plan_steps(mode_shp, resume, chosen,
+                                {k: False for k in artifacts})
+        idx = find_from_index(full_steps, from_step)
+        if idx is None:
+            avail = [s for s in FROM_STEPS if find_from_index(full_steps, s) is not None]
+            sys.exit(f"[run_case] --from {from_step} 在本次流程中找不到對應步驟；"
+                     f"本次可用步驟：{avail}")
+        steps = full_steps[idx:]
+
     print(f"[run_case] 案子={case} 步驟={steps}")
     for s in steps:
         if s == "meta":
             _run(["python", "-X", "utf8", REPO / "scripts" / "shp_to_meta.py",
                   dbf, case, case], label="shp_to_meta")
         elif s == "meta_sitemap":
+            if not (fp / "sitemap.csv").exists():
+                if (fp / "成果.xlsx").exists():
+                    digest_fishpv(case_dir)
+                else:
+                    sys.exit("[run_case] meta_sitemap 需要 臨路評估/成果.xlsx 或 "
+                             "sitemap.csv，兩者皆缺")
             _run(["python", "-X", "utf8", REPO / "scripts" / "shp_to_meta.py",
                   dbf, case, case, "--sitemap", fp / "sitemap.csv"],
                  label="shp_to_meta --sitemap")
         elif s == "parse":
-            sys.exit("[run_case] 清冊解析請先以既有流程產 01_中繼檔（換版式需 AI 寫解析），"
-                     "完成人工核對後加 --resume 續跑")
+            print("[run_case] 清冊解析請先以既有流程產 01_中繼檔（換版式需 AI 寫解析），"
+                 "完成人工核對後加 --resume 續跑")
+            return
         elif s in ("match", "match2"):
             _run(["python", "-X", "utf8", REPO / "scripts" / "match_parcels.py", case],
                  label=s)
@@ -155,13 +204,12 @@ def main():
             _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--overview-only"],
                  label="00_總區位圖")
         elif s == "maps":
-            _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case, *passthru],
+            _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case,
+                 "--skip-extract", *passthru],
                  label="六張圖+qgz")
         elif s == "STOP_MODE":
             print(f"\n請看 {case_dir / '00_總區位圖.png'} 後選出圖單位，"
                   f"再跑同指令加 --mode single|persite")
-            return
-        elif s == "STOP_CHECK":
             return
     print("\n[run_case] 完成")
 
