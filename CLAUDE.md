@@ -97,6 +97,13 @@ docs/superpowers/specs/ # 設計文件
   → 產 01_中繼檔 → match_parcels → make_maps。需 shp 含 14 碼段號（小段碼+宗地母+宗地子）。
   中文 dbf 欄名超過 DBF 10-byte 限制會截斷、pyogrio 讀不了 → 用 dbfread(utf-8, errors=replace)。
   官田 40MW 案（番子渡頭段 133 宗地）已以此流程驗證。
+- **臨路判定 → 介接「漁電共生評估」專案（fishpv）**，直接吃案件地籍 shp（含壞欄名容錯）：
+  `cd C:\Users\user\Documents\Claude\Projects\漁電共生評估` 後
+  `.\env.bat python -m fishpv.cli --cadastre <基地.shp> --colortable qgis_plugin\fishpv_aquavoltaic\resources\luimap_colortable.csv --out <輸出夾> --no-ai --landno-field 地號`
+  → 毗鄰聚合宗基地＋LUIMAP 道路向量化＋臨路三態（直接≤0.5m／需搭橋≤1.5m／不臨路；
+  一般/防汛道路分開評）。輸出 成果.xlsx／maps/S00N.png 疊圖／sites.shp。
+  官田案已驗證：4 宗基地（S001 主基地 57.7ha 直接臨路〔一般+防汛〕、S002 直接臨路、
+  S003/S004 不臨路 49.4m/67.7m），結果在 outputs/20260707台南官田40MW/漁電臨路評估/。
 - 地段代碼線上查詢備援：https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx#gobox02
 
 ## 使用者的操作習慣
