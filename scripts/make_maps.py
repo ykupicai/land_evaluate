@@ -774,6 +774,62 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
     return layout
 
 
+OVERVIEW_COLORS = ["166,206,227", "31,120,180", "178,223,138", "51,160,44",
+                   "251,154,153", "227,26,28", "253,191,111", "255,127,0",
+                   "202,178,214", "106,61,154"]
+
+
+def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bool:
+    """00_總區位圖：EMAP 底 + fishpv 宗基地上色編號。回傳成功與否。"""
+    sites_shp = case_dir / "臨路評估" / "sites.shp"
+    if not sites_shp.exists():
+        print(f"[警告] 無 {sites_shp}，略過總區位圖", flush=True)
+        return False
+    lyr = QgsVectorLayer(str(sites_shp), "宗基地", "ogr")
+    if not lyr.isValid():
+        return False
+    cats = []
+    ids = sorted({str(f["site_id"]) for f in lyr.getFeatures()})
+    for i, sid in enumerate(ids):
+        sym = fill_symbol(tuple(int(x) for x in
+                          OVERVIEW_COLORS[i % len(OVERVIEW_COLORS)].split(",")),
+                          outline="60,60,60,255", width="0.4")
+        sym.setOpacity(0.65)
+        cats.append(QgsRendererCategory(sid, sym, sid))
+    lyr.setRenderer(QgsCategorizedSymbolRenderer("site_id", cats))
+    lyr.setLabeling(label_settings(
+        "\"site_id\" || '\\n' || format_number(\"area_m2\"/10000, 2) || ' ha'",
+        size=10.0, is_expression=True))
+    lyr.setLabelsEnabled(True)
+    ext = lyr.extent()
+    scale, extent = compute_scale_extent(ext)
+    # EMAP 底圖（不透明）
+    e3826 = (extent.xMinimum(), extent.yMinimum(), extent.xMaximum(), extent.yMaximum())
+    bm_dir = case_dir / "底圖"
+    bm_dir.mkdir(exist_ok=True)
+    tif = build_basemap(e3826, str(bm_dir / "overview_EMAP.tif"), layer="EMAP",
+                        cache_dir=str(bm_dir / "_tilecache"), buffer_ratio=0.05)
+    layers = [lyr]
+    if tif:
+        rl = QgsRasterLayer(tif, "臺灣通用電子地圖")
+        project.addMapLayer(rl, False)
+        keep_alive.append(rl)
+        layers = [lyr, rl]
+    project.addMapLayer(lyr, False)
+    keep_alive.append(lyr)
+    layout = build_layout(project, "00_overview", "總區位圖（宗基地聚合）",
+                          layers, [lyr], set(), scale, extent,
+                          "宗基地＝毗鄰地號聚合（fishpv）；編號對照 臨路評估/成果.xlsx",
+                          keep_alive)
+    exp = QgsLayoutExporter(layout)
+    st = QgsLayoutExporter.ImageExportSettings()
+    st.dpi = EXPORT_DPI
+    code = exp.exportToImage(str(case_dir / "00_總區位圖.png"), st)
+    ok = code == QgsLayoutExporter.Success
+    print(f"00_總區位圖:{'成功' if ok else '失敗'}", flush=True)
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -786,6 +842,7 @@ def main() -> None:
     only: set[str] | None = None
     exclude: set[str] = set()
     skip_extract = False
+    extract_only = overview_only = False
     for a in args:
         if a.startswith("--cases="):
             only = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
@@ -797,6 +854,10 @@ def main() -> None:
             MATERIALIZE = True
         elif a == "--skip-extract":
             skip_extract = True
+        elif a == "--extract-only":
+            extract_only = True
+        elif a == "--overview-only":
+            overview_only = True
         elif not a.startswith("--"):
             case_name = a
 
@@ -843,6 +904,15 @@ def main() -> None:
                     (r.get("使分") in (None, "", "None")) for r in c["rows"])
         else:
             warnings = extract_layers(cases, registry, gpkg)
+
+        if extract_only:
+            print(f"--extract-only:已寫 {gpkg},結束", flush=True)
+            return
+
+        if overview_only:
+            render_overview(project, out_dir, keep_alive)
+            return
+
         save_styles(styles_dir)
 
         # 共用圖層
