@@ -16,6 +16,19 @@ from dbfread import DBF
 from openpyxl import Workbook
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def load_sitemap(path: str) -> dict:
+    """sitemap.csv(地號,案場ID,案場名稱)→ {地號:(案場ID,案場名稱)}。"""
+    import csv
+    out = {}
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            no = str(row.get("地號", "")).strip()
+            if no:
+                out[no] = (str(row.get("案場ID", "")).strip(),
+                           str(row.get("案場名稱", "")).strip())
+    return out
 COLS = ["案場ID", "案場名稱", "縣市", "鄉鎮區", "段", "小段", "地號原文",
         "宗地母", "宗地子", "部分註記", "輸入使用分區", "輸入使用地目",
         "輸入國土功能分區", "解析信心", "備註"]
@@ -34,6 +47,9 @@ def pick(rec, *keys):
 
 def main():
     dbf_path, case, name = sys.argv[1], sys.argv[2], sys.argv[3]
+    sitemap = {}
+    if len(sys.argv) > 5 and sys.argv[4] == "--sitemap":
+        sitemap = load_sitemap(sys.argv[5])
     t = DBF(dbf_path, encoding="utf-8", char_decode_errors="replace")
     fields = t.field_names
     recs = list(t)
@@ -67,7 +83,8 @@ def main():
         seg = re.sub(r"段$", "", seg)  # section_index 段名不含「段」字尾
         zone = g(r, ["20251201_6"])          # 使分
         ltype = g(r, ["20251201_7"])         # 使類
-        ws.append([f"001", name, county, town, seg, "", landno,
+        cid, cname = sitemap.get(landno, ("001", name))
+        ws.append([cid, cname, county, town, seg, "", landno,
                    mother, child, "", zone, ltype, "", "高", "由基地shp直接匯入"])
         n += 1
     wb.save(out / "01_中繼檔.xlsx")
