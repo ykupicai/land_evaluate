@@ -41,7 +41,8 @@ python -X utf8 scripts\run_case.py --list <清冊.xlsx/pdf> [--case 案子名]
 python -X utf8 scripts\run_case.py --list <清冊> --resume [--mode single|persite]
 
 # 共通
---from <步驟>   # 從指定階段重跑(steps: meta|match|fishpv|overview|maps)
+--from <步驟>   # 從指定階段重跑(steps: meta|match|fishpv|overview|extract|maps;
+                #   match 為清冊模式限定;extract 在 trust-shp 模式對應 trust_extract_*)
 --no-qgz / --mem 透傳給 make_maps
 ```
 
@@ -55,9 +56,9 @@ run_case 本體跑在**系統 Python**;它以 subprocess 呼叫:
 ```
 【trust-shp 模式】                        【土地清冊模式】
 run_case --shp X.shp                      run_case --list 清冊
- ├ A. shp_to_meta(直跑,不停)              ├ A'. 解析→01_中繼檔 ←✋人工核對
- │    (幾何屬性信 shp;不跑 match)         │     (--resume 後)
- │                                        ├ B. match_parcels → 02
+ ├ A. shp_to_meta→01(僅留痕,不停,          ├ A'. 解析→01_中繼檔 ←✋人工核對
+ │    含無段號宗地;**不跑 match/extract**) │     (--resume 後)
+ │    幾何屬性全信 shp                     ├ B. match_parcels → 02
  │                                        ├ B2. 比對不到→fallback 鏈(§5.2)→02定稿
  ├ C. fishpv 臨路評估(env.bat 子進程)
  │    輸入:trust-shp=原 shp;清冊=02 撈得的官方宗地幾何(圖層.gpkg 基地層)
@@ -65,15 +66,29 @@ run_case --shp X.shp                      run_case --list 清冊
  ├ D. 00_總區位圖.png(宗基地聚合上色+S001..編號+電子地圖底)
  │    ←✋使用者選 --mode single | persite
  └ E. 出圖(PyQGIS):六張 ×(1組 或 每宗基地一組)+ .qgz + 05_出圖清單
+      trust-shp 出圖走 make_maps --trust-shp:基地層幾何+地號/使分/使類直讀 shp
+      (免比對官方 FID;無 14 碼段號的宗地照出),周邊地籍/功能分區仍按地圖範圍撈。
 ```
+
+> 註(2026-07-12,對齊實作):trust-shp 模式**全程不經 match_parcels/02_比對結果**。
+> 首跑步驟序=`meta→fishpv→digest→overview→(停)`;選模式後=
+> `[trust_extract_single|trust_extract_persite]→maps`(fishpv 缺則前置自動補
+> `fishpv→digest`)。這修正了早期實作為 shp 模式加 match 步驟、導致無段號宗地
+> (如官田 S002/S003)在 shp_to_meta 就被丟棄、出不了圖的缺陷。
 
 ## 5. 關鍵設計
 
 ### 5.1 trust-shp 模式的圖層準備
-- 基地層:直接取 shp(地號/使分/使類欄;dbf 壞欄名用 dbfread 容錯,同 shp_to_meta)
-- 國土功能分區:shp 幾何 ∩ 縣市功能分區 shp(沿用 zone 交集邏輯,不經地號)
-- 周邊地籍:照舊按地圖範圍從縣市官方地籍 shp 撈(與比對無關)
-- 02 一致性檢核:**無**(信任模式的明示代價,05 清單註記「trust-shp」)
+- 基地層:**直接取使用者 shp 的幾何**+地號/使分/使類欄(幾何用 QGIS OGR 讀、屬性用
+  自帶極簡 DBF 讀取 `make_maps._read_dbf` 容錯截斷欄名;幾何-屬性按位置配對)。
+  **不比對官方 FID**,無 14 碼段號的宗地照收(修官田 S002/S003 被丟的缺陷)。
+  案場分派:single→全歸案場 001;persite→依 sitemap.csv(地號→案場ID)分組,查無歸 001。
+- 國土功能分區:仍按各 case 出圖範圍(rect)從縣市功能分區 shp 撈(沿用 load_zones_for_county)。
+- 周邊地籍:照舊按地圖範圍從縣市官方地籍 shp 撈(與比對無關);「是否基地」欄改以
+  **地號比對**(周邊 feature 地號 ∈ 該 case 基地地號集合則為 Y)——trust 基地非官方 FID,不可用 FID。
+- 02 一致性檢核:**無**(信任模式的明示代價)。
+- 產出同一個 圖層.gpkg(基地/周邊地籍/功能分區三表,schema 與清冊模式一致),下游
+  (make_table_copies、六主題、labels、qgz)完全共用、不分叉。
 
 ### 5.2 比對不到的自動 fallback 鏈(清冊模式;規則來自清潔隊案 021/038/086、023/063 實例)
 1. match_parcels 正常比對失敗的地號 → 自動呼叫 `query_landno.py`(純 HTTP 新舊地號查詢)。

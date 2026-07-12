@@ -75,9 +75,9 @@ def main():
     cids_used = set()
     for r in recs:
         seg_code = g(r, ["段號"])            # DF434401220000
-        if len(seg_code) < 14:
-            continue
-        mother, child = seg_code[6:10], seg_code[10:14]
+        # 無 14 碼段號者仍列入 01（人可讀清冊/留痕）；宗地母/子留空。
+        # 出圖不靠 01，trust-shp 模式走 make_maps --trust-shp 直讀 shp 幾何。
+        mother, child = (seg_code[6:10], seg_code[10:14]) if len(seg_code) >= 14 else ("", "")
         landno = g(r, ["地號", "20251201_4"])
         county = norm_city(g(r, ["20251201_1"])) or def_c
         town = g(r, ["20251201_2"]) or def_t

@@ -14,28 +14,27 @@ QGIS_BAT = Path(r"C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat")
 FISHPV_ROOT = Path(r"C:\Users\user\Documents\Claude\Projects\漁電共生評估")
 COLORTABLE = (FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
               / "resources" / "luimap_colortable.csv")
-FROM_STEPS = ("meta", "match", "fishpv", "overview", "maps")
+FROM_STEPS = ("meta", "match", "fishpv", "overview", "extract", "maps")
 
 
 def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> list:
-    """決定本次要執行的步驟序列（純函式，依 spec §4）。"""
+    """決定本次要執行的步驟序列（純函式，依 spec §4/§5.1）。
+
+    trust-shp 模式（spec §5.1）：基地層幾何與屬性直接取自 shp、**不比對官方 FID**，
+    故無 match 步驟；出圖以 make_maps --trust-shp 直讀 shp（trust_extract_* + maps）。
+    """
     if mode_shp:
         if chosen_mode:
             steps = []
-            need_fishpv = not artifacts.get("fishpv")
-            need_meta = not artifacts.get("01")
-            if need_meta:
-                steps.append("meta")
-            if need_fishpv:
+            if not artifacts.get("fishpv"):
                 steps += ["fishpv", "digest"]
-            if chosen_mode == "persite":
-                steps.append("meta_sitemap")   # 重建 01 依 sitemap 分組
-            # 01 剛(重)產生時 02 必然過期，需重新比對；persite 重建 01 後亦同
-            if need_meta or chosen_mode == "persite" or not artifacts.get("02"):
-                steps.append("match")
-            steps += ["extract", "maps"]
+            # trust 出圖：single 全歸 001；persite 依 sitemap 每宗基地一組
+            steps.append("trust_extract_persite" if chosen_mode == "persite"
+                         else "trust_extract_single")
+            steps.append("maps")
             return steps
-        return ["meta", "match", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+        # 首跑：解析留痕(meta)→臨路(fishpv/digest)→總區位圖，停等選模式；不比對、不抽圖層
+        return ["meta", "fishpv", "digest", "overview", "STOP_MODE"]
     # 清冊模式
     if not resume and not chosen_mode:
         return ["parse", "STOP_CHECK"]
@@ -50,16 +49,25 @@ def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> li
 
 
 def find_from_index(steps: list, target: str) -> int | None:
-    """在 steps 中找 --from 目標的第一個相符索引；target=='match' 同時匹配 match/match2。"""
+    """在 steps 中找 --from 目標的第一個相符索引：
+    - target=='match' 同時匹配 match/match2（清冊 fallback 補鏈）；
+    - target=='extract' 同時匹配 extract/trust_extract_single/trust_extract_persite
+      （trust-shp 模式已無獨立 extract，抽圖層改由 trust_extract_* 承擔）。"""
+    aliases = {
+        "match": {"match", "match2"},
+        "extract": {"extract", "trust_extract_single", "trust_extract_persite"},
+    }
+    want = aliases.get(target, {target})
     for i, s in enumerate(steps):
-        if s == target or (target == "match" and s == "match2"):
+        if s in want:
             return i
     return None
 
 
 KNOWN_STEPS = {
-    "meta", "meta_sitemap", "parse", "match", "match2", "landno", "apply",
-    "extract", "fishpv", "digest", "overview", "maps", "STOP_MODE", "STOP_CHECK",
+    "meta", "parse", "match", "match2", "landno", "apply", "extract",
+    "trust_extract_single", "trust_extract_persite",
+    "fishpv", "digest", "overview", "maps", "STOP_MODE", "STOP_CHECK",
 }
 
 
@@ -210,16 +218,6 @@ def main():
         if s == "meta":
             _run(["python", "-X", "utf8", REPO / "scripts" / "shp_to_meta.py",
                   dbf, case, case], label="shp_to_meta")
-        elif s == "meta_sitemap":
-            if not (fp / "sitemap.csv").exists():
-                if (fp / "成果.xlsx").exists():
-                    digest_fishpv(case_dir)
-                else:
-                    sys.exit("[run_case] meta_sitemap 需要 臨路評估/成果.xlsx 或 "
-                             "sitemap.csv，兩者皆缺")
-            _run(["python", "-X", "utf8", REPO / "scripts" / "shp_to_meta.py",
-                  dbf, case, case, "--sitemap", fp / "sitemap.csv"],
-                 label="shp_to_meta --sitemap")
         elif s == "parse":
             print("[run_case] 清冊解析請先以既有流程產 01_中繼檔（換版式需 AI 寫解析），"
                  "完成人工核對後加 --resume 續跑")
@@ -236,6 +234,20 @@ def main():
         elif s == "extract":
             _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--extract-only"],
                  label="extract gpkg")
+        elif s == "trust_extract_single":
+            _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case,
+                  "--trust-shp", shp, "--extract-only"],
+                 label="trust extract（single，直取 shp 幾何）")
+        elif s == "trust_extract_persite":
+            if not (fp / "sitemap.csv").exists():
+                if (fp / "成果.xlsx").exists():
+                    digest_fishpv(case_dir)
+                else:
+                    sys.exit("[run_case] trust_extract_persite 需 臨路評估/sitemap.csv "
+                             "或 成果.xlsx，兩者皆缺")
+            _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case,
+                  "--trust-shp", shp, "--sitemap", fp / "sitemap.csv", "--extract-only"],
+                 label="trust extract（persite，依 sitemap 分宗基地）")
         elif s == "fishpv":
             cad = shp if mode_shp else str(case_dir / "圖層.gpkg")
             _run([FISHPV_ROOT / "env.bat", "python", "-m", "fishpv.cli",
@@ -245,12 +257,18 @@ def main():
         elif s == "digest":
             digest_fishpv(case_dir)
         elif s == "overview":
-            _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--overview-only"],
-                 label="00_總區位圖")
+            cmd = [QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--overview-only"]
+            if mode_shp:
+                cmd += ["--trust-shp", shp]  # trust 模式免讀 02
+            _run(cmd, label="00_總區位圖")
         elif s == "maps":
-            _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case,
-                 "--skip-extract", *passthru],
-                 label="六張圖+qgz")
+            cmd = [QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--skip-extract"]
+            if mode_shp:
+                cmd += ["--trust-shp", shp]  # maps 需 shp 建 cases（免讀 02）
+                if chosen == "persite":
+                    cmd += ["--sitemap", fp / "sitemap.csv"]
+            cmd += passthru
+            _run(cmd, label="六張圖+qgz")
         elif s == "STOP_MODE":
             print(f"\n請看 {case_dir / '00_總區位圖.png'} 後選出圖單位，"
                   f"再跑同指令加 --mode single|persite")

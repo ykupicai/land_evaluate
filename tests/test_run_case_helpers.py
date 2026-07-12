@@ -6,31 +6,41 @@ from run_case import execute_steps, find_from_index, plan_steps
 
 
 def test_shp_first_run_stops_at_overview():
+    # trust-shp 首跑：不比對(match)、不抽圖層(extract)，直接 meta→fishpv→總區位圖後停
     steps = plan_steps(mode_shp=True, resume=False, chosen_mode=None,
                        artifacts={"01": False, "02": False, "03_nonempty": False,
                                   "fishpv": False, "overview": False})
-    assert steps == ["meta", "match", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+    assert steps == ["meta", "fishpv", "digest", "overview", "STOP_MODE"]
+    assert "match" not in steps and "extract" not in steps
 
 
-def test_shp_second_run_with_mode_renders():
+def test_shp_second_run_persite_renders_via_trust_extract():
     steps = plan_steps(True, False, "persite",
                        {"01": True, "02": False, "03_nonempty": False,
                         "fishpv": True, "overview": True})
-    assert steps[-1] == "maps" and "meta_sitemap" in steps
+    assert steps == ["trust_extract_persite", "maps"]
+    assert "match" not in steps
 
 
-def test_shp_mode_without_fishpv_autochains():
+def test_shp_second_run_single_renders_via_trust_extract():
+    steps = plan_steps(True, False, "single",
+                       {"01": True, "02": False, "03_nonempty": False,
+                        "fishpv": True, "overview": True})
+    assert steps == ["trust_extract_single", "maps"]
+
+
+def test_shp_mode_persite_without_fishpv_autochains():
     steps = plan_steps(True, False, "persite",
                        {"01": True, "02": False, "03_nonempty": False,
                         "fishpv": False, "overview": True})
-    assert steps == ["fishpv", "digest", "meta_sitemap", "match", "extract", "maps"]
+    assert steps == ["fishpv", "digest", "trust_extract_persite", "maps"]
 
 
 def test_shp_mode_single_without_fishpv():
     steps = plan_steps(True, False, "single",
                        {"01": True, "02": False, "03_nonempty": False,
                         "fishpv": False, "overview": True})
-    assert steps == ["fishpv", "digest", "match", "extract", "maps"]
+    assert steps == ["fishpv", "digest", "trust_extract_single", "maps"]
 
 
 def test_list_first_run_stops_at_check():
@@ -62,6 +72,14 @@ def test_find_from_index_prefers_earlier_match_over_match2():
 
 def test_find_from_index_not_found():
     assert find_from_index(["meta", "extract", "maps"], "overview") is None
+
+
+def test_find_from_index_extract_aliases_trust_extract():
+    # trust-shp 模式已無獨立 extract 步驟；--from extract 需能命中 trust_extract_*
+    assert find_from_index(["fishpv", "digest", "trust_extract_persite", "maps"],
+                           "extract") == 2
+    assert find_from_index(["fishpv", "digest", "trust_extract_single", "maps"],
+                           "extract") == 2
 
 
 def test_dynamic_fallback_inserts_after_match():
