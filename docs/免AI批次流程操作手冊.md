@@ -15,6 +15,56 @@
 
 不在此表：政府圖台（NGIS/TCDGIS）批次選取＋下載官方 shp，目前仍需人工瀏覽器操作（含帳密登入、圖形驗證碼），見文末說明。
 
+## 一鍵整合流程 run_case（推薦：shp／清冊 → 六張圖 + qgz）
+
+`scripts/run_case.py` 是總控腳本，把下面各階段串起來自動跑，並多產兩張新圖（國土利用調查、臨路判定），最後產 `.qgz`。**六張圖**＝使用分區／使用地編定／國土功能分區／正射套疊／國土利用調查／臨路判定。跑在系統 Python，會自動依步驟呼叫 QGIS 內建 Python 與漁電共生評估專案（fishpv）。
+
+有停點的地方腳本會停下來、印出下一步指令，照著加參數再跑同一支即可，全程免 AI。
+
+### 模式一：trust-shp（已有基地 shp，直接信任其幾何與屬性，不做地籍比對）
+
+```powershell
+# 第一步：解析留痕 + 臨路評估 + 產 00_總區位圖，停下等你選出圖單位
+python -X utf8 scripts\run_case.py --shp <基地.shp> [--case 案子名]
+
+# 看完 outputs\<案子>\00_總區位圖.png 後，二選一續跑：
+python -X utf8 scripts\run_case.py --shp <基地.shp> --mode single    # 整份 shp 出一組六張（官田模式）
+python -X utf8 scripts\run_case.py --shp <基地.shp> --mode persite   # 每宗基地各出一組六張（環保局/漁電模式）
+```
+
+trust-shp 模式**不經地籍比對**：基地層幾何、地號、使分、使類全部直接讀 shp，**沒有 14 碼段號的宗地也照樣出圖**（不會被丟掉）。省略 `--case` 時案子名取 shp 檔名。
+
+### 模式二：土地清冊（xlsx/PDF，走解析＋地籍比對）
+
+```powershell
+# 第一步：解析出 01_中繼檔.xlsx 後停下（請人工核對地號/分區辨識結果）
+python -X utf8 scripts\run_case.py --list <清冊.xlsx/pdf> [--case 案子名]
+
+# 人工核對 01_中繼檔.xlsx 後，續跑到 00_總區位圖 停點：
+python -X utf8 scripts\run_case.py --list <清冊> --resume
+
+# 看完 00_總區位圖 後選出圖單位（清冊模式：single=整案一組、persite=每案場一組）：
+python -X utf8 scripts\run_case.py --list <清冊> --resume --mode single|persite
+```
+
+`--resume` 續跑會自動做：比對地籍 → 若有比不到的地號，**自動接新舊地號查詢（query_landno）→ 回填（apply_landno）→ 重新比對**，全程留痕於 `04_新舊地號對照清單.xlsx`，不會中斷。查得完整對應→改用新地號；查無（疑逕為分割）→退一步用「母號範圍」示意出圖；母號也無→記入 `03_無法對應清單.xlsx`、該地號不出圖但不影響其他。
+
+> 換新版式清冊仍需 AI 寫一次解析規則（見階段1）；解析、核對後 `--resume` 之後全程免 AI。
+
+### 共通參數
+
+- `--from <步驟>`：從指定階段重跑（`meta|match|fishpv|overview|extract|maps`；`match` 為清冊模式限定）。
+- `--mem`：向量層materialize 成記憶體層算圖，**免疫桌面 QGIS 開著同案 gpkg 造成的 SQLite 鎖衝突**；但記憶體層不會存進 `.qgz`，故要搭 `--no-qgz`。
+- `--no-qgz`：跳過 `.qgz` 輸出（大批次記憶體不穩、或搭 `--mem` 時用）。
+- 何時用哪個：一般情況直接跑（會產 `.qgz`）；若出圖時**桌面 QGIS 正開著同一案子的 gpkg/.qgz**，主題色可能整片空白卻仍回報成功——**務必先關掉桌面 QGIS**，或改用 `--mem --no-qgz`。
+
+### 停點速記
+
+| 模式 | 首跑停在 | 續跑（--resume/--mode）停在 |
+|---|---|---|
+| trust-shp | `00_總區位圖`（等 `--mode`） | 選 `--mode` 後跑完六張圖 + qgz |
+| 清冊 | `01_中繼檔`（等人工核對＋`--resume`） | `--resume` 停在 `00_總區位圖`；再加 `--mode` 跑完六張圖 + qgz |
+
 ## 前置需求（一次性，已在本專案備妥）
 
 - `config/county_registry.yaml`、`config/section_index.csv`、`config/urban_plan_legend.yaml`
