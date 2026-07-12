@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import math
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -350,6 +351,60 @@ def fix_zone_crs(layer: QgsVectorLayer) -> str:
         # 自訂 PROJCS（中央經線121、比例0.9999、假東250000）實為 TWD97 TM2
         layer.setCrs(QgsCoordinateReferenceSystem(CRS_3826))
     return CRS_3826
+
+
+def ensure_gpkg_crs(layer: QgsVectorLayer, authid: str = CRS_3826) -> None:
+    """最後防線：crs() 無效就強制補回本專案固定的 EPSG:3826（見 open_gpkg_layer 註解）。"""
+    if not layer.crs().isValid():
+        layer.setCrs(QgsCoordinateReferenceSystem(authid))
+
+
+# 需要各自獨立實體檔的 gpkg 表格（見 make_table_copies 說明）
+GPKG_TABLES = ["基地", "周邊地籍", "功能分區"]
+
+
+def make_table_copies(gpkg: Path, out_dir: Path) -> dict[str, Path]:
+    """把 圖層.gpkg 複製成「每個表格各一份獨立實體檔」，回傳 {表格名: 複本路徑}。
+
+    根因（Task8 除錯查明，非外部程序鎖！）：GDAL/OGR 對同一個 .gpkg 檔案路徑，會在
+    process 內共用底層 SQLite dataset 連線；本程序在同一支 圖層.gpkg 內對「基地」表
+    setSubsetString() 之後，同 process 內任何對「周邊地籍」（或其他不同表）的
+    QgsVectorLayer 開啟／setSubsetString()／extent() 查詢會持續性(非偶發、重試/等待
+    完全沒用，實測 20 次、6+ 秒仍 100% 失敗)讀回 crs() 空值、extent() Null，錯誤log
+    出現「unable to open database file」「layer ... is not registered in
+    gpkg_geometry_columns」。屬性/幾何資料其實仍完整，但地圖渲染時因座標系統無效/
+    範圍未知，該圖層填色符號整層被跳過（只剩 outline-only 的紅框/灰線正常），且仍
+    回報「成功」——非常陰。已用兩份「不同實體檔」重現驗證：只要「基地」與「周邊地籍」
+    分別來自不同檔案，兩者互不干擾，完全正常；同一表格（如 周邊地籍 開 3 次給
+    l_nz/l_nt/l_gray）共用同一份複本沒有問題，問題只發生在「不同表格名稱」共用同一
+    實體檔時。故解法：每個表格各給一份獨立實體檔，全程用複本路徑開層，不開原始
+    圖層.gpkg（原檔仍保留、不受影響，仍可供桌面 QGIS 手動檢視）。"""
+    copies: dict[str, Path] = {}
+    for table in GPKG_TABLES:
+        dst = out_dir / f"圖層_讀取_{table}.gpkg"
+        shutil.copyfile(gpkg, dst)
+        copies[table] = dst
+    return copies
+
+
+def open_gpkg_layer(uri: str, name: str, subset: str | None = None,
+                    retries: int = 3) -> QgsVectorLayer:
+    """開 gpkg 圖層（可選 setSubsetString）並確認 crs()/extent() 有效才回傳；當作對付
+    其他偶發瞬間鎖（例如桌面 QGIS/防毒同時存取）的最後防線。注意：這個重試機制救不了
+    make_table_copies() 描述的「跨表格共用連線」問題（已實測重試無效），呼叫端務必
+    先用 make_table_copies() 讓每個表格各自來自獨立實體檔，這裡只處理「同一份複本、
+    同一張表」仍可能發生的其他瞬時失敗。"""
+    layer = None
+    for attempt in range(retries):
+        if attempt > 0:
+            time.sleep(0.2)
+        layer = QgsVectorLayer(uri, name, "ogr")
+        if subset:
+            layer.setSubsetString(subset)
+        if layer.crs().isValid() and not layer.extent().isNull():
+            return layer
+    ensure_gpkg_crs(layer)
+    return layer
 
 
 def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[str]:
@@ -956,19 +1011,8 @@ def main() -> None:
     keep_alive: list = []
     try:
         if skip_extract and gpkg.exists():
-            # 重用既有 gpkg（避開「同進程先寫後讀」的 SQLite 鎖）：extent 改由 gpkg 基地層算
             warnings = []
             print("略過 extract_layers，重用既有 圖層.gpkg", flush=True)
-            for cid, c in cases.items():
-                bl = QgsVectorLayer(f"{gpkg}|layername=基地", "b", "ogr")
-                bl.setSubsetString(f"\"案場ID\" = '{cid}'")
-                ext = bl.extent()
-                if ext.isEmpty():
-                    c["error"] = "gpkg 基地無此案場"
-                    continue
-                c["scale"], c["extent"] = compute_scale_extent(ext)
-                c["has_urban_rows"] = any(
-                    (r.get("使分") in (None, "", "None")) for r in c["rows"])
         else:
             warnings = extract_layers(cases, registry, gpkg)
 
@@ -980,10 +1024,28 @@ def main() -> None:
             render_overview(project, out_dir, keep_alive)
             return
 
+        # 每個表格各給一份獨立實體檔再開層（見 make_table_copies 說明：GDAL 對同一支
+        # gpkg 內不同表格的 shared dataset 連線會互相污染 crs()/extent()，跨檔案則
+        # 完全正常，且已實測驗證）。
+        tbl_gpkg = make_table_copies(gpkg, out_dir)
+
+        if skip_extract:
+            # extent 改由 gpkg 基地層算（原 extract_layers 已內建，這裡補算 skip 掉的部分）
+            for cid, c in cases.items():
+                bl = open_gpkg_layer(f"{tbl_gpkg['基地']}|layername=基地", "b",
+                                     f"\"案場ID\" = '{cid}'")
+                ext = bl.extent()
+                if ext.isEmpty():
+                    c["error"] = "gpkg 基地無此案場"
+                    continue
+                c["scale"], c["extent"] = compute_scale_extent(ext)
+                c["has_urban_rows"] = any(
+                    (r.get("使分") in (None, "", "None")) for r in c["rows"])
+
         save_styles(styles_dir)
 
         # 共用圖層
-        zones_lyr = QgsVectorLayer(f"{gpkg}|layername=功能分區", "國土功能分區", "ogr")
+        zones_lyr = open_gpkg_layer(f"{tbl_gpkg['功能分區']}|layername=功能分區", "國土功能分區")
         zones_lyr.setRenderer(zone_renderer())
         zones_lyr.setOpacity(0.6)
         if MATERIALIZE:
@@ -1043,21 +1105,19 @@ def main() -> None:
                     n_fail += 1
                 continue
 
-            base_uri = f"{gpkg}|layername=基地"
-            neigh_uri = f"{gpkg}|layername=周邊地籍"
+            base_uri = f"{tbl_gpkg['基地']}|layername=基地"
+            neigh_uri = f"{tbl_gpkg['周邊地籍']}|layername=周邊地籍"
             subset = f"\"案場ID\" = '{cid}'"
 
             # 基地紅框（4 張圖共用最上層，標基地地號）
-            l_red = QgsVectorLayer(base_uri, "基地（紅框標示）", "ogr")
-            l_red.setSubsetString(subset)
+            l_red = open_gpkg_layer(base_uri, "基地（紅框標示）", subset)
             l_red.renderer().setSymbol(outline_symbol())
             l_red.setLabeling(label_settings())
             l_red.setLabelsEnabled(True)
             # 周邊+基地宗地上色（使用分區／使用地編定，各套使用者樣式庫 QML）
-            l_nz = QgsVectorLayer(neigh_uri, "宗地-使用分區", "ogr")
-            l_nt = QgsVectorLayer(neigh_uri, "宗地-使用地編定", "ogr")
+            l_nz = open_gpkg_layer(neigh_uri, "宗地-使用分區", subset)
+            l_nt = open_gpkg_layer(neigh_uri, "宗地-使用地編定", subset)
             for l, qml in ((l_nz, qml_zoning), (l_nt, qml_type)):
-                l.setSubsetString(subset)
                 _, ok = l.loadNamedStyle(qml)
                 if not ok and not qml_warned:
                     warnings.append(f"QML 套用失敗：{qml}")
@@ -1065,8 +1125,7 @@ def main() -> None:
                 # 周邊宗地不標地號（僅基地宗地由 l_red 標；依使用者指示地號只呈現基地範圍）
                 l.setLabelsEnabled(False)
             # 地籍界線（使用者符號多無外框，疊一層細灰界線；主題3/4 亦作周邊淡灰線）
-            l_gray = QgsVectorLayer(neigh_uri, "周邊地籍界線", "ogr")
-            l_gray.setSubsetString(subset)
+            l_gray = open_gpkg_layer(neigh_uri, "周邊地籍界線", subset)
             l_gray.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
 
             if MATERIALIZE:
