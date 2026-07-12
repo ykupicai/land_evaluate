@@ -23,15 +23,19 @@ def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> li
         if chosen_mode:
             steps = []
             need_fishpv = not artifacts.get("fishpv")
-            if not artifacts.get("01"):
+            need_meta = not artifacts.get("01")
+            if need_meta:
                 steps.append("meta")
             if need_fishpv:
                 steps += ["fishpv", "digest"]
             if chosen_mode == "persite":
                 steps.append("meta_sitemap")   # 重建 01 依 sitemap 分組
+            # 01 剛(重)產生時 02 必然過期，需重新比對；persite 重建 01 後亦同
+            if need_meta or chosen_mode == "persite" or not artifacts.get("02"):
+                steps.append("match")
             steps += ["extract", "maps"]
             return steps
-        return ["meta", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+        return ["meta", "match", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
     # 清冊模式
     if not resume and not chosen_mode:
         return ["parse", "STOP_CHECK"]

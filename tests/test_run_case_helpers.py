@@ -9,7 +9,7 @@ def test_shp_first_run_stops_at_overview():
     steps = plan_steps(mode_shp=True, resume=False, chosen_mode=None,
                        artifacts={"01": False, "02": False, "03_nonempty": False,
                                   "fishpv": False, "overview": False})
-    assert steps == ["meta", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+    assert steps == ["meta", "match", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
 
 
 def test_shp_second_run_with_mode_renders():
@@ -23,14 +23,14 @@ def test_shp_mode_without_fishpv_autochains():
     steps = plan_steps(True, False, "persite",
                        {"01": True, "02": False, "03_nonempty": False,
                         "fishpv": False, "overview": True})
-    assert steps == ["fishpv", "digest", "meta_sitemap", "extract", "maps"]
+    assert steps == ["fishpv", "digest", "meta_sitemap", "match", "extract", "maps"]
 
 
 def test_shp_mode_single_without_fishpv():
     steps = plan_steps(True, False, "single",
                        {"01": True, "02": False, "03_nonempty": False,
                         "fishpv": False, "overview": True})
-    assert steps == ["fishpv", "digest", "extract", "maps"]
+    assert steps == ["fishpv", "digest", "match", "extract", "maps"]
 
 
 def test_list_first_run_stops_at_check():
