@@ -56,7 +56,16 @@ from openpyxl.styles import Alignment, Font
 
 from zone_utils import normalize_zone
 from nlsc_wmts import build_basemap
-from parse_helpers import normalize_county
+from shp_trust_utils import (
+    UNMAPPED_ID,
+    UNMAPPED_NAME,
+    assign_site,
+    load_sitemap,
+    normalize_landno,
+    read_dbf,
+    read_shp_trust_meta,
+    shp_get,
+)
 
 from qgis.core import (
     Qgis,
@@ -270,130 +279,6 @@ def read_cases(xlsx: Path, only: set[str] | None, exclude: set[str]) -> dict[str
 # ---------------------------------------------------------------------------
 
 
-def _read_dbf(dbf_path: str) -> list[dict]:
-    """極簡 DBF 讀取（純標準庫，QGIS 內建 Python 無 dbfread 亦可用）。
-    只把每欄值以 UTF-8(errors=replace) 解為字串、去空白——本工具只需 C 型字串欄
-    （段號/地號/段別/縣市/鄉鎮/使分/使類），數值欄以字串形式帶過不使用。
-    欄名截斷（>10 bytes 的中文欄名）與 dbfread 同樣容忍；跳過標記刪除的記錄，
-    與 QGIS OGR 讀取順序/筆數一致，供幾何-屬性按位置配對。"""
-    import struct
-    with open(dbf_path, "rb") as f:
-        data = f.read()
-    n_rec = struct.unpack_from("<I", data, 4)[0]
-    header_size = struct.unpack_from("<H", data, 8)[0]
-    rec_size = struct.unpack_from("<H", data, 10)[0]
-    fields = []  # (name, length)
-    off = 32
-    while data[off] != 0x0D:
-        name = data[off:off + 11].split(b"\x00", 1)[0].decode("utf-8", "replace")
-        length = data[off + 16]
-        fields.append((name, length))
-        off += 32
-    recs = []
-    for i in range(n_rec):
-        start = header_size + i * rec_size
-        if start >= len(data):
-            break
-        if data[start] == 0x2A:  # 標記刪除
-            continue
-        pos = start + 1
-        rec = {}
-        for name, length in fields:
-            raw = data[pos:pos + length]
-            rec[name] = raw.decode("utf-8", "replace").strip()
-            pos += length
-        recs.append(rec)
-    return recs
-
-
-def _shp_get(rec, keys) -> str:
-    """dbfread 記錄依欄名清單取第一個非空值（同 shp_to_meta.g，容忍截斷欄名）。"""
-    for k in keys:
-        if k in rec and rec[k] not in (None, ""):
-            return str(rec[k]).strip()
-    return ""
-
-
-def _shp_norm_city(s: str) -> str:
-    """縣市名正規化：巿→市、台→臺、去空白（對齊 registry 鍵與 shp_to_meta）。"""
-    return normalize_county((s or "").replace("巿", "市")) or ""
-
-
-def load_sitemap(path: str) -> dict:
-    """sitemap.csv(地號,案場ID,案場名稱) → {地號:(案場ID,案場名稱)}。"""
-    out: dict[str, tuple] = {}
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            no = str(row.get("地號", "")).strip()
-            if no:
-                out[no] = (str(row.get("案場ID", "")).strip(),
-                           str(row.get("案場名稱", "")).strip())
-    return out
-
-
-def assign_site(landno: str, sitemap: dict, case_name: str):
-    """地號 → (案場ID, 案場名稱)。single(無 sitemap)全歸 001；persite 查 sitemap，
-    查無回 None（呼叫端記 warning 並歸 001，不丟）。"""
-    if sitemap:
-        return sitemap.get(landno)
-    return ("001", case_name)
-
-
-def read_shp_trust_meta(shp_path: str, sitemap: dict, case_name: str,
-                        only: set[str] | None, exclude: set[str]) -> dict[str, dict]:
-    """只讀 dbf 屬性（免 QGIS）建 cases dict：id/name/county/town/rows。
-    幾何在 extract_layers_trust 才讀（需 QGIS）。無段號者照收（rows 之宗地母/子留空）。"""
-    from collections import Counter
-    dbf_path = str(Path(shp_path).with_suffix(".dbf"))
-    recs = _read_dbf(dbf_path)
-    cnt_c = Counter(_shp_norm_city(_shp_get(r, ["20251201_1"])) for r in recs)
-    cnt_t = Counter(_shp_get(r, ["20251201_2"]) for r in recs)
-
-    def top(cnt):
-        vals = [(k, v) for k, v in cnt.items() if k]
-        return max(vals, key=lambda x: x[1])[0] if vals else ""
-
-    def_c, def_t = top(cnt_c), top(cnt_t)
-    cases: dict[str, dict] = {}
-    n_miss = 0
-    for r in recs:
-        landno = _shp_get(r, ["地號", "20251201_4"])
-        site = assign_site(landno, sitemap, case_name)
-        if site is None:
-            n_miss += 1
-            site = ("001", case_name)
-        cid, cname = site
-        if cid in exclude or (only and cid not in only):
-            continue
-        county = _shp_norm_city(_shp_get(r, ["20251201_1"])) or def_c
-        town = _shp_get(r, ["20251201_2"]) or def_t
-        seg = re.sub(r"段$", "", _shp_get(r, ["段別", "20251201_3"]))
-        seg_code = _shp_get(r, ["段號"])
-        mother = child = ""
-        if len(seg_code) >= 14:
-            mother, child = seg_code[6:10], seg_code[10:14]
-        zone = _shp_get(r, ["20251201_6"])
-        ltype = _shp_get(r, ["20251201_7"])
-        c = cases.setdefault(cid, {"id": cid, "name": cname, "county": county,
-                                   "town": town, "rows": [],
-                                   "_ccnt": Counter(), "_tcnt": Counter()})
-        c["_ccnt"][county] += 1
-        c["_tcnt"][town] += 1
-        c["rows"].append({"地號": landno, "段": seg, "小段": "",
-                          "宗地母": mother, "宗地子": child,
-                          "使分": zone or None, "使類": ltype or None, "fids": []})
-    for c in cases.values():
-        if c["_ccnt"]:
-            c["county"] = c["_ccnt"].most_common(1)[0][0]
-        if c["_tcnt"]:
-            c["town"] = c["_tcnt"].most_common(1)[0][0]
-        c.pop("_ccnt", None)
-        c.pop("_tcnt", None)
-    if sitemap and n_miss:
-        print(f"[警告] trust-shp：sitemap 查無 {n_miss} 筆地號，歸案場 001", flush=True)
-    return cases
-
-
 def _write_gpkg(layers, gpkg: Path) -> None:
     """把 base/neigh/zones 三個記憶體層寫進單一 gpkg（三表，schema 與 extract_layers 一致）。"""
     gpkg.parent.mkdir(parents=True, exist_ok=True)
@@ -425,9 +310,9 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                                  "&field=使分:string&field=使類:string&field=是否基地:string")
     zones = mem_layer("功能分區", "field=縣市:string&field=zone:string")
 
-    # 1. 基地層：shp 幾何(QGIS) + dbf 屬性(_read_dbf，容忍截斷欄名)，按位置配對
+    # 1. 基地層：shp 幾何(QGIS) + dbf 屬性(read_dbf，容忍截斷欄名/依 .cpg 編碼)，按位置配對
     dbf_path = str(Path(shp_path).with_suffix(".dbf"))
-    recs = _read_dbf(dbf_path)
+    recs = read_dbf(dbf_path)
     lyr_shp = QgsVectorLayer(str(shp_path), "trust", "ogr")
     if not lyr_shp.isValid():
         raise RuntimeError(f"trust-shp 載入失敗：{shp_path}")
@@ -437,15 +322,15 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
     bboxes: dict[str, QgsRectangle] = {}
     landnos: dict[str, set] = defaultdict(set)
     for f, r in zip(feats, recs):
-        landno = _shp_get(r, ["地號", "20251201_4"])
+        landno = shp_get(r, ["地號", "20251201_4"])
         site = assign_site(landno, sitemap, case_name)
         if site is None:
-            site = ("001", case_name)
+            site = (UNMAPPED_ID, UNMAPPED_NAME)
         cid, cname = site
         if cid not in cases:
             continue
-        zone = _shp_get(r, ["20251201_6"])
-        ltype = _shp_get(r, ["20251201_7"])
+        zone = shp_get(r, ["20251201_6"])
+        ltype = shp_get(r, ["20251201_7"])
         g = f.geometry()
         if g is None or g.isEmpty():
             warnings.append(f"{cid} 地號{landno} 無幾何")
@@ -488,6 +373,10 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
         print(f"{county}：{len(clist)} 案場（trust-shp）", flush=True)
         for c in clist:
             base_set = c.get("_landnos", set())
+            # 「是否基地」以正規化地號比對：基地地號=shp 原文，周邊=官方母子號 landno_text()
+            # 還原，兩邊格式可能不同（前導零/全形/「之」）→ 都經 normalize_landno 再比。
+            base_norm = {normalize_landno(x) for x in base_set if x}
+            matched: set[str] = set()
             rect = c["extent"].buffered(c["extent"].width() * NEIGH_EXPAND)
             attrs_idx = [i for i in (i_mother, i_child, i_zone, i_type) if i >= 0]
             req = QgsFeatureRequest().setFilterRect(rect).setSubsetOfAttributes(attrs_idx)
@@ -496,10 +385,20 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                 zone = attr_str(f[i_zone]) if i_zone >= 0 else ""
                 typ = attr_str(f[i_type]) if i_type >= 0 else ""
                 ln = landno_text(f[i_mother], f[i_child]) if i_mother >= 0 else ""
+                is_base = normalize_landno(ln) in base_norm
+                if is_base:
+                    matched.add(normalize_landno(ln))
                 add_feat(neigh, f.geometry(), [
                     c["id"], ln, zone or URBAN_LABEL, typ or URBAN_LABEL,
-                    "Y" if ln in base_set else ""])
+                    "Y" if is_base else ""])
                 n += 1
+            # 基地宗地在周邊層完全找不到相符（疊字/格式問題）→ 點名警告，不靜默
+            miss = base_norm - matched
+            if miss:
+                orig = sorted({x for x in base_set if normalize_landno(x) in miss})
+                warnings.append(
+                    f"{c['id']} {c['name']}：{len(orig)} 筆基地地號在周邊官方地籍層"
+                    f"找不到相符（是否基地無 Y，疑地號格式/疊字不一致）：{'、'.join(orig)}")
             print(f"  {c['id']} {c['name']}：基地 {len(base_set)} 地號、1/{c['scale']}、周邊 {n} 筆", flush=True)
         rects = [c["extent"].buffered(c["extent"].width() * 0.05)
                  for c in clist if "extent" in c]
@@ -1282,6 +1181,12 @@ def main() -> None:
     records: list[list] = []
     keep_alive: list = []
     try:
+        # 00_總區位圖只吃 臨路評估/sites.shp，完全不需 圖層.gpkg → 提前短路、跳過
+        # extract（兩模式皆是），避免 trust 首跑為此白掃一次整份 shp 的周邊/功能分區。
+        if overview_only:
+            render_overview(project, out_dir, keep_alive)
+            return
+
         if skip_extract and gpkg.exists():
             warnings = []
             print("略過 extract_layers，重用既有 圖層.gpkg", flush=True)
@@ -1293,10 +1198,6 @@ def main() -> None:
 
         if extract_only:
             print(f"--extract-only:已寫 {gpkg},結束", flush=True)
-            return
-
-        if overview_only:
-            render_overview(project, out_dir, keep_alive)
             return
 
         # 每個表格各給一份獨立實體檔再開層（見 make_table_copies 說明：GDAL 對同一支
