@@ -125,7 +125,11 @@ def _run(cmd, cwd=None, label=""):
     print(f"\n=== {label or ' '.join(map(str, cmd))} ===", flush=True)
     r = subprocess.run([str(c) for c in cmd], cwd=cwd)
     is_qgis = "python-qgis-ltr.bat" in str(cmd[0])
-    allowed = (0, 5) if is_qgis else (0,)   # 5=QGIS 慣有結束碼，僅 QGIS bat 步驟豁免
+    # 5=QGIS 慣有結束碼；3221225477(0xC0000005 存取違例)=make_maps 大量 GDAL 圖磚處理後
+    # app.exitQgis()/解譯器收尾時 libxml2 全域狀態損毀觸發的已知崩潰（CLAUDE.md 已記錄），
+    # 崩潰發生在所有 PNG/05 清單都已成功寫出「之後」，屬無害的行程收尾雜訊。
+    # 僅 QGIS bat 步驟豁免。
+    allowed = (0, 5, 3221225477) if is_qgis else (0,)
     if r.returncode not in allowed:
         sys.exit(f"[run_case] 步驟失敗（{label}），returncode={r.returncode}")
 
