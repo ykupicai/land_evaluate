@@ -15,20 +15,13 @@ from pathlib import Path
 from dbfread import DBF
 from openpyxl import Workbook
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# load_sitemap 統一用 shp_trust_utils 版（鍵為正規化地號，查詢端須同以
+# normalize_landno 正規化），消除先前的重複實作與零填/全形差異漏配
+from shp_trust_utils import load_sitemap, normalize_landno  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 
-
-def load_sitemap(path: str) -> dict:
-    """sitemap.csv(地號,案場ID,案場名稱)→ {地號:(案場ID,案場名稱)}。"""
-    import csv
-    out = {}
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            no = str(row.get("地號", "")).strip()
-            if no:
-                out[no] = (str(row.get("案場ID", "")).strip(),
-                           str(row.get("案場名稱", "")).strip())
-    return out
 COLS = ["案場ID", "案場名稱", "縣市", "鄉鎮區", "段", "小段", "地號原文",
         "宗地母", "宗地子", "部分註記", "輸入使用分區", "輸入使用地目",
         "輸入國土功能分區", "解析信心", "備註"]
@@ -85,7 +78,7 @@ def main():
         seg = re.sub(r"段$", "", seg)  # section_index 段名不含「段」字尾
         zone = g(r, ["20251201_6"])          # 使分
         ltype = g(r, ["20251201_7"])         # 使類
-        pair = sitemap.get(landno) if sitemap else None
+        pair = sitemap.get(normalize_landno(landno)) if sitemap else None
         if pair:
             hit += 1
             cid, cname = pair

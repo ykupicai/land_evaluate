@@ -60,11 +60,13 @@ from shp_trust_utils import (
     UNMAPPED_ID,
     UNMAPPED_NAME,
     assign_site,
+    gpkg_reuse_ok,
     load_sitemap,
     normalize_landno,
     read_dbf,
     read_shp_trust_meta,
     shp_get,
+    theme6_missing_record,
 )
 
 from qgis.core import (
@@ -1050,6 +1052,18 @@ OVERVIEW_COLORS = ["166,206,227", "31,120,180", "178,223,138", "51,160,44",
                    "202,178,214", "106,61,154"]
 
 
+def gpkg_site_ids(gpkg: Path) -> set[str]:
+    """既有 圖層.gpkg 基地表的案場ID集合（供 --skip-extract 分組一致性檢查）。
+    讀不到（層缺/欄缺/檔壞）回空集合 → gpkg_reuse_ok 判不可重用、自動重抽。"""
+    lyr = QgsVectorLayer(f"{gpkg}|layername=基地", "gpkg基地檢查", "ogr")
+    if not lyr.isValid():
+        return set()
+    idx = lyr.fields().indexOf("案場ID")
+    if idx < 0:
+        return set()
+    return {str(v) for v in lyr.uniqueValues(idx) if v is not None}
+
+
 def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bool:
     """00_總區位圖：EMAP 底 + fishpv 宗基地上色編號。回傳成功與否。"""
     sites_shp = case_dir / "臨路評估" / "sites.shp"
@@ -1187,14 +1201,30 @@ def main() -> None:
             render_overview(project, out_dir, keep_alive)
             return
 
-        if skip_extract and gpkg.exists():
-            warnings = []
-            print("略過 extract_layers，重用既有 圖層.gpkg", flush=True)
-        elif trust_shp:
-            warnings = extract_layers_trust(trust_shp, cases, registry, gpkg,
-                                            sitemap, case_name)
-        else:
-            warnings = extract_layers(cases, registry, gpkg)
+        # --skip-extract 只有在既有 gpkg「分組與本次 cases 一致」才可重用：
+        # 換 --mode（single 的 001 vs persite 的 S001..）沿用舊 gpkg 會讓每個案場
+        # 「gpkg 基地無此案場」靜默全失敗 → 偵測不一致時自動落回完整重抽並明說原因。
+        reused_gpkg = False
+        if skip_extract:
+            if not gpkg.exists():
+                print(f"[警告] --skip-extract 但 {gpkg} 不存在，自動改為完整抽取", flush=True)
+            else:
+                gpkg_ids = gpkg_site_ids(gpkg)
+                if gpkg_reuse_ok(gpkg_ids, set(cases)):
+                    reused_gpkg = True
+                    warnings = []
+                    print("略過 extract_layers，重用既有 圖層.gpkg", flush=True)
+                else:
+                    print(f"[警告] --skip-extract：既有 圖層.gpkg 基地分組="
+                          f"{sorted(gpkg_ids)} 與本次案場={sorted(cases)} 不一致"
+                          "（多半是換了 --mode 沿用另一模式的舊 gpkg）→ 自動落回完整重抽",
+                          flush=True)
+        if not reused_gpkg:
+            if trust_shp:
+                warnings = extract_layers_trust(trust_shp, cases, registry, gpkg,
+                                                sitemap, case_name)
+            else:
+                warnings = extract_layers(cases, registry, gpkg)
 
         if extract_only:
             print(f"--extract-only:已寫 {gpkg},結束", flush=True)
@@ -1205,7 +1235,7 @@ def main() -> None:
         # 完全正常，且已實測驗證）。
         tbl_gpkg = make_table_copies(gpkg, out_dir)
 
-        if skip_extract:
+        if reused_gpkg:
             # extent 改由 gpkg 基地層算（原 extract_layers 已內建，這裡補算 skip 掉的部分）
             for cid, c in cases.items():
                 bl = open_gpkg_layer(f"{tbl_gpkg['基地']}|layername=基地", "b",
@@ -1269,7 +1299,7 @@ def main() -> None:
                 raise RuntimeError(f"缺樣式檔 {p}，請先跑 python -X utf8 scripts/build_legend_styles.py")
 
         qml_warned = False
-        n_done = n_fail = 0
+        n_done = n_fail = n_skip = 0
         for cid in sorted(cases):
             c = cases[cid]
             pt = parcels_text(c)
@@ -1494,9 +1524,15 @@ def main() -> None:
                     n_fail += 1
                     continue
                 if theme == "臨路判定" and sites_lyr is None:
+                    # 區分「本來就沒跑 fishpv（照舊手冊直跑 make_maps）＝略過」與
+                    # 「fishpv 跑過但失敗＝失敗：臨路評估失敗」（見 theme6_missing_record）
+                    st6, note6 = theme6_missing_record(fishpv_dir)
                     records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
-                                    "失敗", "無 fishpv 臨路評估產物"])
-                    n_fail += 1
+                                    st6, note6])
+                    if st6 == "失敗":
+                        n_fail += 1
+                    else:
+                        n_skip += 1
                     continue
                 try:
                     title = f"{c['name']}　{THEME_TITLES[theme]}"
@@ -1532,7 +1568,8 @@ def main() -> None:
                                     "失敗", f"{type(exc).__name__}: {exc}"])
                     n_fail += 1
                     traceback.print_exc()
-            print(f"[{cid}] {c['name']} 完成（累計 成功{n_done}/失敗{n_fail}）", flush=True)
+            print(f"[{cid}] {c['name']} 完成（累計 成功{n_done}/失敗{n_fail}"
+                  f"{f'/略過{n_skip}' if n_skip else ''}）", flush=True)
             # 逐案場即時寫出 05 CSV（不依賴脆弱的迴圈後段；重出時可續用）
             try:
                 with open(out05_csv, "w", newline="", encoding="utf-8-sig") as fcsv:
@@ -1547,7 +1584,8 @@ def main() -> None:
         # 大量圖磚(GDAL)處理後 libxml2 全域狀態損毀，openpyxl 一建立 Workbook 就
         # 存取違例硬崩潰。xlsx 交由獨立乾淨進程 scripts/csv_to_xlsx.py 產生（見 main 末）。
         print(f"05 清單(CSV)已即時寫出：{out05_csv}", flush=True)
-        print(f"\n=== 完成：成功 {n_done} 張、失敗 {n_fail} 張 ===", flush=True)
+        print(f"\n=== 完成：成功 {n_done} 張、失敗 {n_fail} 張"
+              f"{f'、略過 {n_skip} 張（主題6未跑fishpv）' if n_skip else ''} ===", flush=True)
         if warnings:
             print("警告：", flush=True)
             for w in warnings:

@@ -7,6 +7,7 @@
 """
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -129,17 +130,85 @@ def digest_fishpv(case_dir: Path) -> None:
     print(f"digest：sites_status.csv + sitemap.csv（{len(rows)} 地號）")
 
 
-def _run(cmd, cwd=None, label=""):
+# QGIS 已知收尾崩潰碼：5=QGIS 慣有結束碼；3221225477(0xC0000005 存取違例)=大量 GDAL
+# 圖磚處理後 app.exitQgis()/解譯器收尾時 libxml2 全域狀態損毀觸發（CLAUDE.md 已記錄），
+# 崩潰發生在產物都已成功寫出「之後」，屬無害的行程收尾雜訊。
+QGIS_CRASH_CODES = (5, 3221225477)
+
+
+def _run(cmd, cwd=None, label="", allowed=(0,), crash_artifact=None, fatal=True) -> bool:
+    """執行子進程步驟；回傳是否成功。
+
+    - allowed：視為成功的 returncode（預設僅 0）。**只有 maps 步驟**因已知的
+      QGIS 收尾崩潰（見 QGIS_CRASH_CODES 註解）可由呼叫端明示放寬。
+    - crash_artifact：extract/overview 等其餘 QGIS 步驟不豁免崩潰碼，但若
+      returncode 屬 QGIS_CRASH_CODES 且指定的產物「本次執行期間剛寫出」，
+      判定為收尾崩潰（產物已完成）→ 警告後放行；產物沒剛寫出則照樣失敗。
+    - fatal：False 時失敗不 sys.exit，改回傳 False（呼叫端自行降級，如 fishpv）。
+    """
     print(f"\n=== {label or ' '.join(map(str, cmd))} ===", flush=True)
+    t0 = time.time()
     r = subprocess.run([str(c) for c in cmd], cwd=cwd)
-    is_qgis = "python-qgis-ltr.bat" in str(cmd[0])
-    # 5=QGIS 慣有結束碼；3221225477(0xC0000005 存取違例)=make_maps 大量 GDAL 圖磚處理後
-    # app.exitQgis()/解譯器收尾時 libxml2 全域狀態損毀觸發的已知崩潰（CLAUDE.md 已記錄），
-    # 崩潰發生在所有 PNG/05 清單都已成功寫出「之後」，屬無害的行程收尾雜訊。
-    # 僅 QGIS bat 步驟豁免。
-    allowed = (0, 5, 3221225477) if is_qgis else (0,)
-    if r.returncode not in allowed:
+    if r.returncode in allowed:
+        return True
+    if crash_artifact is not None and r.returncode in QGIS_CRASH_CODES:
+        p = Path(crash_artifact)
+        # FAT/網路磁碟 mtime 粒度留 2 秒餘裕
+        if p.exists() and p.stat().st_mtime >= t0 - 2:
+            print(f"[run_case] 警告：步驟（{label}）以已知 QGIS 收尾崩潰結束"
+                  f"（returncode={r.returncode}），但產物 {p.name} 已於本次執行寫出"
+                  "→ 視為成功續跑", flush=True)
+            return True
+    if fatal:
         sys.exit(f"[run_case] 步驟失敗（{label}），returncode={r.returncode}")
+    print(f"[run_case] 警告：步驟失敗（{label}），returncode={r.returncode}（不中斷）",
+          flush=True)
+    return False
+
+
+def from_prereq_errors(from_step: str, mode_shp: bool, case_dir: Path,
+                       shp, chosen) -> list[str]:
+    """--from 截斷後，檢查截斷起點依賴的前置產物是否齊備（純函式，可單測）。
+
+    回傳缺件訊息清單（空=可續跑）；每則點名缺什麼檔、該用哪個 --from 或指令補跑。
+    """
+    errs: list[str] = []
+    fp = case_dir / "臨路評估"
+
+    def need(path, hint):
+        if not Path(path).exists():
+            errs.append(f"缺 {path} —— {hint}")
+
+    if from_step == "meta":
+        if mode_shp:
+            need(Path(shp).with_suffix(".dbf"), "請確認 --shp 路徑（需同名 .dbf）")
+    elif from_step == "match":
+        need(case_dir / "01_中繼檔.xlsx",
+             "請先完成清冊解析與人工核對（首跑不加 --from），或以 shp_to_meta 產 01")
+    elif from_step == "fishpv":
+        if mode_shp:
+            need(shp, "請確認 --shp 路徑")
+        else:
+            need(case_dir / "圖層.gpkg",
+                 "清冊模式 fishpv 吃 圖層.gpkg 基地層，請先 --from extract（或完整 --resume）")
+    elif from_step == "overview":
+        need(fp / "sites.shp", "總區位圖需 fishpv 宗基地聚合結果，請先 --from fishpv")
+    elif from_step == "extract":
+        if mode_shp:
+            need(shp, "請確認 --shp 路徑")
+        else:
+            need(case_dir / "02_比對結果.xlsx", "請先 --from match 完成比對")
+    elif from_step == "maps":
+        need(case_dir / "圖層.gpkg", "maps 以 --skip-extract 重用圖層，請先 --from extract")
+        if mode_shp:
+            need(shp, "請確認 --shp 路徑")
+            if chosen == "persite" and not (fp / "sitemap.csv").exists():
+                need(fp / "成果.xlsx",
+                     "trust persite 出圖需 臨路評估/sitemap.csv 或 成果.xlsx，請先 --from fishpv")
+        else:
+            need(case_dir / "02_比對結果.xlsx",
+                 "maps 需讀 02 建案場清單，請先 --from match 完成比對")
+    return errs
 
 
 def main():
@@ -210,6 +279,14 @@ def main():
             sys.exit(f"[run_case] --from {from_step} 在本次流程中找不到對應步驟；"
                      f"本次可用步驟：{avail}")
         steps = full_steps[idx:]
+        errs = from_prereq_errors(from_step, mode_shp, case_dir, shp, chosen)
+        if errs:
+            sys.exit(f"[run_case] --from {from_step} 前置產物不足，先補齊再跑：\n  - "
+                     + "\n  - ".join(errs))
+
+    if not mode_shp and chosen == "single":
+        print("[run_case] 說明：清冊模式出圖單位＝清冊的案場ID分組，"
+              "--mode single 與 persite 目前等效（不另合併為單一組）")
 
     print(f"[run_case] 案子={case} 步驟={steps}")
 
@@ -232,35 +309,53 @@ def main():
             _run(["python", "-X", "utf8", REPO / "scripts" / "apply_landno.py", case],
                  label="apply_landno")
         elif s == "extract":
+            # extract 不豁免 QGIS 崩潰碼；僅當 圖層.gpkg 確實剛寫出才視為收尾崩潰放行
             _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--extract-only"],
-                 label="extract gpkg")
+                 label="extract gpkg", crash_artifact=case_dir / "圖層.gpkg")
         elif s == "trust_extract_single":
             _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case,
                   "--trust-shp", shp, "--extract-only"],
-                 label="trust extract（single，直取 shp 幾何）")
+                 label="trust extract（single，直取 shp 幾何）",
+                 crash_artifact=case_dir / "圖層.gpkg")
         elif s == "trust_extract_persite":
             if not (fp / "sitemap.csv").exists():
                 if (fp / "成果.xlsx").exists():
                     digest_fishpv(case_dir)
                 else:
                     sys.exit("[run_case] trust_extract_persite 需 臨路評估/sitemap.csv "
-                             "或 成果.xlsx，兩者皆缺")
+                             "或 成果.xlsx，兩者皆缺（fishpv 臨路評估未成功？先重跑 "
+                             "--from fishpv，或改 --mode single）")
             _run([QGIS_BAT, REPO / "scripts" / "make_maps.py", case,
                   "--trust-shp", shp, "--sitemap", fp / "sitemap.csv", "--extract-only"],
-                 label="trust extract（persite，依 sitemap 分宗基地）")
+                 label="trust extract（persite，依 sitemap 分宗基地）",
+                 crash_artifact=case_dir / "圖層.gpkg")
         elif s == "fishpv":
             cad = shp if mode_shp else str(case_dir / "圖層.gpkg")
-            _run([FISHPV_ROOT / "env.bat", "python", "-m", "fishpv.cli",
-                  "--cadastre", cad, "--colortable", COLORTABLE,
-                  "--out", fp, "--no-ai", "--landno-field", "地號"],
-                 cwd=str(FISHPV_ROOT), label="fishpv 臨路評估")
+            ok = _run([FISHPV_ROOT / "env.bat", "python", "-m", "fishpv.cli",
+                       "--cadastre", cad, "--colortable", COLORTABLE,
+                       "--out", fp, "--no-ai", "--landno-field", "地號"],
+                      cwd=str(FISHPV_ROOT), label="fishpv 臨路評估", fatal=False)
+            if not ok:
+                # spec §6：fishpv 失敗 → 圖5/6 降級、1-4 照出，不中斷整條流程
+                print("[run_case] 警告：臨路評估(fishpv)失敗——後續降級續跑："
+                      "圖6(臨路判定)將於 05 清單標記「臨路評估失敗」、圖5 無圖例、"
+                      "無 00_總區位圖；其餘圖照出。", flush=True)
         elif s == "digest":
-            digest_fishpv(case_dir)
+            if not (fp / "成果.xlsx").exists():
+                print("[run_case] 警告：無 臨路評估/成果.xlsx（fishpv 未成功），"
+                      "跳過 digest", flush=True)
+            else:
+                digest_fishpv(case_dir)
         elif s == "overview":
+            if not (fp / "sites.shp").exists():
+                print("[run_case] 警告：無 臨路評估/sites.shp（fishpv 未成功），"
+                      "跳過 00_總區位圖", flush=True)
+                return False
             cmd = [QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--overview-only"]
             if mode_shp:
                 cmd += ["--trust-shp", shp]  # trust 模式免讀 02
-            _run(cmd, label="00_總區位圖")
+            _run(cmd, label="00_總區位圖",
+                 crash_artifact=case_dir / "00_總區位圖.png")
         elif s == "maps":
             cmd = [QGIS_BAT, REPO / "scripts" / "make_maps.py", case, "--skip-extract"]
             if mode_shp:
@@ -268,10 +363,16 @@ def main():
                 if chosen == "persite":
                     cmd += ["--sitemap", fp / "sitemap.csv"]
             cmd += passthru
-            _run(cmd, label="六張圖+qgz")
+            # 僅 maps 豁免 QGIS 收尾崩潰碼（大量圖磚後已知崩潰，產物已寫出，見 QGIS_CRASH_CODES）
+            _run(cmd, label="六張圖+qgz", allowed=(0,) + QGIS_CRASH_CODES)
         elif s == "STOP_MODE":
-            print(f"\n請看 {case_dir / '00_總區位圖.png'} 後選出圖單位，"
-                  f"再跑同指令加 --mode single|persite")
+            png = case_dir / "00_總區位圖.png"
+            if png.exists():
+                print(f"\n請看 {png} 後選出圖單位，再跑同指令加 --mode single|persite")
+            else:
+                print("\n[run_case] 無 00_總區位圖（臨路評估未成功或總區位圖產製失敗）；"
+                      "請直接跑同指令加 --mode single|persite"
+                      "（persite 需臨路評估成果，fishpv 失敗時請改用 single 或先排除問題）")
             return True
         elif s == "STOP_CHECK":
             return True

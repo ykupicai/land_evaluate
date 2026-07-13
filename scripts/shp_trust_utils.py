@@ -134,6 +134,24 @@ def load_sitemap(path: str) -> dict:
     return out
 
 
+def gpkg_reuse_ok(gpkg_ids: set, case_ids: set) -> bool:
+    """--skip-extract 重用既有 圖層.gpkg 的前提（純規則，兩模式共用）：
+    本次全部案場ID都已存在於 gpkg 基地層即可重用（gpkg 較多屬正常——--cases= 過濾
+    出圖子集）。任一集合為空或有本次案場不在 gpkg（如換 --mode 造成分組不同：
+    single 的 001 vs persite 的 S001..）→ 不可重用，需完整重抽。"""
+    return bool(case_ids) and bool(gpkg_ids) and case_ids <= gpkg_ids
+
+
+def theme6_missing_record(fishpv_dir) -> tuple[str, str]:
+    """主題6（臨路判定）無可用 sites 圖層時，05 清單該記什麼（狀態, 備註）——
+    區分「本來就沒跑 fishpv」與「fishpv 跑過但失敗」（純規則，供 make_maps 與單測）：
+    - 臨路評估資料夾不存在 → 照舊手冊直跑 make_maps、未經 run_case →「略過」；
+    - 資料夾存在但 sites.shp 缺/壞 → fishpv 執行過但失敗 →「失敗：臨路評估失敗」。"""
+    if not Path(fishpv_dir).exists():
+        return ("略過", "未跑臨路評估(fishpv)；需圖6請走 run_case（或先跑 fishpv）")
+    return ("失敗", "臨路評估失敗或產物不完整（缺/壞 sites.shp）")
+
+
 def assign_site(landno: str, sitemap: dict, case_name: str):
     """地號 → (案場ID, 案場名稱)。single(無 sitemap)全歸 001；persite 查 sitemap
     (以正規化地號比對)，查無回 None（呼叫端歸 UNMAPPED_ID 並記 warning，不靜默併入真案場）。"""

@@ -8,11 +8,58 @@ from shp_trust_utils import (  # noqa: E402
     UNMAPPED_ID,
     assign_site,
     dbf_encoding,
+    gpkg_reuse_ok,
     load_sitemap,
     normalize_landno,
     read_dbf,
     read_shp_trust_meta,
+    theme6_missing_record,
 )
+
+
+# ---------------------------------------------------------------------------
+# gpkg_reuse_ok（--skip-extract 分組一致性，#2）
+# ---------------------------------------------------------------------------
+
+
+def test_gpkg_reuse_ok_exact_match():
+    assert gpkg_reuse_ok({"S001", "S002"}, {"S001", "S002"}) is True
+
+
+def test_gpkg_reuse_ok_subset_allows_cases_filter():
+    # --cases= 過濾出圖子集：gpkg 較多屬正常，可重用
+    assert gpkg_reuse_ok({"001", "002", "003"}, {"002"}) is True
+
+
+def test_gpkg_reuse_ok_mode_switch_rejected():
+    # persite 舊 gpkg（S001..）遇 single 的 cases（001）→ 不可重用（換 --mode 情境）
+    assert gpkg_reuse_ok({"S001", "S002", "S003", "S004"}, {"001"}) is False
+
+
+def test_gpkg_reuse_ok_empty_sets_rejected():
+    assert gpkg_reuse_ok(set(), {"001"}) is False
+    assert gpkg_reuse_ok({"001"}, set()) is False
+
+
+# ---------------------------------------------------------------------------
+# theme6_missing_record（主題6「略過 vs 失敗」措辭，#5）
+# ---------------------------------------------------------------------------
+
+
+def test_theme6_never_ran_fishpv_is_skip(tmp_path):
+    # 臨路評估資料夾不存在＝照舊手冊直跑 make_maps → 略過，不是失敗
+    st, note = theme6_missing_record(tmp_path / "臨路評估")
+    assert st == "略過"
+    assert "未跑臨路評估" in note
+
+
+def test_theme6_fishpv_failed_is_failure(tmp_path):
+    # 資料夾在但 sites.shp 缺＝fishpv 跑過但失敗 → 失敗：臨路評估失敗
+    d = tmp_path / "臨路評估"
+    d.mkdir()
+    st, note = theme6_missing_record(d)
+    assert st == "失敗"
+    assert "臨路評估失敗" in note
 
 
 # ---------------------------------------------------------------------------
