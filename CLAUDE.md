@@ -122,6 +122,17 @@ docs/superpowers/specs/ # 設計文件
   官田案已驗證：4 宗基地（S001 主基地 57.7ha 直接臨路〔一般+防汛〕、S002 直接臨路、
   S003/S004 不臨路 49.4m/67.7m），結果在 outputs/20260707台南官田40MW/漁電臨路評估/。
 - 地段代碼線上查詢備援：https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx#gobox02
+- **國土規劃資訊系統(TCDGIS)多重地籍選取→全範圍定位→下載shp（2026-07-13 官田145筆已走通）**：
+  ①登入 https://ngis.nlma.gov.tw/TCDLogin.aspx（使用者自己輸帳密+驗證碼）→
+  **會員專區的系統入口 `TCDEntrySys.aspx?Sys=4`** 進圖台（直連 nsp.nlma.gov.tw 會是訪客版、
+  無「規劃模組」選單）。②規劃模組→多重地籍選取：dojo dijit 元件
+  （County/TOWN/SECTOR_SKINDA3 用 `dijit.byId(...).set('value',...)` 連動、地號欄
+  `#CADANO_SKINDA3` 多筆逗號隔開、`#btnCADANO_SKINDA3` 加入；上限1000筆）。
+  ③「全範圍定位」zoom 全部宗地。④下載 shp：先在繪圖工具「新增主題」命名→回多重地籍
+  按「加入主題」→確定→繪圖工具點「下載」工具鈕→「ShapeFile檔案下載」。
+  坑：瀏覽器 log 會出現 GetShape.ashx `ERR_ABORTED`——那是導航轉交下載管理器的**正常訊號**，
+  檔案已落在 `Downloads\`；zip 內檔名 Big5（解壓要 cp437→big5 轉檔名）；主題 shp 只有
+  繪圖屬性（無地號/使分/使類），完整屬性靠平台「匯出Excel」或批次地籍選取結果表。
 
 ## 使用者的操作習慣
 
