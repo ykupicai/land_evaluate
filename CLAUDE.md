@@ -129,10 +129,16 @@ docs/superpowers/specs/ # 設計文件
 - 使用者是空間規劃專業（國土計畫/農村再生領域），非程式背景；回報用中文、
   講結論與要人工確認的事項，不要貼大段程式碼。
 
-## ⏸ 進度快照（2026-07-12，整合流程 run_case 驗收完成）
+## ⏸ 進度快照（2026-07-13，整合流程 run_case 收官：驗收＋最終複審修復完成）
 
 **整合流程 run_case 已完成並驗收**（Task 1~9 全數完成，見「目前進度」）。兩模式接線、
-fallback 鏈、六張圖 + qgz 皆已就緒；`python -X utf8 -m pytest tests/ -q` = 153 passed。
+fallback 鏈、六張圖 + qgz 皆已就緒；`python -X utf8 -m pytest tests/ -q` = 173 passed。
+最終跨階段複審 5 項修復（commit 107b373）：①fishpv 失敗**降級不中斷**（圖5/6缺、
+1-4照出，主題6區分「略過:未跑fishpv」vs「失敗」）②`--skip-extract` 加 gpkg 基地
+分組 vs 本次案場一致性檢查，不一致自動落回完整重抽（防 single↔persite 換模式吃到
+舊 gpkg 全案場靜默失敗）③`--from` 截斷先檢查前置產物、缺件中文點名 ④QGIS
+returncode 豁免（5/0xC0000005）收斂到只有 maps 步驟，extract/overview 崩潰需驗產物
+剛寫出才放行 ⑤手冊補：make_maps 預設 6 張、只要 1-4 張加 `--basic`。
 
 - **官田 40MW（trust-shp）**：已驗收，S001~S004 六主題齊、使用分區底色正常。
 - **清潔隊案（清冊）**：01/02 定稿、03 為空（fallback 已歷史性套用，04 留痕 5 筆
