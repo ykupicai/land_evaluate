@@ -423,6 +423,22 @@ def parcels_text(case: dict) -> str:
     return "；".join(f"{sec} {('、'.join(nums))}" for sec, nums in groups.items())
 
 
+def collapse_parcels(case: dict) -> str:
+    """maxmap 版面用的收合地號：『段 第一筆 等 N 筆』（跨多段補『(跨M段)』）。
+    完整清單仍寫進 05 出圖清單的『涵蓋地號』欄，這裡只放地圖角落疊圖的一行摘要。"""
+    rows = case["rows"]
+    total = len(rows)
+    if not total:
+        return ""
+    first = rows[0]
+    sec = first["段"] + ("段" if first["段"] and not first["段"].endswith("段") else "")
+    if first["小段"] and first["小段"] not in ("", "None", "nan"):
+        sec += first["小段"] + "小段"
+    secs = {r["段"] for r in rows if r["段"]}
+    tail = f"（跨{len(secs)}段）" if len(secs) > 1 else ""
+    return f"{sec} {first['地號']} 等 {total} 筆{tail}"
+
+
 def wrap_cjk(s: str, width: int = 22) -> str:
     """中文長字串（以 、；空白 斷點）強制換行，避免版面標籤超出邊框被裁切。"""
     out_lines, cur = [], ""
@@ -1131,6 +1147,8 @@ def main() -> None:
     trust_shp: str | None = None
     sitemap_path: str | None = None
     themes = list(THEMES)
+    layout_mode = "compact"
+    themes_filter: set[str] | None = None
     i = 0
     while i < len(args):
         a = args[i]
@@ -1158,18 +1176,36 @@ def main() -> None:
             overview_only = True
         elif a == "--basic":
             themes = THEMES[:4]
+        elif a.startswith("--layout="):
+            layout_mode = a.split("=", 1)[1].strip()
+        elif a == "--layout":
+            layout_mode = args[i + 1]; i += 1
+        elif a.startswith("--themes="):
+            themes_filter = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
         elif not a.startswith("--"):
             case_name = a
         i += 1
 
+    if layout_mode not in ("compact", "maxmap"):
+        raise SystemExit(f"--layout 只接受 compact 或 maxmap，收到 {layout_mode!r}")
+    if themes_filter:
+        themes = [t for t in themes if t in themes_filter]
+
     out_dir = REPO_ROOT / "outputs" / case_name
-    img_dir = out_dir / "圖檔"
+    # maxmap 版面另存，全程不覆蓋既有 compact 成果（圖檔/05/qgz 皆加 _maxmap 後綴）
+    sfx = "_maxmap" if layout_mode == "maxmap" else ""
+    img_dir = out_dir / f"圖檔{sfx}"
     img_dir.mkdir(parents=True, exist_ok=True)
-    gpkg = out_dir / "圖層.gpkg"
-    qgz = out_dir / f"{case_name}.qgz"
-    out05 = out_dir / "05_出圖清單.xlsx"
-    out05_csv = out_dir / "05_出圖清單.csv"
+    gpkg = out_dir / "圖層.gpkg"          # 抽取結果共用，不隨版面而異
+    qgz = out_dir / f"{case_name}{sfx}.qgz"
+    out05 = out_dir / f"05_出圖清單{sfx}.xlsx"
+    out05_csv = out_dir / f"05_出圖清單{sfx}.csv"
     styles_dir = REPO_ROOT / "styles"
+
+    op = sheet = None
+    if layout_mode == "maxmap":
+        import overlay_placement as op        # 純幾何：比例尺/範圍/角落避讓（已單元測試）
+        import build_layout as sheet          # 最大化版面組裝（與 parcel-map-sheet skill 同源、已 vendor）
 
     with (REPO_ROOT / "config" / "county_registry.yaml").open(encoding="utf-8") as f:
         registry = yaml.safe_load(f)
@@ -1320,6 +1356,25 @@ def main() -> None:
             l_red.renderer().setSymbol(outline_symbol())
             l_red.setLabeling(label_settings())
             l_red.setLabelsEnabled(True)
+
+            # maxmap：以最大化圖框(240×191)重算比例尺/範圍，並算基地 dissolve 幾何供角落
+            # 避讓；覆蓋 c["scale"]/c["extent"]，讓後續 WMTS/LUIMAP 底圖與版面同用此範圍。
+            mm_ctx = None
+            if layout_mode == "maxmap":
+                bb = l_red.extent()
+                bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
+                geom = QgsGeometry.unaryUnion(
+                    [f.geometry().makeValid() for f in l_red.getFeatures()])
+
+                def _intersect(x1, y1, x2, y2, _g=geom):
+                    it = _g.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
+                    return 0.0 if it.isEmpty() else it.area()
+
+                mm_pl = op.place_overlays(_intersect, bbox)
+                c["scale"] = mm_pl.scale
+                c["extent"] = QgsRectangle(mm_pl.extent[0], mm_pl.extent[2],
+                                           mm_pl.extent[1], mm_pl.extent[3])
+                mm_ctx = (geom, bbox)
             # 周邊+基地宗地上色（使用分區／使用地編定，各套使用者樣式庫 QML）
             l_nz = open_gpkg_layer(neigh_uri, "宗地-使用分區", subset)
             l_nt = open_gpkg_layer(neigh_uri, "宗地-使用地編定", subset)
@@ -1536,9 +1591,19 @@ def main() -> None:
                     continue
                 try:
                     title = f"{c['name']}　{THEME_TITLES[theme]}"
-                    layout = build_layout(project, f"{cid}_{theme}", title, layers,
-                                          leg_layers, hide, c["scale"], c["extent"],
-                                          note, keep_alive, map_overlay=overlay)
+                    if layout_mode == "maxmap":
+                        geom, bbox = mm_ctx
+                        # 主題免責說明（common_note 以外的行）移到 05 備註欄（決定 A）
+                        caveat = note.replace(common_note, "", 1).strip().replace("\n", "　")
+                        layout, _mmpl = sheet.build_sheet_layout(
+                            project, f"{cid}_{theme}", title, layers, leg_layers, hide,
+                            geom, bbox, loc, collapse_parcels(c), keep_alive,
+                            map_overlay=overlay)
+                    else:
+                        caveat = ""
+                        layout = build_layout(project, f"{cid}_{theme}", title, layers,
+                                              leg_layers, hide, c["scale"], c["extent"],
+                                              note, keep_alive, map_overlay=overlay)
                     exporter = QgsLayoutExporter(layout)
                     st = QgsLayoutExporter.ImageExportSettings()
                     st.dpi = EXPORT_DPI
@@ -1556,7 +1621,7 @@ def main() -> None:
                             print(f"  [{cid}] {theme} 第{att + 1}次輸出失敗，重試…", flush=True)
                     if code == QgsLayoutExporter.Success:
                         records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
-                                        pt, ts, "成功", ""])
+                                        pt, ts, "成功", caveat])
                         n_done += 1
                     else:
                         records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
