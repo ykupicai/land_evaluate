@@ -745,11 +745,38 @@ def fill_symbol(rgb, outline="35,35,35,255", width="0.2") -> QgsFillSymbol:
     })
 
 
-def outline_symbol(color="255,0,0,255", width="0.9") -> QgsFillSymbol:
+def outline_symbol(color="255,0,0,255", width="0.5") -> QgsFillSymbol:
+    # 預設寬 0.5＝基地地籍紅框（2026-07 使用者定案：比原 0.9 更細）
     return QgsFillSymbol.createSimple({
         "color": "0,0,0,0", "style": "no",
         "outline_color": color, "outline_style": "solid", "outline_width": width,
     })
+
+
+def strip_outlines(layer) -> None:
+    """maxmap 版面（使用者定案）：周邊地籍/功能分區只留填色、不畫宗地邊線。
+    就地把 renderer 內 SimpleFill 的邊線設為 NoPen；LinePatternFill 等紋理層
+    屬於填色的一部分，不動。categorized 與 single symbol 皆支援。"""
+    def _mute(sym):
+        for sl in sym.symbolLayers():
+            if hasattr(sl, "setStrokeStyle"):
+                try:
+                    sl.setStrokeStyle(Qt.NoPen)
+                except Exception:
+                    pass
+    rend = layer.renderer()
+    if rend is None:
+        return
+    if hasattr(rend, "categories"):
+        for i, cat in enumerate(rend.categories()):
+            sym = cat.symbol().clone()
+            _mute(sym)
+            rend.updateCategorySymbol(i, sym)
+    elif hasattr(rend, "symbol") and rend.symbol() is not None:
+        sym = rend.symbol().clone()
+        _mute(sym)
+        rend.setSymbol(sym)
+    layer.triggerRepaint()
 
 
 def zone_renderer() -> QgsCategorizedSymbolRenderer:
@@ -1290,6 +1317,8 @@ def main() -> None:
         zones_lyr = open_gpkg_layer(f"{tbl_gpkg['功能分區']}|layername=功能分區", "國土功能分區")
         zones_lyr.setRenderer(zone_renderer())
         zones_lyr.setOpacity(0.6)
+        if layout_mode == "maxmap":
+            strip_outlines(zones_lyr)  # maxmap：功能分區面同樣只留填色
         if MATERIALIZE:
             zones_lyr = to_memory(zones_lyr)
         # NLSC 正射/電子地圖底圖改用圖磚拼接（nlsc_wmts.build_basemap），逐案場產 GeoTIFF；
@@ -1352,7 +1381,7 @@ def main() -> None:
             subset = f"\"案場ID\" = '{cid}'"
 
             # 基地紅框（4 張圖共用最上層，標基地地號）
-            l_red = open_gpkg_layer(base_uri, "基地（紅框標示）", subset)
+            l_red = open_gpkg_layer(base_uri, "基地地籍", subset)
             l_red.renderer().setSymbol(outline_symbol())
             l_red.setLabeling(label_settings())
             l_red.setLabelsEnabled(True)
@@ -1385,9 +1414,15 @@ def main() -> None:
                     qml_warned = True
                 # 周邊宗地不標地號（僅基地宗地由 l_red 標；依使用者指示地號只呈現基地範圍）
                 l.setLabelsEnabled(False)
+            if layout_mode == "maxmap":
+                # maxmap：周邊地籍只留填色不畫邊線（使用者定案）
+                strip_outlines(l_nz)
+                strip_outlines(l_nt)
             # 地籍界線（使用者符號多無外框，疊一層細灰界線；主題3/4 亦作周邊淡灰線）
+            # maxmap 不上圖（周邊不畫邊線），僅 compact 版面使用
             l_gray = open_gpkg_layer(neigh_uri, "周邊地籍界線", subset)
             l_gray.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
+            gray_opt = [] if layout_mode == "maxmap" else [l_gray]
 
             if MATERIALIZE:
                 l_red, l_nz, l_nt, l_gray = (to_memory(x) for x in (l_red, l_nz, l_nt, l_gray))
@@ -1411,23 +1446,23 @@ def main() -> None:
                 # 必須註冊進專案，圖例面板才能解析並顯示都市計畫分區節點
                 project.addMapLayer(urban_legend_lyr, False)
 
-            zoning_layers = [l_red, l_gray, l_nz]
+            zoning_layers = [l_red, *gray_opt, l_nz]
             zoning_legend = [l_nz, l_red]
             zoning_note = common_note + "\n（使分空值＝都市土地，詳都市計畫分區）"
             if is_urban:
                 # urban_legend_lyr 置於地圖最底層：被 urban_lyr_zoning 全覆蓋而不可見，
                 # 但納入地圖圖層清單，setLegendFilterByMapEnabled 才不會把它濾掉。
-                zoning_layers = [l_red, l_gray, l_nz, urban_lyr_zoning]
+                zoning_layers = [l_red, *gray_opt, l_nz, urban_lyr_zoning]
                 if urban_legend_lyr is not None:
                     zoning_layers.append(urban_legend_lyr)
                     zoning_legend = [l_nz, urban_legend_lyr, l_red]
                 zoning_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
 
-            landtype_layers = [l_red, l_gray, l_nt]
+            landtype_layers = [l_red, *gray_opt, l_nt]
             landtype_legend = [l_nt, l_red]
             landtype_note = common_note + "\n（使類空值＝都市土地，詳都市計畫分區）"
             if is_urban:
-                landtype_layers = [l_red, l_gray, l_nt, urban_lyr_zoning]
+                landtype_layers = [l_red, *gray_opt, l_nt, urban_lyr_zoning]
                 if urban_legend_lyr is not None:
                     landtype_layers.append(urban_legend_lyr)
                     landtype_legend = [l_nt, urban_legend_lyr, l_red]
@@ -1545,7 +1580,7 @@ def main() -> None:
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
                                None),
-                "國土功能分區": ([l_red, l_gray, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
+                "國土功能分區": ([l_red, *gray_opt, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
                                  common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）",
                                  None),
                 "正射套疊": (overlay_layers, [l_red], set(), common_note, None),
@@ -1595,8 +1630,9 @@ def main() -> None:
                         geom, bbox = mm_ctx
                         # 主題免責說明（common_note 以外的行）移到 05 備註欄（決定 A）
                         caveat = note.replace(common_note, "", 1).strip().replace("\n", "　")
+                        # 版面不放標題（使用者定案）；圖名由檔名/05 清單承載
                         layout, _mmpl = sheet.build_sheet_layout(
-                            project, f"{cid}_{theme}", title, layers, leg_layers, hide,
+                            project, f"{cid}_{theme}", layers, leg_layers, hide,
                             geom, bbox, loc, collapse_parcels(c), keep_alive,
                             map_overlay=overlay)
                     else:

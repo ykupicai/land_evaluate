@@ -145,12 +145,13 @@ def _add_loc_parcel(layout, corner, location, parcel_note_text):
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
-def build_sheet_layout(project, name, title, layers, legend_layers,
+def build_sheet_layout(project, name, layers, legend_layers,
                        legend_hide_title, base_geom: QgsGeometry, bbox: tuple,
                        location: str, parcel_note_text: str, keep_alive: list,
                        map_overlay: str | None = None):
     """組一張最大化地圖版面。base_geom/bbox 用來算比例尺並自動避讓角落疊圖。
-    回傳 (layout, placement)；placement.scale/extent 為最終（必要時退階後）值。"""
+    回傳 (layout, placement)；placement.scale/extent 為最終（必要時退階後）值。
+    版面不放案名/圖名標題列（使用者定案）——圖名資訊由檔名與 05 出圖清單承載。"""
 
     # 1) 幾何決策：比例尺、範圍、疊圖角落（純幾何、已測）
     def intersect_fn(x1, y1, x2, y2):
@@ -181,15 +182,12 @@ def build_sheet_layout(project, name, title, layers, legend_layers,
     m.setScale(float(scale))
     layout.addLayoutItem(m)
 
-    # 3) 標題（切齊地圖寬，不壓右欄）
-    _font_label(layout, title, op.TITLE_X, op.TITLE_Y, op.TITLE_W, op.TITLE_H, 15, bold=True)
-
-    # 4) 圖面加註橫幅（如：都市土地無使用地編定），置地圖上緣置中，避開角落疊圖
+    # 3) 圖面加註橫幅（如：都市土地無使用地編定），置地圖上緣置中，避開角落疊圖
     if map_overlay:
         _font_label(layout, map_overlay, op.MAP_X + 10, op.MAP_Y + 4, op.MAP_W - 20, 10,
                     13, bold=True, color=(200, 0, 0), bg=True, halign=Qt.AlignHCenter)
 
-    # 5) 右欄圖例（依地圖範圍動態過濾；長標籤依「／」換行）
+    # 4) 右欄圖例（依地圖範圍動態過濾；長標籤依「／」換行）
     leg = QgsLayoutItemLegend(layout)
     leg.setLinkedMap(m)
     leg.setAutoUpdateModel(False)
@@ -224,7 +222,7 @@ def build_sheet_layout(project, name, title, layers, legend_layers,
     leg.attemptSetSceneRect(QRectF(op.LEGEND_X, op.LEGEND_Y, op.LEGEND_W, op.LEGEND_H))
     layout.addLayoutItem(leg)
 
-    # 6) 角落疊圖（或無法避讓時退回右欄底部）
+    # 5) 角落疊圖（或無法避讓時退回右欄底部）
     if placement.outside:
         # 病態案：基地幾乎填滿圖框，四角皆會遮基地 → 資訊改置右欄圖例下方，不強遮地圖
         _font_label(layout, f"比例尺　1 / {scale:,}".replace(",", " "),

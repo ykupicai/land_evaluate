@@ -18,10 +18,11 @@ import math
 from dataclasses import dataclass
 
 # --- 最大化地圖 A4 橫式版面（mm；與設計討論定案值一致）---------------------------
+# 2026-07 使用者定案：不放案名/圖名標題列（檔名與 05 出圖清單已載明），地圖上緣
+# 直接頂到頁邊 5mm，高度因此從 191 增為 199。
 PAGE_W, PAGE_H = 297.0, 210.0
-MAP_X, MAP_Y, MAP_W, MAP_H = 5.0, 13.0, 240.0, 191.0   # 地圖框：右緣 245mm、下緣 204mm
-LEGEND_X, LEGEND_Y, LEGEND_W, LEGEND_H = 247.0, 13.0, 45.0, 191.0  # 右欄只留圖例
-TITLE_X, TITLE_Y, TITLE_W, TITLE_H = 5.0, 3.5, 287.0, 8.5
+MAP_X, MAP_Y, MAP_W, MAP_H = 5.0, 5.0, 240.0, 199.0    # 地圖框：右緣 245mm、下緣 204mm
+LEGEND_X, LEGEND_Y, LEGEND_W, LEGEND_H = 247.0, 5.0, 45.0, 199.0  # 右欄只留圖例
 
 # 角落疊圖框尺寸（mm）。名稱→(寬, 高)。可依內容微調。
 OVERLAY_SCALE_NORTH = ("scale_north", 66.0, 26.0)   # 指北針＋比例尺文字＋比例尺
