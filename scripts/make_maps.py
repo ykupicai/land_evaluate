@@ -123,6 +123,7 @@ SCALE_LEVELS = [500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000]
 BBOX_EXPAND = 1.12  # 基地 dissolve 範圍外擴約 12%（盡量放大基地以利辨識）
 NEIGH_EXPAND = 0.08  # 周邊地籍再外擴比例（相對出圖範圍寬度）
 EXPORT_DPI = 300
+ROAD_MARGIN_M = 700  # maxmap 臨路判定圖框外擴(m):放大到可見基地最近的區道/市道/縣道/鄉道(使用者定案)
 FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 
 WMTS_URL = "https://wmts.nlsc.gov.tw/wmts"
@@ -1497,6 +1498,32 @@ def main() -> None:
                     project.addMapLayer(rl, False)
                     keep_alive.append(rl)
 
+            # maxmap 臨路判定專用底圖:基地外擴 ROAD_MARGIN_M,正射＋EMAP2 電子地圖(疊路名/
+            # 道路分類),圖框放大到可見最近的區道/市道/縣道/鄉道(使用者定案)。
+            road_photo_rl = road_emap_rl = None
+            if layout_mode == "maxmap" and "臨路判定" in themes and mm_ctx is not None:
+                _bb = mm_ctx[1]
+                road_ext = (_bb[0] - ROAD_MARGIN_M, _bb[1] - ROAD_MARGIN_M,
+                            _bb[2] + ROAD_MARGIN_M, _bb[3] + ROAD_MARGIN_M)
+                try:
+                    rp = build_basemap(road_ext, str(basemap_dir / f"{cid}_臨路PHOTO2.tif"),
+                                       layer="PHOTO2", cache_dir=str(tile_cache), buffer_ratio=0.03)
+                    re_ = build_basemap(road_ext, str(basemap_dir / f"{cid}_臨路EMAP2.tif"),
+                                        layer="EMAP2", cache_dir=str(tile_cache),
+                                        buffer_ratio=0.03, keep_alpha=True)
+                    if rp:
+                        road_photo_rl = QgsRasterLayer(rp, "正射影像(臨路)")
+                    if re_:
+                        road_emap_rl = QgsRasterLayer(re_, "臺灣通用電子地圖(NLSC EMAP2)")
+                        road_emap_rl.setOpacity(0.9)
+                    for rl in (road_photo_rl, road_emap_rl):
+                        if rl is not None:
+                            project.addMapLayer(rl, False)
+                            keep_alive.append(rl)
+                    c["_road_ext"] = road_ext
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"{cid} 臨路 EMAP2 底圖失敗：{type(exc).__name__}: {exc}")
+
             # NLSC LUIMAP（國土利用調查）底圖＋圖面實際出現類別的圖例 proxy
             luimap_rl = None
             luimap_legend_lyr = None
@@ -1576,6 +1603,16 @@ def main() -> None:
                     road_note_lines = []
                     warnings.append(f"{cid} 臨路判定圖層產製失敗：{exc}")
 
+            # 臨路判定圖層:maxmap 用外擴底圖＋EMAP2(road_*),否則用一般正射(photo_rl)。
+            if not sites_lyr:
+                _road_layers = []
+            elif layout_mode == "maxmap" and road_photo_rl is not None:
+                _road_layers = ([sites_lyr, roads_lyr]
+                                + ([road_emap_rl] if road_emap_rl is not None else [])
+                                + [road_photo_rl])
+            else:
+                _road_layers = [sites_lyr, roads_lyr] + ([photo_rl] if photo_rl else [])
+
             theme_defs = {
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
@@ -1590,8 +1627,8 @@ def main() -> None:
                                  set(), common_note + "\n國土利用調查：NLSC LUIMAP（官方色）",
                                  None),
                 # photo_rl 若為 None（正射底圖失敗）：拿掉即可，仍可出道路＋宗基地白底。
-                "臨路判定": (([sites_lyr, roads_lyr] + ([photo_rl] if photo_rl else []))
-                             if sites_lyr else [],
+                # maxmap：改用外擴底圖＋EMAP2 電子地圖(road_photo_rl/road_emap_rl)；圖框放大見分類道路。
+                "臨路判定": (_road_layers,
                              [sites_lyr, roads_lyr] if sites_lyr else [],
                              set(),
                              common_note + "\n臨路判定(fishpv)：\n"
@@ -1628,6 +1665,9 @@ def main() -> None:
                     title = f"{c['name']}　{THEME_TITLES[theme]}"
                     if layout_mode == "maxmap":
                         geom, bbox = mm_ctx
+                        # 臨路判定:改用外擴 bbox(見分類道路);其餘主題用基地 bbox
+                        if theme == "臨路判定" and c.get("_road_ext"):
+                            bbox = c["_road_ext"]
                         # 主題免責說明（common_note 以外的行）移到 05 備註欄（決定 A）
                         caveat = note.replace(common_note, "", 1).strip().replace("\n", "　")
                         # 版面不放標題（使用者定案）；圖名由檔名/05 清單承載
