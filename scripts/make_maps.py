@@ -112,7 +112,26 @@ from qgis.PyQt.QtGui import QColor, QFont
 # 常數
 # ---------------------------------------------------------------------------
 
-QGIS_PREFIX = r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr"
+def _load_paths() -> dict:
+    """外部相依路徑集中於 config/paths.yaml；缺檔/缺項回退內建預設，故絕不因此壞掉。"""
+    defaults = {
+        "qgis_prefix": r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr",
+        "fishpv_root": r"C:\Users\user\Documents\Claude\Projects\漁電共生評估",
+        "luimap_colortable": "",
+    }
+    cfg_path = REPO_ROOT / "config" / "paths.yaml"
+    if cfg_path.exists():
+        try:
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            defaults.update({k: v for k, v in cfg.items() if v})
+        except Exception as exc:  # noqa: BLE001
+            print(f"[警告] config/paths.yaml 讀取失敗，改用內建預設：{exc}", flush=True)
+    return defaults
+
+
+_PATHS = _load_paths()
+
+QGIS_PREFIX = _PATHS["qgis_prefix"]
 CRS_3826 = "EPSG:3826"
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
@@ -143,8 +162,10 @@ URBAN_LAYER_NAME = "都市計畫土地使用分區"
 URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分區（依使用者圖說）
 
 # 國土利用調查（LUIMAP）：fishpv 專案的官方色碼表 + features.geojson 分類結果
-FISHPV_ROOT = Path(r"C:\Users\user\Documents\Claude\Projects\漁電共生評估")
-LUIMAP_COLORTABLE = (FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
+# 路徑集中於 config/paths.yaml（見 _load_paths）；luimap_colortable 留空則由 fishpv_root 推導。
+FISHPV_ROOT = Path(_PATHS["fishpv_root"])
+LUIMAP_COLORTABLE = (Path(_PATHS["luimap_colortable"]) if _PATHS["luimap_colortable"]
+                     else FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
                      / "resources" / "luimap_colortable.csv")
 LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
 

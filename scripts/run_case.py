@@ -10,10 +10,31 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parent.parent
-QGIS_BAT = Path(r"C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat")
-FISHPV_ROOT = Path(r"C:\Users\user\Documents\Claude\Projects\漁電共生評估")
-COLORTABLE = (FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
+
+
+def _paths() -> dict:
+    """外部路徑集中於 config/paths.yaml（與 make_maps 同源）；缺檔回退內建預設。"""
+    d = {"qgis_prefix": r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr",
+         "fishpv_root": r"C:\Users\user\Documents\Claude\Projects\漁電共生評估",
+         "luimap_colortable": ""}
+    p = REPO / "config" / "paths.yaml"
+    if p.exists():
+        try:
+            d.update({k: v for k, v in (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).items() if v})
+        except Exception:  # noqa: BLE001
+            pass
+    return d
+
+
+_P = _paths()
+# QGIS 執行檔由 qgis_prefix(...\apps\qgis-ltr) 推導出 ...\bin\python-qgis-ltr.bat
+QGIS_BAT = Path(_P["qgis_prefix"]).parent.parent / "bin" / "python-qgis-ltr.bat"
+FISHPV_ROOT = Path(_P["fishpv_root"])
+COLORTABLE = (Path(_P["luimap_colortable"]) if _P["luimap_colortable"]
+              else FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
               / "resources" / "luimap_colortable.csv")
 FROM_STEPS = ("meta", "match", "fishpv", "overview", "extract", "maps")
 

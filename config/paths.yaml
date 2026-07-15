@@ -1,0 +1,12 @@
+# 外部相依路徑集中設定（換機器 / 搬專案 / 給同事時，只改這一個檔）。
+# 缺項或本檔不存在時，程式一律回退到內建預設值，故刪掉本檔也不會壞。
+# 核心參考圖資（地籍圖資/國土功能分區/都市計畫/環境敏感相關）仍用相對路徑，不列於此。
+
+# QGIS 安裝的 qgis-ltr 目錄（QgsApplication.setPrefixPath 用）
+qgis_prefix: C:\Program Files\QGIS 3.40.12\apps\qgis-ltr
+
+# 漁電共生評估專案根（LUIMAP 色碼表所在；臨路評估產物則放各案 outputs/<案>/臨路評估）
+fishpv_root: C:\Users\user\Documents\Claude\Projects\漁電共生評估
+
+# LUIMAP 官方色碼表；留空＝由 fishpv_root 自動推導預設位置
+luimap_colortable: ""
