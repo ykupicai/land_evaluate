@@ -142,7 +142,9 @@ SCALE_LEVELS = [500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000]
 BBOX_EXPAND = 1.12  # 基地 dissolve 範圍外擴約 12%（盡量放大基地以利辨識）
 NEIGH_EXPAND = 0.08  # 周邊地籍再外擴比例（相對出圖範圍寬度）
 EXPORT_DPI = 300
-ROAD_MARGIN_M = 700  # maxmap 臨路判定圖框外擴(m):放大到可見基地最近的區道/市道/縣道/鄉道(使用者定案)
+ROAD_MARGIN_M = 700  # maxmap 臨路判定圖框外擴(m)——單一大基地預設(官田模式)。
+# 2026-07-16 使用者定案:persite 多基地預設「不外擴」(=0,標準圖框+疊EMAP2 即可見周邊道路),
+# 避免逐案抓大範圍圖磚的時間成本;--road-margin=N 可強制指定(0=不外擴)。
 FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 
 WMTS_URL = "https://wmts.nlsc.gov.tw/wmts"
@@ -347,23 +349,24 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
     landnos: dict[str, set] = defaultdict(set)
     for f, r in zip(feats, recs):
         landno = shp_get(r, ["地號", "20251201_4"])
-        site = assign_site(landno, sitemap, case_name)
-        if site is None:
-            site = (UNMAPPED_ID, UNMAPPED_NAME)
-        cid, cname = site
-        if cid not in cases:
-            continue
+        sites = assign_site(landno, sitemap, case_name,
+                            seg=shp_get(r, ["段別", "20251201_3"]))
+        if sites is None:
+            sites = ((UNMAPPED_ID, UNMAPPED_NAME),)
         zone = shp_get(r, ["20251201_6"])
         ltype = shp_get(r, ["20251201_7"])
         g = f.geometry()
-        if g is None or g.isEmpty():
-            warnings.append(f"{cid} 地號{landno} 無幾何")
-            continue
-        add_feat(base, g, [cid, cname, landno, zone or URBAN_LABEL, ltype or URBAN_LABEL])
-        landnos[cid].add(landno)
-        bb = g.boundingBox()
-        bboxes[cid] = bb if cid not in bboxes else (
-            bboxes[cid].combineExtentWith(bb) or bboxes[cid])
+        for cid, cname in sites:      # 一宗地可同屬多案場,各案場都收幾何
+            if cid not in cases:
+                continue
+            if g is None or g.isEmpty():
+                warnings.append(f"{cid} 地號{landno} 無幾何")
+                continue
+            add_feat(base, g, [cid, cname, landno, zone or URBAN_LABEL, ltype or URBAN_LABEL])
+            landnos[cid].add(landno)
+            bb = g.boundingBox()
+            bboxes[cid] = bb if cid not in bboxes else (
+                bboxes[cid].combineExtentWith(bb) or bboxes[cid])
 
     for cid, c in cases.items():
         bb = bboxes.get(cid)
@@ -1198,6 +1201,7 @@ def main() -> None:
     themes = list(THEMES)
     layout_mode = "compact"
     themes_filter: set[str] | None = None
+    road_margin_cli: float | None = None
     i = 0
     while i < len(args):
         a = args[i]
@@ -1229,6 +1233,8 @@ def main() -> None:
             layout_mode = a.split("=", 1)[1].strip()
         elif a == "--layout":
             layout_mode = args[i + 1]; i += 1
+        elif a.startswith("--road-margin="):
+            road_margin_cli = float(a.split("=", 1)[1])
         elif a.startswith("--themes="):
             themes_filter = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
         elif not a.startswith("--"):
@@ -1260,6 +1266,8 @@ def main() -> None:
         registry = yaml.safe_load(f)
 
     sitemap = load_sitemap(sitemap_path) if (trust_shp and sitemap_path) else {}
+    # 臨路判定外擴:CLI 指定優先;否則 persite 多基地=0(不外擴)、single=ROAD_MARGIN_M
+    road_margin = road_margin_cli if road_margin_cli is not None else (0.0 if sitemap else float(ROAD_MARGIN_M))
     if trust_shp:
         cases = read_shp_trust_meta(trust_shp, sitemap, case_name, only, exclude)
         print(f"trust-shp 出圖案場 {len(cases)} 個：直取 shp 幾何、免比對"
@@ -1522,10 +1530,10 @@ def main() -> None:
             # maxmap 臨路判定專用底圖:基地外擴 ROAD_MARGIN_M,正射＋EMAP2 電子地圖(疊路名/
             # 道路分類),圖框放大到可見最近的區道/市道/縣道/鄉道(使用者定案)。
             road_photo_rl = road_emap_rl = None
-            if layout_mode == "maxmap" and "臨路判定" in themes and mm_ctx is not None:
+            if layout_mode == "maxmap" and "臨路判定" in themes and mm_ctx is not None and road_margin > 0:
                 _bb = mm_ctx[1]
-                road_ext = (_bb[0] - ROAD_MARGIN_M, _bb[1] - ROAD_MARGIN_M,
-                            _bb[2] + ROAD_MARGIN_M, _bb[3] + ROAD_MARGIN_M)
+                road_ext = (_bb[0] - road_margin, _bb[1] - road_margin,
+                            _bb[2] + road_margin, _bb[3] + road_margin)
                 try:
                     rp = build_basemap(road_ext, str(basemap_dir / f"{cid}_臨路PHOTO2.tif"),
                                        layer="PHOTO2", cache_dir=str(tile_cache), buffer_ratio=0.03)
@@ -1596,6 +1604,17 @@ def main() -> None:
                     sites_lyr = QgsVectorLayer(str(fishpv_dir / "sites.shp"), "宗基地(臨路)", "ogr")
                     if not sites_lyr.isValid():
                         raise RuntimeError("sites.shp 讀取失敗")
+                    # 多案場合併的 fishpv 產物：只取與本案場範圍相交的宗基地
+                    # （範圍外擴 50%），否則備註/圖例會列出全部案場的宗基地
+                    _ext = c["extent"]
+                    _buf = max(_ext.width(), _ext.height()) * 0.5
+                    _rect = QgsRectangle(_ext.xMinimum() - _buf, _ext.yMinimum() - _buf,
+                                         _ext.xMaximum() + _buf, _ext.yMaximum() + _buf)
+                    _hit = [str(f["site_id"]) for f in
+                            sites_lyr.getFeatures(QgsFeatureRequest().setFilterRect(_rect))]
+                    if _hit:
+                        sites_lyr.setSubsetString(
+                            '"site_id" IN (' + ','.join(f"'{s}'" for s in _hit) + ')')
                     scats = []
                     for f in sites_lyr.getFeatures():
                         sid = str(f["site_id"])
@@ -1624,13 +1643,19 @@ def main() -> None:
                     road_note_lines = []
                     warnings.append(f"{cid} 臨路判定圖層產製失敗：{exc}")
 
-            # 臨路判定圖層:maxmap 用外擴底圖＋EMAP2(road_*),否則用一般正射(photo_rl)。
+            # 臨路判定圖層:maxmap 外擴模式用 road_*(外擴底圖+EMAP2);
+            # maxmap 不外擴(persite 預設)用標準範圍但仍疊 EMAP2(周邊路名可見);
+            # compact 維持舊制(僅正射)。
             if not sites_lyr:
                 _road_layers = []
             elif layout_mode == "maxmap" and road_photo_rl is not None:
                 _road_layers = ([sites_lyr, roads_lyr]
                                 + ([road_emap_rl] if road_emap_rl is not None else [])
                                 + [road_photo_rl])
+            elif layout_mode == "maxmap":
+                _road_layers = ([sites_lyr, roads_lyr]
+                                + ([emap_rl] if (emap_rl is not None and emap_rl.isValid()) else [])
+                                + ([photo_rl] if photo_rl else []))
             else:
                 _road_layers = [sites_lyr, roads_lyr] + ([photo_rl] if photo_rl else [])
 

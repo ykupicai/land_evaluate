@@ -254,6 +254,10 @@ def main():
             resume = True; i += 1
         elif a in ("--no-qgz", "--mem", "--basic"):
             passthru.append(a); i += 1
+        elif a == "--layout":                      # 透傳 make_maps(maxmap/compact)
+            passthru += [a, args[i + 1]]; i += 2
+        elif a.startswith(("--layout=", "--themes=", "--cases=", "--exclude=", "--road-margin=")):
+            passthru.append(a); i += 1             # 透傳 make_maps
         else:
             sys.exit(f"未知參數 {a}")
     if not (shp or lst):
