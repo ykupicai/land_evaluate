@@ -128,7 +128,14 @@ def execute_steps(steps: list, runner, art) -> list[str]:
 
 
 def digest_fishpv(case_dir: Path) -> None:
-    """成果.xlsx → sites_status.csv（給 make_maps）與 sitemap.csv（給 persite）。"""
+    """成果.xlsx → sites_status.csv（給 make_maps）；sitemap.csv 以 案場定義/ 為權威。
+
+    2026-07-16 縮編定案：案場定義（聚類＋sitemap）由產線的 build_sites_sitemap.py
+    先做，fishpv 只當臨路計算器。故 sitemap.csv 優先直接複製 案場定義/sitemap.csv
+    （帶段欄）。舊攤平路徑（由成果.xlsx 地號清單反推、無段欄）遇跨案場重複地號
+    會讓 load_sitemap 分派失敗、單筆案場無聲消失（東石 S012 實錯），一律硬停。"""
+    import shutil
+
     import pandas as pd
     xlsx = case_dir / "臨路評估" / "成果.xlsx"
     df = pd.read_excel(xlsx, dtype=str)
@@ -138,6 +145,12 @@ def digest_fishpv(case_dir: Path) -> None:
         raise SystemExit(f"[run_case] 成果.xlsx 缺欄位：{missing}")
     df[["site_id", "臨路狀態", "臨路距離_m", "臨路註記"]].to_csv(
         case_dir / "臨路評估" / "sites_status.csv", index=False, encoding="utf-8-sig")
+
+    auth = case_dir / "案場定義" / "sitemap.csv"
+    if auth.exists():
+        shutil.copy2(auth, case_dir / "臨路評估" / "sitemap.csv")
+        print("digest：sites_status.csv；sitemap.csv ← 案場定義/（權威，帶段欄）")
+        return
     rows = []
     for _, r in df.iterrows():
         for no in str(r["地號清單"]).split(";"):
@@ -146,9 +159,17 @@ def digest_fishpv(case_dir: Path) -> None:
                 continue
             rows.append({"地號": no, "案場ID": r["site_id"],
                          "案場名稱": f"{r['site_id']}宗基地"})
+    dup = {no for no in {r["地號"] for r in rows}
+           if sum(1 for r in rows if r["地號"] == no) > 1}
+    if dup:
+        raise SystemExit(
+            f"[run_case] 無 案場定義/sitemap.csv 且成果.xlsx 反推的 sitemap 有跨案場"
+            f"重複地號 {sorted(dup)[:6]}…（無段欄無法分派）。"
+            f"請先跑 scripts/build_sites_sitemap.py --joined <面積join.shp> "
+            f"--out-dir {case_dir / '案場定義'} 再重來")
     pd.DataFrame(rows).to_csv(case_dir / "臨路評估" / "sitemap.csv",
                               index=False, encoding="utf-8-sig")
-    print(f"digest：sites_status.csv + sitemap.csv（{len(rows)} 地號）")
+    print(f"digest：sites_status.csv + sitemap.csv（{len(rows)} 地號，無段欄舊路徑）")
 
 
 # QGIS 已知收尾崩潰碼：5=QGIS 慣有結束碼；3221225477(0xC0000005 存取違例)=大量 GDAL
