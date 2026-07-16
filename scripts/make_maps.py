@@ -1612,6 +1612,16 @@ def main() -> None:
                                          _ext.xMaximum() + _buf, _ext.yMaximum() + _buf)
                     _hit = [str(f["site_id"]) for f in
                             sites_lyr.getFeatures(QgsFeatureRequest().setFilterRect(_rect))]
+                    # persite：臨路判定只呈現「本宗基地」，圖框內其他案場不畫、不入圖例
+                    # （使用者定案 2026-07-16；site_id 可能為 <cid> 或合併重編 <cid>-<序>）
+                    if sitemap:
+                        _own = [s for s in _hit
+                                if s == str(cid) or s.startswith(f"{cid}-")]
+                        if _own:
+                            _hit = _own
+                        else:
+                            warnings.append(
+                                f"{cid} 臨路判定:sites.shp 無本案場 site_id,退回範圍過濾")
                     if _hit:
                         sites_lyr.setSubsetString(
                             '"site_id" IN (' + ','.join(f"'{s}'" for s in _hit) + ')')
