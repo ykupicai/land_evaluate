@@ -134,7 +134,8 @@ def match_county_parcels(shp_path: Path, wanted: list[dict]) -> None:
 
 def read_parcel_geometries(shp_path: Path, fids: list[int]) -> gpd.GeoDataFrame:
     if not fids:
-        return gpd.GeoDataFrame(geometry=[], crs="EPSG:3826")
+        # 某縣市整批比對不到時 fids 為空:仍要帶 fid 欄,否則呼叫端 geoms["fid"] KeyError
+        return gpd.GeoDataFrame({"fid": []}, geometry=[], crs="EPSG:3826")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning)
         gdf = pyogrio.read_dataframe(str(shp_path), fids=sorted(set(fids)), columns=[])

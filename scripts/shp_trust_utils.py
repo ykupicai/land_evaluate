@@ -121,17 +121,47 @@ def shp_norm_city(s: str) -> str:
     return normalize_county((s or "").replace("巿", "市")) or ""
 
 
+def norm_seg(s: str) -> str:
+    """段名正規化供 sitemap 複合鍵:去 [代碼] 前綴、去「段/小段」字樣與空白。
+    例:'[4344]番子渡頭段'→'番子渡頭';'更寮段更寮小段'→'更寮更寮';
+    清冊側 段='更寮'+小段='更寮' 亦得 '更寮更寮',兩側可對上。"""
+    s = re.sub(r"^\[\w+\]", "", str(s or "").strip())
+    return s.replace("小段", "").replace("段", "").replace(" ", "")
+
+
 def load_sitemap(path: str) -> dict:
-    """sitemap.csv(地號,案場ID,案場名稱) → {正規化地號:(案場ID,案場名稱)}。
-    鍵用 normalize_landno，查詢端亦正規化，避免母/子號零填/全形差異靜默漏配。"""
-    out: dict[str, tuple] = {}
+    """sitemap.csv(地號,案場ID,案場名稱[,段,小段]) → 查找 dict。值為
+    ((案場ID,案場名稱), ...) 元組——**同段同地號列在多個案場時全部保留**
+    (清冊允許一宗地同屬多案場,各案場都要出圖)。
+    有段欄時建複合鍵 '正規化段|正規化地號'(跨縣市清冊必備——同地號可能出現在
+    不同段/不同案場);同時保留「無碰撞的」純地號鍵向下相容。同地號跨案場
+    (不同段)者從純地號鍵移除,強迫走複合鍵,避免張冠李戴。"""
+    out: dict[str, list] = {}
+    plain: dict[str, list] = {}
+    collide: set = set()
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             no = normalize_landno(row.get("地號", ""))
-            if no:
-                out[no] = (str(row.get("案場ID", "")).strip(),
-                           str(row.get("案場名稱", "")).strip())
-    return out
+            if not no:
+                continue
+            val = (str(row.get("案場ID", "")).strip(),
+                   str(row.get("案場名稱", "")).strip())
+            seg = norm_seg(str(row.get("段", "") or "") + str(row.get("小段", "") or ""))
+            if seg:
+                lst = out.setdefault(f"{seg}|{no}", [])
+                if val not in lst:
+                    lst.append(val)
+            if no in plain and val not in plain[no]:
+                collide.add(no)
+            plain.setdefault(no, []).append(val)
+    result = {k: tuple(v) for k, v in out.items()}
+    for no, vals in plain.items():
+        if no not in collide:
+            result.setdefault(no, tuple(dict.fromkeys(vals)))
+    if collide:
+        print(f"[提示] sitemap:{len(collide)} 個地號跨案場重複,僅能以 段+地號 比對:"
+              f"{'、'.join(sorted(collide))}", flush=True)
+    return result
 
 
 def gpkg_reuse_ok(gpkg_ids: set, case_ids: set) -> bool:
@@ -152,12 +182,24 @@ def theme6_missing_record(fishpv_dir) -> tuple[str, str]:
     return ("失敗", "臨路評估失敗或產物不完整（缺/壞 sites.shp）")
 
 
-def assign_site(landno: str, sitemap: dict, case_name: str):
-    """地號 → (案場ID, 案場名稱)。single(無 sitemap)全歸 001；persite 查 sitemap
-    (以正規化地號比對)，查無回 None（呼叫端歸 UNMAPPED_ID 並記 warning，不靜默併入真案場）。"""
+def assign_site(landno: str, sitemap: dict, case_name: str, seg: str = ""):
+    """(段,)地號 → ((案場ID, 案場名稱), ...)。一宗地可同屬多案場(元組含多對)。
+    single(無 sitemap)全歸 001；persite 查 sitemap:先試 '正規化段|地號' 複合鍵
+    (跨縣市清冊),再退純地號鍵(單一地區清冊/舊格式)。
+    查無回 None（呼叫端歸 UNMAPPED_ID 並記 warning，不靜默併入真案場）。
+    相容手建舊式 dict:值若是單一 (id,name) 會包成一層元組。"""
+    def _norm(v):
+        if v is None:
+            return None
+        return (v,) if v and isinstance(v[0], str) else tuple(v)
     if sitemap:
-        return sitemap.get(normalize_landno(landno))
-    return ("001", case_name)
+        no = normalize_landno(landno)
+        if seg:
+            hit = sitemap.get(f"{norm_seg(seg)}|{no}")
+            if hit is not None:
+                return _norm(hit)
+        return _norm(sitemap.get(no))
+    return (("001", case_name),)
 
 
 def read_shp_trust_meta(shp_path: str, sitemap: dict, case_name: str,
@@ -179,13 +221,11 @@ def read_shp_trust_meta(shp_path: str, sitemap: dict, case_name: str,
     missed: list[str] = []
     for r in recs:
         landno = shp_get(r, ["地號", "20251201_4"])
-        site = assign_site(landno, sitemap, case_name)
-        if site is None:
-            missed.append(landno)
-            site = (UNMAPPED_ID, UNMAPPED_NAME)
-        cid, cname = site
-        if cid in exclude or (only and cid not in only):
-            continue
+        raw_seg = shp_get(r, ["段別", "20251201_3"])
+        sites = assign_site(landno, sitemap, case_name, seg=raw_seg)
+        if sites is None:
+            missed.append(f"{raw_seg}{landno}" if raw_seg else landno)
+            sites = ((UNMAPPED_ID, UNMAPPED_NAME),)
         county = shp_norm_city(shp_get(r, ["20251201_1"])) or def_c
         town = shp_get(r, ["20251201_2"]) or def_t
         seg = re.sub(r"段$", "", shp_get(r, ["段別", "20251201_3"]))
@@ -195,14 +235,17 @@ def read_shp_trust_meta(shp_path: str, sitemap: dict, case_name: str,
             mother, child = seg_code[6:10], seg_code[10:14]
         zone = shp_get(r, ["20251201_6"])
         ltype = shp_get(r, ["20251201_7"])
-        c = cases.setdefault(cid, {"id": cid, "name": cname, "county": county,
-                                   "town": town, "rows": [],
-                                   "_ccnt": Counter(), "_tcnt": Counter()})
-        c["_ccnt"][county] += 1
-        c["_tcnt"][town] += 1
-        c["rows"].append({"地號": landno, "段": seg, "小段": "",
-                          "宗地母": mother, "宗地子": child,
-                          "使分": zone or None, "使類": ltype or None, "fids": []})
+        for cid, cname in sites:      # 一宗地可同屬多案場,各案場都收這列
+            if cid in exclude or (only and cid not in only):
+                continue
+            c = cases.setdefault(cid, {"id": cid, "name": cname, "county": county,
+                                       "town": town, "rows": [],
+                                       "_ccnt": Counter(), "_tcnt": Counter()})
+            c["_ccnt"][county] += 1
+            c["_tcnt"][town] += 1
+            c["rows"].append({"地號": landno, "段": seg, "小段": "",
+                              "宗地母": mother, "宗地子": child,
+                              "使分": zone or None, "使類": ltype or None, "fids": []})
     for c in cases.values():
         if c["_ccnt"]:
             c["county"] = c["_ccnt"].most_common(1)[0][0]

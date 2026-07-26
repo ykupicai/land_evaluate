@@ -13,16 +13,51 @@
 每個案場出 4 張 A4 橫式圖（使用分區、使用地編定、國土功能分區、正射影像+半透明電子地圖），
 另保留 QGIS 專案檔（.qgz）供手動微調。
 
-## 目前進度（2026-07-12 更新：整合流程 run_case 完成）
+## 目前狀態（2026-07-26 更新：臨路評估內建化，外部依賴歸零）
+
+**這條產線的權威流程定義在 skill `cadastral-map-pipeline`**（`~/.claude/skills/`，獨立 git repo）。
+本檔記錄「引擎側」（本專案腳本）的狀態與坑；流程順序、交接約定、閘門一律以該 skill 為準。
+
+現行端到端：
+```
+⓪ 清冊健檢(parcel-roster-verify，★需本人登入)
+① 取官方地籍 shp(tcdgis-parcels-to-shp，沿用同一次登入)   ①b 環敏套疊(選用)
+⓪c 國土功能分區逐筆查(nluz-landzone-query，選用，不佔登入、可與②③並行)
+② 屬性接回(shp-xls-area-join --trust-fields)
+②b 案場定義(scripts/build_sites_sitemap.py → 帶「段」欄的權威 sitemap)
+②c 臨路評估(scripts/road_access.py，**產線內建**)
+③ 批次出圖 六主題(scripts/make_maps.py --layout maxmap)  ③b 存 QGZ(簡報前必做)
+④ 簡報(parcel-briefing-deck，v1 定案 9 頁)
+```
+
+近期三項結構性變更（都已驗收＋進版控）：
+1. **臨路評估內建化（2026-07-26）**：新增 `scripts/road_access.py`，自 fishpv 忠實移植
+   `--no-ai` 實際用到的鏈路（LUIMAP 圖磚→最近色分類向量化→臨路三態＋地形組成）。
+   **本專案自此不再相依「漁電共生評估」專案**；LUIMAP 色碼表已 vendor 到
+   `config/luimap_colortable.csv`。run_case 步驟名 `fishpv`→`roadaccess`（`--from fishpv`
+   保留別名）。驗收：東石 57 案場逐案比對舊成果，分類欄 57/57 一致、數值欄最大絕對差
+   **0.000000**。⚠️ 門檻（直接臨路≤0.5m／需搭橋≤1.5m）與道路關鍵字**非經使用者同意不得改**。
+2. **案場定義權收回產線（2026-07-16）**：`build_sites_sitemap.py` 以相鄰宗地連通分量聚類，
+   產帶「段」欄的權威 sitemap；臨路與出圖都吃同一份，案場幾何完全一致。
+   起因是東石事故：sitemap 無段欄 → 跨段重複地號分派失敗 → **S012 整案無聲消失**。
+   ⚠️ **sitemap 必含段欄**；閘門要驗「實際餵進下一段的那份檔」（驗過≠餵入的那份）。
+3. **臨路判定圖版面（2026-07-16）**：一律疊 EMAP2；外擴改為選項 `--road-margin`
+   （single 預設 700m、persite 預設 0）；persite **只呈現本宗基地**，圖框內其他案場不畫。
+
+已完成案件：官田 40MW（4 宗基地）、清潔隊（多案場）、**東石漁電共生（57 案場×6 主題＝342 張，
+全數成功、閘門全過、已依案場分資料夾）**。
+
+## 歷史進度（2026-07-12：整合流程 run_case 完成）
 
 - [x] **整合總控 `scripts/run_case.py` 已完成並驗收**（spec `docs/superpowers/specs/
       2026-07-11-整合流程run_case-design.md`）：一鍵 shp／清冊 → **六張圖**（使用分區／
       使用地編定／國土功能分區／正射套疊／**國土利用調查**／**臨路判定**）＋ `.qgz`。
-      子進程編排（系統 Python 呼叫 QGIS 內建 Python 與漁電 fishpv），停點見 spec §4。
+      子進程編排（系統 Python 呼叫 QGIS 內建 Python；臨路評估 2026-07-26 起亦為內建腳本），
+      停點見 spec §4。
       免 AI 操作指令見 `docs/免AI批次流程操作手冊.md`「一鍵整合流程 run_case」節。
   - trust-shp 模式（`--shp`）：**直取 shp 幾何/屬性、全程不比對地籍**（無 match/02）；
     **無 14 碼段號的宗地照出**（修官田 S002/S003 被丟缺陷）；`--mode single`=整份一組、
-    `--mode persite`=依 fishpv sitemap（地號→宗基地）分組每宗一組。已以官田 40MW 驗收
+    `--mode persite`=依 sitemap（段+地號→宗基地）分組每宗一組。已以官田 40MW 驗收
     （S001~S004 六主題齊、使用分區底色正常）。純資料輔助抽到 `scripts/shp_trust_utils.py`
     （DBF 讀取容錯、地號正規化、sitemap 分派；不依賴 QGIS 故可單測）。
   - 清冊模式（`--list`）：解析→01 停點（人工核對）→`--resume` 比對→**fallback 鏈自動化**
@@ -60,6 +95,20 @@
    `styles/都市計畫.qml`（data-defined 依 Color1 上色，已於 004 驗證通過）。
    官方圖例對照見 `config/urban_plan_legend.yaml`。zone 欄有2,502種計畫個別命名，
    **不要建分類表**，一律走 Color1 data-defined。
+7. **國土功能分區逐筆查詢**（2026-07-26 新增，補強決策 3 的空間交集法）：
+   `國土功能分區/` 各縣市 shp 是**面圖層**（畫周邊底圖用，但版本各縣市不一、
+   **僅 18/22 縣市有**，缺 臺北市/嘉義市/金門縣/連江縣）。另可用 skill
+   **`nluz-landzone-query`** 以「段代碼＋地號」向 nluz.nlma.gov.tw 查**權威報部版逐筆分區**
+   （回 國土功能分區/原使用分區/原使用地/使用地），與清冊 1:1 對得上、可交叉核對使分使類。
+   - 產物放案件根目錄：**`國土功能分區.csv`**（與 `環境敏感套疊.csv` 同層同性質），
+     另可派生 `國土功能分區_逐筆.gpkg`（基地幾何＋`zone` 欄）。
+   - **出圖要把欄位改名成 `zone`** 才吃得到 `styles/國土功能分區.qml`
+     （該 qml 是 `attr="zone"` 分類、21 類中文全名，與 nluz 回傳值字面一致；官田案已驗證命中）。
+   - 平台**限流 5 秒**（145 筆約 13 分鐘，腳本有 checkpoint 可續跑）；
+     **都市計畫區/國家公園區回「查無」是正常**（依法無須製作使用地土地清冊）；
+     版本是**報部版草案**，交付口徑寫「以直轄市/縣市政府認定內容為準」。
+   - 官田案實測：145/145 命中、全為農業發展地區第二類、與清冊使類交叉核對 0 筆不符；
+     `使用地` 欄 145 筆全空（草案未指定新編定，屬正常）。
 
 ## 資料夾結構
 
@@ -114,13 +163,18 @@ docs/superpowers/specs/ # 設計文件
   → 產 01_中繼檔 → match_parcels → make_maps。需 shp 含 14 碼段號（小段碼+宗地母+宗地子）。
   中文 dbf 欄名超過 DBF 10-byte 限制會截斷、pyogrio 讀不了 → 用 dbfread(utf-8, errors=replace)。
   官田 40MW 案（番子渡頭段 133 宗地）已以此流程驗證。
-- **臨路判定 → 介接「漁電共生評估」專案（fishpv）**，直接吃案件地籍 shp（含壞欄名容錯）：
-  `cd C:\Users\user\Documents\Claude\Projects\漁電共生評估` 後
-  `.\env.bat python -m fishpv.cli --cadastre <基地.shp> --colortable qgis_plugin\fishpv_aquavoltaic\resources\luimap_colortable.csv --out <輸出夾> --no-ai --landno-field 地號`
-  → 毗鄰聚合宗基地＋LUIMAP 道路向量化＋臨路三態（直接≤0.5m／需搭橋≤1.5m／不臨路；
-  一般/防汛道路分開評）。輸出 成果.xlsx／maps/S00N.png 疊圖／sites.shp。
-  官田案已驗證：4 宗基地（S001 主基地 57.7ha 直接臨路〔一般+防汛〕、S002 直接臨路、
-  S003/S004 不臨路 49.4m/67.7m），結果在 outputs/20260707台南官田40MW/漁電臨路評估/。
+- **臨路判定 → 產線內建 `scripts/road_access.py`（2026-07-26 起；原介接外部 fishpv 已淘汰）**：
+  ```powershell
+  & "<QGIS>\bin\python-qgis-ltr.bat" scripts\road_access.py --joined <基地.shp> `
+      --sitemap <案>\案場定義\sitemap.csv --out <案>\臨路評估
+  ```
+  → LUIMAP 道路向量化＋臨路三態（直接≤0.5m／需搭橋≤1.5m／不臨路；一般/防汛道路分開評）
+  ＋地形組成。輸出 `成果.xlsx`／`sites.shp`／`features.geojson`（格式與舊 fishpv 相同，
+  make_maps 圖6 不必改）。**須用 QGIS 內建 python**（要 osgeo/GDAL）；
+  `--reuse-landuse <landuse.tif>` 可跳過圖磚下載（重跑/驗收用）。
+  案場幾何**吃 ②b 的權威 sitemap 分組**，不自行聚類 → 與出圖用的完全一致。
+  效能：逐案 × 全部地物面相交，57 案場約 10 分鐘；極大型（跨縣市/全國）清冊會爆記憶體，
+  需按縣市切分分批跑（`split_shp_persite.py`／`*_fishpv_percase.*` 為未改造的 legacy 路徑）。
 - 地段代碼線上查詢備援：https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx#gobox02
 - **國土規劃資訊系統(TCDGIS)多重地籍選取→全範圍定位→下載shp（2026-07-13 官田145筆已走通）**：
   ①登入 https://ngis.nlma.gov.tw/TCDLogin.aspx（使用者自己輸帳密+驗證碼）→

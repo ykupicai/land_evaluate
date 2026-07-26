@@ -78,16 +78,18 @@ def main():
         seg = re.sub(r"段$", "", seg)  # section_index 段名不含「段」字尾
         zone = g(r, ["20251201_6"])          # 使分
         ltype = g(r, ["20251201_7"])         # 使類
-        pair = sitemap.get(normalize_landno(landno)) if sitemap else None
-        if pair:
+        pairs = sitemap.get(normalize_landno(landno)) if sitemap else None
+        if pairs:
             hit += 1
-            cid, cname = pair
+            if pairs and isinstance(pairs[0], str):  # 舊式單值相容
+                pairs = (pairs,)
         else:
-            cid, cname = "001", name
-        cids_used.add(cid)
-        ws.append([cid, cname, county, town, seg, "", landno,
-                   mother, child, "", zone, ltype, "", "高", "由基地shp直接匯入"])
-        n += 1
+            pairs = (("001", name),)
+        for cid, cname in pairs:      # 一宗地可同屬多案場,各案場各列一筆
+            cids_used.add(cid)
+            ws.append([cid, cname, county, town, seg, "", landno,
+                       mother, child, "", zone, ltype, "", "高", "由基地shp直接匯入"])
+            n += 1
     wb.save(out / "01_中繼檔.xlsx")
     if sitemap:
         if hit == 0:

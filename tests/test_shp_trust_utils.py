@@ -183,13 +183,13 @@ def test_dbf_encoding(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_assign_site_single_all_001():
-    assert assign_site("122", {}, "案子") == ("001", "案子")
+    assert assign_site("122", {}, "案子") == (("001", "案子"),)
 
 
 def test_assign_site_persite_normalized_hit_and_miss():
-    sm = {"122": ("S001", "S001宗基地")}
-    assert assign_site("0122", sm, "案子") == ("S001", "S001宗基地")  # 正規化後命中
-    assert assign_site("999", sm, "案子") is None                    # 查無→None
+    sm = {"122": ("S001", "S001宗基地")}   # 舊式單值 dict 仍相容
+    assert assign_site("0122", sm, "案子") == (("S001", "S001宗基地"),)  # 正規化後命中
+    assert assign_site("999", sm, "案子") is None                        # 查無→None
 
 
 def test_load_sitemap_normalizes_keys(tmp_path):
@@ -197,7 +197,40 @@ def test_load_sitemap_normalizes_keys(tmp_path):
     csvf.write_text("地號,案場ID,案場名稱\n0122-0001,S001,S001宗基地\n",
                     encoding="utf-8-sig")
     sm = load_sitemap(str(csvf))
-    assert sm["122-1"] == ("S001", "S001宗基地")
+    assert sm["122-1"] == (("S001", "S001宗基地"),)
+
+
+def test_load_sitemap_multi_site_same_seg_landno(tmp_path):
+    """同段同地號列在兩個案場(如清潔隊清冊 更寮段331 同屬案場1、6)→
+    複合鍵保留全部案場;純地號鍵因跨案場衝突移除。"""
+    csvf = tmp_path / "sm.csv"
+    csvf.write_text(
+        "地號,案場ID,案場名稱,段,小段\n"
+        "331,1,甲清潔隊,更寮,更寮\n"
+        "331,6,乙清潔隊,更寮,更寮\n",
+        encoding="utf-8-sig")
+    sm = load_sitemap(str(csvf))
+    key = [k for k in sm if "|" in k][0]
+    assert sm[key] == (("1", "甲清潔隊"), ("6", "乙清潔隊"))
+    assert "331" not in sm                       # 純地號鍵衝突→移除
+    sites = assign_site("331", sm, "案子", seg="更寮段更寮小段")
+    assert sites == (("1", "甲清潔隊"), ("6", "乙清潔隊"))
+
+
+def test_read_shp_trust_meta_multi_site_row_in_both_cases(tmp_path):
+    fields = [("段號", 14), ("地號", 10), ("段別", 30),
+              ("20251201_1", 20), ("20251201_2", 20),
+              ("20251201_6", 30), ("20251201_7", 30)]
+    recs = [{"段號": "", "地號": "331", "段別": "更寮段更寮小段",
+             "20251201_1": "新北市", "20251201_2": "五股區",
+             "20251201_6": "一般農業區", "20251201_7": "交通用地"}]
+    dbf = _write_shp_dbf(tmp_path, fields, recs, "utf-8")
+    shp = str(Path(dbf).with_suffix(".shp"))
+    sm = {"更寮更寮|331": (("1", "甲清潔隊"), ("6", "乙清潔隊"))}
+    cases = read_shp_trust_meta(shp, sm, "案子", None, set())
+    assert set(cases) == {"1", "6"}
+    assert cases["1"]["rows"][0]["地號"] == "331"
+    assert cases["6"]["rows"][0]["地號"] == "331"
 
 
 def test_read_shp_trust_meta_unmapped_goes_to_unmapped_id(tmp_path):
