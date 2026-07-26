@@ -12,15 +12,15 @@ def test_shp_first_run_stops_at_overview():
     # trust-shp 首跑：不比對(match)、不抽圖層(extract)，直接 meta→fishpv→總區位圖後停
     steps = plan_steps(mode_shp=True, resume=False, chosen_mode=None,
                        artifacts={"01": False, "02": False, "03_nonempty": False,
-                                  "fishpv": False, "overview": False})
-    assert steps == ["meta", "fishpv", "digest", "overview", "STOP_MODE"]
+                                  "roadaccess": False, "overview": False})
+    assert steps == ["meta", "roadaccess", "digest", "overview", "STOP_MODE"]
     assert "match" not in steps and "extract" not in steps
 
 
 def test_shp_second_run_persite_renders_via_trust_extract():
     steps = plan_steps(True, False, "persite",
                        {"01": True, "02": False, "03_nonempty": False,
-                        "fishpv": True, "overview": True})
+                        "roadaccess": True, "overview": True})
     assert steps == ["trust_extract_persite", "maps"]
     assert "match" not in steps
 
@@ -28,35 +28,35 @@ def test_shp_second_run_persite_renders_via_trust_extract():
 def test_shp_second_run_single_renders_via_trust_extract():
     steps = plan_steps(True, False, "single",
                        {"01": True, "02": False, "03_nonempty": False,
-                        "fishpv": True, "overview": True})
+                        "roadaccess": True, "overview": True})
     assert steps == ["trust_extract_single", "maps"]
 
 
 def test_shp_mode_persite_without_fishpv_autochains():
     steps = plan_steps(True, False, "persite",
                        {"01": True, "02": False, "03_nonempty": False,
-                        "fishpv": False, "overview": True})
-    assert steps == ["fishpv", "digest", "trust_extract_persite", "maps"]
+                        "roadaccess": False, "overview": True})
+    assert steps == ["roadaccess", "digest", "trust_extract_persite", "maps"]
 
 
 def test_shp_mode_single_without_fishpv():
     steps = plan_steps(True, False, "single",
                        {"01": True, "02": False, "03_nonempty": False,
-                        "fishpv": False, "overview": True})
-    assert steps == ["fishpv", "digest", "trust_extract_single", "maps"]
+                        "roadaccess": False, "overview": True})
+    assert steps == ["roadaccess", "digest", "trust_extract_single", "maps"]
 
 
 def test_list_first_run_stops_at_check():
     steps = plan_steps(False, False, None,
                        {"01": False, "02": False, "03_nonempty": False,
-                        "fishpv": False, "overview": False})
+                        "roadaccess": False, "overview": False})
     assert steps == ["parse", "STOP_CHECK"]
 
 
 def test_list_resume_runs_match_and_fallback():
     steps = plan_steps(False, True, None,
                        {"01": True, "02": False, "03_nonempty": True,
-                        "fishpv": False, "overview": False})
+                        "roadaccess": False, "overview": False})
     assert steps[:4] == ["match", "landno", "apply", "match2"]
     assert steps[-1] == "STOP_MODE"
 
@@ -66,7 +66,7 @@ def test_find_from_index_exact_match():
 
 
 def test_find_from_index_match_aliases_match2():
-    assert find_from_index(["extract", "fishpv", "digest", "match2"], "match") == 3
+    assert find_from_index(["extract", "roadaccess", "digest", "match2"], "match") == 3
 
 
 def test_find_from_index_prefers_earlier_match_over_match2():
@@ -79,16 +79,16 @@ def test_find_from_index_not_found():
 
 def test_find_from_index_extract_aliases_trust_extract():
     # trust-shp 模式已無獨立 extract 步驟；--from extract 需能命中 trust_extract_*
-    assert find_from_index(["fishpv", "digest", "trust_extract_persite", "maps"],
+    assert find_from_index(["roadaccess", "digest", "trust_extract_persite", "maps"],
                            "extract") == 2
-    assert find_from_index(["fishpv", "digest", "trust_extract_single", "maps"],
+    assert find_from_index(["roadaccess", "digest", "trust_extract_single", "maps"],
                            "extract") == 2
 
 
 def test_dynamic_fallback_inserts_after_match():
     """critical 修正：match 後發現 03 非空時，fallback 補鏈要插在「當前位置之後」，
     不能 append 到 list 尾端——否則在含 STOP_MODE 的路徑會被 return 擋住而永不執行。"""
-    steps = ["match", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+    steps = ["match", "extract", "roadaccess", "digest", "overview", "STOP_MODE"]
     state = {"03_nonempty": False}
     order = []
 
@@ -106,7 +106,7 @@ def test_dynamic_fallback_inserts_after_match():
 
     assert executed[:4] == ["match", "landno", "apply", "match2"]
     assert executed == ["match", "landno", "apply", "match2",
-                        "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+                        "extract", "roadaccess", "digest", "overview", "STOP_MODE"]
     # STOP_MODE 前補鏈（landno/apply/match2）已完成，而不是被 append 到尾端沒跑到
     assert order == executed
     assert order.index("STOP_MODE") == len(order) - 1
@@ -125,8 +125,8 @@ def test_list_resume_no_mode_empty03_omits_fallback():
     # resume 無 mode、03 為空：不預先排 fallback（動態插入交給 execute_steps）
     steps = plan_steps(False, True, None,
                        {"01": True, "02": False, "03_nonempty": False,
-                        "fishpv": False, "overview": False})
-    assert steps == ["match", "extract", "fishpv", "digest", "overview", "STOP_MODE"]
+                        "roadaccess": False, "overview": False})
+    assert steps == ["match", "extract", "roadaccess", "digest", "overview", "STOP_MODE"]
     assert "landno" not in steps
 
 
@@ -134,7 +134,7 @@ def test_list_mode_chosen_with_fishpv_renders_only():
     # resume 後選 mode、fishpv 已有：直接抽圖層→出圖（不重跑臨路）
     steps = plan_steps(False, True, "persite",
                        {"01": True, "02": True, "03_nonempty": False,
-                        "fishpv": True, "overview": True})
+                        "roadaccess": True, "overview": True})
     assert steps == ["extract", "maps"]
 
 
@@ -142,8 +142,8 @@ def test_list_mode_chosen_without_fishpv_autochains():
     # resume 後選 mode、fishpv 缺：出圖前自動補跑 match/extract/fishpv/digest
     steps = plan_steps(False, True, "single",
                        {"01": True, "02": True, "03_nonempty": False,
-                        "fishpv": False, "overview": True})
-    assert steps == ["match", "extract", "fishpv", "digest", "maps"]
+                        "roadaccess": False, "overview": True})
+    assert steps == ["match", "extract", "roadaccess", "digest", "maps"]
 
 
 def test_main_list_resume_dispatches_fallback_chain(tmp_path, monkeypatch):
@@ -171,7 +171,7 @@ def test_main_list_resume_dispatches_fallback_chain(tmp_path, monkeypatch):
             # 模擬 match_parcels 首跑後：有比不到的地號 → 產生非空 03
             pd.DataFrame({"地號": ["2535-1"]}).to_excel(
                 d / "03_無法對應清單.xlsx", index=False)
-        if label == "fishpv 臨路評估":
+        if label == "臨路評估(內建)":
             # 模擬 fishpv 成功產出（無 sites.shp 時 overview 會依 #1 降級短路）
             fp = d / "臨路評估"
             fp.mkdir(exist_ok=True)
@@ -206,9 +206,9 @@ def test_main_shp_fishpv_failure_degrades_and_flow_continues(tmp_path, monkeypat
     def fake_run(cmd, cwd=None, label="", allowed=(0,), crash_artifact=None,
                  fatal=True):
         calls.append(label)
-        if label == "fishpv 臨路評估":
-            assert fatal is False  # fishpv 必須以非致命方式呼叫
-            return False           # 模擬 fishpv.cli 非零 returncode
+        if label == "臨路評估(內建)":
+            assert fatal is False  # 臨路評估必須以非致命方式呼叫
+            return False           # 模擬 road_access.py 非零 returncode
         return True
 
     monkeypatch.setattr(run_case, "_run", fake_run)
@@ -221,10 +221,10 @@ def test_main_shp_fishpv_failure_degrades_and_flow_continues(tmp_path, monkeypat
     run_case.main()  # 不可 SystemExit
 
     out = capsys.readouterr().out
-    assert "shp_to_meta" in calls and "fishpv 臨路評估" in calls
+    assert "shp_to_meta" in calls and "臨路評估(內建)" in calls
     assert "digest_fn" not in calls            # 無成果.xlsx → digest 跳過
     assert "00_總區位圖" not in calls           # 無 sites.shp → overview 短路不派 QGIS
-    assert "臨路評估(fishpv)失敗" in out        # 明確降級警告
+    assert "臨路評估失敗" in out                # 明確降級警告
     assert "--mode single|persite" in out       # STOP_MODE 停點訊息照印
 
 
@@ -239,7 +239,7 @@ def test_main_shp_fishpv_ok_still_runs_digest_and_overview(tmp_path, monkeypatch
     def fake_run(cmd, cwd=None, label="", allowed=(0,), crash_artifact=None,
                  fatal=True):
         calls.append(label)
-        if label == "fishpv 臨路評估":
+        if label == "臨路評估(內建)":
             fp = case_dir / "臨路評估"
             fp.mkdir(parents=True, exist_ok=True)
             (fp / "成果.xlsx").write_bytes(b"x")
@@ -279,15 +279,15 @@ def test_from_prereq_maps_trust_persite_needs_sitemap_or_result(tmp_path):
 
 
 def test_from_prereq_fishpv_list_mode_needs_gpkg(tmp_path):
-    errs = from_prereq_errors("fishpv", False, tmp_path, None, None)
+    errs = from_prereq_errors("roadaccess", False, tmp_path, None, None)
     assert any("圖層.gpkg" in e for e in errs)
     (tmp_path / "圖層.gpkg").write_bytes(b"x")
-    assert from_prereq_errors("fishpv", False, tmp_path, None, None) == []
+    assert from_prereq_errors("roadaccess", False, tmp_path, None, None) == []
 
 
 def test_from_prereq_overview_needs_sites_shp(tmp_path):
     errs = from_prereq_errors("overview", True, tmp_path, "x.shp", None)
-    assert any("sites.shp" in e and "--from fishpv" in e for e in errs)
+    assert any("sites.shp" in e and "--from roadaccess" in e for e in errs)
 
 
 def test_from_prereq_match_needs_01(tmp_path):
@@ -384,6 +384,6 @@ def test_run_maps_explicit_allowed_codes_pass(monkeypatch):
 def test_run_fatal_false_returns_false_without_exit(monkeypatch, capsys):
     import run_case
     _patch_subprocess(monkeypatch, 2)
-    assert run_case._run(["env.bat", "fishpv"], label="fishpv 臨路評估",
+    assert run_case._run(["env.bat", "roadaccess"], label="臨路評估(內建)",
                          fatal=False) is False
     assert "不中斷" in capsys.readouterr().out

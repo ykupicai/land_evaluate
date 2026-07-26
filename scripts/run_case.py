@@ -18,8 +18,7 @@ REPO = Path(__file__).resolve().parent.parent
 def _paths() -> dict:
     """外部路徑集中於 config/paths.yaml（與 make_maps 同源）；缺檔回退內建預設。"""
     d = {"qgis_prefix": r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr",
-         "fishpv_root": r"C:\Users\user\Documents\Claude\Projects\漁電共生評估",
-         "luimap_colortable": ""}
+         "luimap_colortable": ""}   # 空=用 config/luimap_colortable.csv(已 vendor)
     p = REPO / "config" / "paths.yaml"
     if p.exists():
         try:
@@ -32,11 +31,13 @@ def _paths() -> dict:
 _P = _paths()
 # QGIS 執行檔由 qgis_prefix(...\apps\qgis-ltr) 推導出 ...\bin\python-qgis-ltr.bat
 QGIS_BAT = Path(_P["qgis_prefix"]).parent.parent / "bin" / "python-qgis-ltr.bat"
-FISHPV_ROOT = Path(_P["fishpv_root"])
+# 臨路評估 2026-07-26 起改為產線內建(scripts/road_access.py)，不再呼叫外部 fishpv。
+# LUIMAP 色碼表已 vendor 進 config/；paths.yaml 的 luimap_colortable 仍可覆寫。
 COLORTABLE = (Path(_P["luimap_colortable"]) if _P["luimap_colortable"]
-              else FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
-              / "resources" / "luimap_colortable.csv")
-FROM_STEPS = ("meta", "match", "fishpv", "overview", "extract", "maps")
+              else REPO / "config" / "luimap_colortable.csv")
+FROM_STEPS = ("meta", "match", "roadaccess", "overview", "extract", "maps")
+# 舊步驟名別名(--from fishpv 仍可用)
+FROM_ALIASES = {"fishpv": "roadaccess"}
 
 
 def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> list:
@@ -48,25 +49,25 @@ def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> li
     if mode_shp:
         if chosen_mode:
             steps = []
-            if not artifacts.get("fishpv"):
-                steps += ["fishpv", "digest"]
+            if not artifacts.get("roadaccess"):
+                steps += ["roadaccess", "digest"]
             # trust 出圖：single 全歸 001；persite 依 sitemap 每宗基地一組
             steps.append("trust_extract_persite" if chosen_mode == "persite"
                          else "trust_extract_single")
             steps.append("maps")
             return steps
         # 首跑：解析留痕(meta)→臨路(fishpv/digest)→總區位圖，停等選模式；不比對、不抽圖層
-        return ["meta", "fishpv", "digest", "overview", "STOP_MODE"]
+        return ["meta", "roadaccess", "digest", "overview", "STOP_MODE"]
     # 清冊模式
     if not resume and not chosen_mode:
         return ["parse", "STOP_CHECK"]
     if chosen_mode:
-        return ["extract", "maps"] if artifacts.get("fishpv") else \
-               ["match", "extract", "fishpv", "digest", "maps"]
+        return ["extract", "maps"] if artifacts.get("roadaccess") else \
+               ["match", "extract", "roadaccess", "digest", "maps"]
     steps = ["match"]
     if artifacts.get("03_nonempty"):
         steps += ["landno", "apply", "match2"]
-    steps += ["extract", "fishpv", "digest", "overview", "STOP_MODE"]
+    steps += ["extract", "roadaccess", "digest", "overview", "STOP_MODE"]
     return steps
 
 
@@ -89,7 +90,7 @@ def find_from_index(steps: list, target: str) -> int | None:
 KNOWN_STEPS = {
     "meta", "parse", "match", "match2", "landno", "apply", "extract",
     "trust_extract_single", "trust_extract_persite",
-    "fishpv", "digest", "overview", "maps", "STOP_MODE", "STOP_CHECK",
+    "roadaccess", "digest", "overview", "maps", "STOP_MODE", "STOP_CHECK",
 }
 
 
@@ -227,14 +228,14 @@ def from_prereq_errors(from_step: str, mode_shp: bool, case_dir: Path,
     elif from_step == "match":
         need(case_dir / "01_中繼檔.xlsx",
              "請先完成清冊解析與人工核對（首跑不加 --from），或以 shp_to_meta 產 01")
-    elif from_step == "fishpv":
+    elif from_step == "roadaccess":
         if mode_shp:
             need(shp, "請確認 --shp 路徑")
         else:
             need(case_dir / "圖層.gpkg",
-                 "清冊模式 fishpv 吃 圖層.gpkg 基地層，請先 --from extract（或完整 --resume）")
+                 "清冊模式臨路評估吃 圖層.gpkg 基地層，請先 --from extract（或完整 --resume）")
     elif from_step == "overview":
-        need(fp / "sites.shp", "總區位圖需 fishpv 宗基地聚合結果，請先 --from fishpv")
+        need(fp / "sites.shp", "總區位圖需宗基地聚合結果，請先 --from roadaccess")
     elif from_step == "extract":
         if mode_shp:
             need(shp, "請確認 --shp 路徑")
@@ -246,7 +247,7 @@ def from_prereq_errors(from_step: str, mode_shp: bool, case_dir: Path,
             need(shp, "請確認 --shp 路徑")
             if chosen == "persite" and not (fp / "sitemap.csv").exists():
                 need(fp / "成果.xlsx",
-                     "trust persite 出圖需 臨路評估/sitemap.csv 或 成果.xlsx，請先 --from fishpv")
+                     "trust persite 出圖需 臨路評估/sitemap.csv 或 成果.xlsx，請先 --from roadaccess")
         else:
             need(case_dir / "02_比對結果.xlsx",
                  "maps 需讀 02 建案場清單，請先 --from match 完成比對")
@@ -285,6 +286,7 @@ def main():
         sys.exit("需 --shp <基地.shp> 或 --list <清冊>")
     if chosen not in (None, "single", "persite"):
         sys.exit("--mode 需為 single|persite")
+    from_step = FROM_ALIASES.get(from_step, from_step)   # 舊名 fishpv → roadaccess
     if from_step is not None and from_step not in FROM_STEPS:
         sys.exit(f"--from 需為 {'|'.join(FROM_STEPS)} 之一")
     mode_shp = shp is not None
@@ -303,7 +305,7 @@ def main():
         return {"01": (case_dir / "01_中繼檔.xlsx").exists(),
                 "02": (case_dir / "02_比對結果.xlsx").exists(),
                 "03_nonempty": nonempty,
-                "fishpv": (fp / "成果.xlsx").exists(),
+                "roadaccess": (fp / "成果.xlsx").exists(),
                 "overview": (case_dir / "00_總區位圖.png").exists()}
 
     artifacts = art()
@@ -375,15 +377,26 @@ def main():
                   "--trust-shp", shp, "--sitemap", fp / "sitemap.csv", "--extract-only"],
                  label="trust extract（persite，依 sitemap 分宗基地）",
                  crash_artifact=case_dir / "圖層.gpkg")
-        elif s == "fishpv":
+        elif s == "roadaccess":
+            # 2026-07-26 內建化：不再呼叫外部 fishpv CLI，改用 scripts/road_access.py
+            # (自 fishpv 忠實移植，東石 57 案場逐案比對 0 差異)。案場定義先由
+            # build_sites_sitemap.py 產權威 sitemap(帶段欄)，臨路再依該分組計算——
+            # 案場幾何與 make_maps 出圖用的完全一致。
             cad = shp if mode_shp else str(case_dir / "圖層.gpkg")
-            ok = _run([FISHPV_ROOT / "env.bat", "python", "-m", "fishpv.cli",
-                       "--cadastre", cad, "--colortable", COLORTABLE,
-                       "--out", fp, "--no-ai", "--landno-field", "地號"],
-                      cwd=str(FISHPV_ROOT), label="fishpv 臨路評估", fatal=False)
+            smap = case_dir / "案場定義" / "sitemap.csv"
+            ok = True
+            if not smap.exists():
+                ok = _run([QGIS_BAT, REPO / "scripts" / "build_sites_sitemap.py",
+                           "--joined", cad, "--out-dir", case_dir / "案場定義"],
+                          label="案場定義(聚類→權威 sitemap)", fatal=False)
+            if ok:
+                ok = _run([QGIS_BAT, REPO / "scripts" / "road_access.py",
+                           "--joined", cad, "--sitemap", smap,
+                           "--out", fp, "--colortable", COLORTABLE],
+                          label="臨路評估(內建)", fatal=False)
             if not ok:
-                # spec §6：fishpv 失敗 → 圖5/6 降級、1-4 照出，不中斷整條流程
-                print("[run_case] 警告：臨路評估(fishpv)失敗——後續降級續跑："
+                # spec §6：臨路評估失敗 → 圖5/6 降級、1-4 照出，不中斷整條流程
+                print("[run_case] 警告：臨路評估失敗——後續降級續跑："
                       "圖6(臨路判定)將於 05 清單標記「臨路評估失敗」、圖5 無圖例、"
                       "無 00_總區位圖；其餘圖照出。", flush=True)
         elif s == "digest":

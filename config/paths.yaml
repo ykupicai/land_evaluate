@@ -5,8 +5,8 @@
 # QGIS 安裝的 qgis-ltr 目錄（QgsApplication.setPrefixPath 用）
 qgis_prefix: C:\Program Files\QGIS 3.40.12\apps\qgis-ltr
 
-# 漁電共生評估專案根（LUIMAP 色碼表所在；臨路評估產物則放各案 outputs/<案>/臨路評估）
-fishpv_root: C:\Users\user\Documents\Claude\Projects\漁電共生評估
-
-# LUIMAP 官方色碼表；留空＝由 fishpv_root 自動推導預設位置
+# LUIMAP 官方色碼表；留空＝用本專案 config/luimap_colortable.csv（2026-07-26 起已 vendor）
 luimap_colortable: ""
+
+# 註：臨路評估 2026-07-26 起改為產線內建（scripts/road_access.py），
+# 已不再相依外部「漁電共生評估」(fishpv) 專案，故原 fishpv_root 設定已移除。

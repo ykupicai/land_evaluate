@@ -116,7 +116,6 @@ def _load_paths() -> dict:
     """外部相依路徑集中於 config/paths.yaml；缺檔/缺項回退內建預設，故絕不因此壞掉。"""
     defaults = {
         "qgis_prefix": r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr",
-        "fishpv_root": r"C:\Users\user\Documents\Claude\Projects\漁電共生評估",
         "luimap_colortable": "",
     }
     cfg_path = REPO_ROOT / "config" / "paths.yaml"
@@ -163,12 +162,11 @@ URBAN_LEGEND_YAML = "config/urban_plan_legend.yaml"
 URBAN_LAYER_NAME = "都市計畫土地使用分區"
 URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分區（依使用者圖說）
 
-# 國土利用調查（LUIMAP）：fishpv 專案的官方色碼表 + features.geojson 分類結果
-# 路徑集中於 config/paths.yaml（見 _load_paths）；luimap_colortable 留空則由 fishpv_root 推導。
-FISHPV_ROOT = Path(_PATHS["fishpv_root"])
+# 國土利用調查（LUIMAP）：官方色碼表 + 臨路評估的 features.geojson 分類結果。
+# 色碼表 2026-07-26 起 vendor 於 config/luimap_colortable.csv（不再取自 fishpv 專案）；
+# paths.yaml 的 luimap_colortable 可覆寫。
 LUIMAP_COLORTABLE = (Path(_PATHS["luimap_colortable"]) if _PATHS["luimap_colortable"]
-                     else FISHPV_ROOT / "qgis_plugin" / "fishpv_aquavoltaic"
-                     / "resources" / "luimap_colortable.csv")
+                     else REPO_ROOT / "config" / "luimap_colortable.csv")
 LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
 
 # 主題（key=檔名用、title=圖名/圖說）
