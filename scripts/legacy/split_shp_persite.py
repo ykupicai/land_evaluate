@@ -14,7 +14,7 @@ from pathlib import Path
 
 import geopandas as gpd
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # 2026-07-30 移入 legacy/，模組在上一層
 from shp_trust_utils import load_sitemap, assign_site  # noqa: E402
 
 
