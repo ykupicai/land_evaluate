@@ -274,11 +274,14 @@ def main():
             from_step = args[i + 1]; i += 2
         elif a == "--resume":
             resume = True; i += 1
-        elif a in ("--no-qgz", "--mem", "--basic"):
+        elif a in ("--no-qgz", "--mem", "--basic",
+                   # 2026-07-29 新增：底圖鎖與圖面通則（見 make_maps 說明）
+                   "--reuse-basemap", "--no-loc-parcel"):
             passthru.append(a); i += 1
         elif a == "--layout":                      # 透傳 make_maps(maxmap/compact)
             passthru += [a, args[i + 1]]; i += 2
-        elif a.startswith(("--layout=", "--themes=", "--cases=", "--exclude=", "--road-margin=")):
+        elif a.startswith(("--layout=", "--themes=", "--cases=", "--exclude=",
+                           "--road-margin=", "--basemap-dir=")):
             passthru.append(a); i += 1             # 透傳 make_maps
         else:
             sys.exit(f"未知參數 {a}")

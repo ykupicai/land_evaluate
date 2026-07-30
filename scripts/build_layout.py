@@ -148,10 +148,14 @@ def _add_loc_parcel(layout, corner, location, parcel_note_text):
 def build_sheet_layout(project, name, layers, legend_layers,
                        legend_hide_title, base_geom: QgsGeometry, bbox: tuple,
                        location: str, parcel_note_text: str, keep_alive: list,
-                       map_overlay: str | None = None):
+                       map_overlay: str | None = None, show_loc_parcel: bool = True):
     """組一張最大化地圖版面。base_geom/bbox 用來算比例尺並自動避讓角落疊圖。
     回傳 (layout, placement)；placement.scale/extent 為最終（必要時退階後）值。
-    版面不放案名/圖名標題列（使用者定案）——圖名資訊由檔名與 05 出圖清單承載。"""
+    版面不放案名/圖名標題列（使用者定案）——圖名資訊由檔名與 05 出圖清單承載。
+
+    show_loc_parcel=False：不畫「位置／涵蓋地號」角落框（使用者定案 2026-07-29：
+    簡報頁面本文已交代位置與地號，圖上再寫一次是重複，且會遮住圖面）。
+    比例尺與指北針不受影響，仍照畫。"""
 
     # 1) 幾何決策：比例尺、範圍、疊圖角落（純幾何、已測）
     def intersect_fn(x1, y1, x2, y2):
@@ -227,12 +231,14 @@ def build_sheet_layout(project, name, layers, legend_layers,
         # 病態案：基地幾乎填滿圖框，四角皆會遮基地 → 資訊改置右欄圖例下方，不強遮地圖
         _font_label(layout, f"比例尺　1 / {scale:,}".replace(",", " "),
                     op.LEGEND_X, op.LEGEND_Y + op.LEGEND_H - 24, op.LEGEND_W, 6, 9, bold=True)
-        _font_label(layout, f"位置：{location}\n涵蓋地號：{parcel_note_text}",
-                    op.LEGEND_X, op.LEGEND_Y + op.LEGEND_H - 16, op.LEGEND_W, 16, 8)
+        if show_loc_parcel:
+            _font_label(layout, f"位置：{location}\n涵蓋地號：{parcel_note_text}",
+                        op.LEGEND_X, op.LEGEND_Y + op.LEGEND_H - 16, op.LEGEND_W, 16, 8)
     else:
         a = placement.assign
         _add_scale_north(layout, m, a[op.OVERLAY_SCALE_NORTH[0]], scale)
-        _add_loc_parcel(layout, a[op.OVERLAY_LOC_PARCEL[0]], location, parcel_note_text)
+        if show_loc_parcel:
+            _add_loc_parcel(layout, a[op.OVERLAY_LOC_PARCEL[0]], location, parcel_note_text)
 
     project.layoutManager().addLayout(layout)
     return layout, placement

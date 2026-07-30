@@ -15,8 +15,10 @@
 """
 import argparse
 import csv
+import math
 import io
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -53,6 +55,10 @@ class Cfg:
     target_crs: str = "EPSG:3826"
     tile_zoom: int = 18
     sieve: int = 8
+    # ── 路寬量測(2026-07-28 新增;純加欄位,不影響臨路三態判定) ──
+    width_sample: float = 5.0     # 沿基地邊界取樣間距 m
+    width_search: float = 60.0    # 法向射線搜尋長度 m
+    width_gap: float = 8.0        # 取樣點到路緣容許間隔 m(超過視為該點未鄰接道路)
 
 
 # ── 柵格 I/O(自 raster.py 移植) ─────────────────────────────────────────────
@@ -243,6 +249,67 @@ def _classify_road(site_geom, feats, cfg):
     return normal_acc, dist, ""
 
 
+def _road_width(site_geom, feats, cfg):
+    """沿基地邊界法向量測鄰接道路寬度(2026-07-28 新增)。
+
+    作法:沿基地外環每 width_sample 公尺取樣,於各取樣點取邊界外法向,
+    往外射出 width_search 公尺射線,取射線與道路面相交之**最靠近起點的連續段**
+    長度為該處路寬;取樣點到路緣間隔逾 width_gap 者視為該點未鄰接道路而不採計。
+    回傳 (中位數, 最小, 最大, 採計點數, 總取樣點數)。純新增資訊,不改臨路三態判定。
+    """
+    roads = feats[feats["category"] == "道路"]
+    if len(roads) == 0:
+        return None, None, None, 0, 0
+    road = roads.geometry.union_all()
+    if not road.is_valid:
+        road = shapely.make_valid(road)
+
+    polys = [site_geom] if site_geom.geom_type == "Polygon" else list(site_geom.geoms)
+    widths, n_sample = [], 0
+    for poly in polys:
+        ring = poly.exterior
+        L = ring.length
+        if L <= 0:
+            continue
+        n = max(int(L // cfg.width_sample), 4)
+        for i in range(n):
+            d = L * i / n
+            p = ring.interpolate(d)
+            q = ring.interpolate(min(d + 0.5, L))
+            dx, dy = q.x - p.x, q.y - p.y
+            m = math.hypot(dx, dy)
+            if m == 0:
+                continue
+            # 邊界切線旋轉 90°,取朝外者
+            nx, ny = -dy / m, dx / m
+            if poly.contains(shapely.Point(p.x + nx * 0.2, p.y + ny * 0.2)):
+                nx, ny = -nx, -ny
+            n_sample += 1
+            ray = shapely.LineString([(p.x, p.y),
+                                      (p.x + nx * cfg.width_search, p.y + ny * cfg.width_search)])
+            inter = ray.intersection(road)
+            if inter.is_empty:
+                continue
+            segs = [inter] if inter.geom_type == "LineString" else [
+                g for g in getattr(inter, "geoms", []) if g.geom_type == "LineString"]
+            if not segs:
+                continue
+            # 取最靠近取樣點的連續段
+            segs.sort(key=lambda g: shapely.Point(p.x, p.y).distance(g))
+            first = segs[0]
+            gap = shapely.Point(p.x, p.y).distance(first)
+            if gap > cfg.width_gap:
+                continue
+            if first.length > 0:
+                widths.append(first.length)
+    if not widths:
+        return None, None, None, 0, n_sample
+    widths.sort()
+    mid = widths[len(widths) // 2] if len(widths) % 2 else \
+        (widths[len(widths) // 2 - 1] + widths[len(widths) // 2]) / 2
+    return mid, widths[0], widths[-1], len(widths), n_sample
+
+
 def _crossing_check(site_geom, feats, category, margin):
     sub = feats[feats["category"] == category]
     if len(sub) == 0:
@@ -264,6 +331,7 @@ def _analyze_site(site, feats, cfg):
     g = site["geometry"]
     comp = _site_composition(g, feats)
     road_status, road_dist, road_note = _classify_road(g, feats, cfg)
+    w_mid, w_min, w_max, w_n, w_tot = _road_width(g, feats, cfg)
     pond_a, pond_r = _crossing_check(g, feats, "魚塭", cfg.crossing_margin)
     bld_a, bld_r = _crossing_check(g, feats, "建物", cfg.crossing_margin)
     site_area = site["area_m2"]
@@ -287,6 +355,10 @@ def _analyze_site(site, feats, cfg):
         "有無建物": "Y" if comp["has_building"] else "N",
         "臨路狀態": road_status, "臨路註記": road_note,
         "臨路距離_m": round(road_dist, 2) if road_dist != float("inf") else None,
+        "鄰接路寬中位數_m": round(w_mid, 2) if w_mid is not None else None,
+        "鄰接路寬最小_m": round(w_min, 2) if w_min is not None else None,
+        "鄰接路寬最大_m": round(w_max, 2) if w_max is not None else None,
+        "路寬量測點數": f"{w_n}/{w_tot}",
         "魚塭越界面積_m2": round(pond_a, 2), "魚塭越界比例": round(pond_r, 4),
         "建物越界面積_m2": round(bld_a, 2), "建物越界比例": round(bld_r, 4),
         "異常旗標": "、".join(flags) if flags else "",
@@ -337,6 +409,12 @@ def main():
     ap.add_argument("--reuse-landuse", help="既有 landuse.tif(跳過 WMTS 下載;驗收/重跑用)")
     ap.add_argument("--buffer", type=float, default=Cfg.buffer_m)
     ap.add_argument("--tile-zoom", type=int, default=Cfg.tile_zoom)
+    ap.add_argument("--width-sample", type=float, default=Cfg.width_sample,
+                    help="路寬量測:沿基地邊界取樣間距 m(預設5)")
+    ap.add_argument("--width-search", type=float, default=Cfg.width_search,
+                    help="路寬量測:法向射線長度 m(預設60)")
+    ap.add_argument("--width-gap", type=float, default=Cfg.width_gap,
+                    help="路寬量測:取樣點到路緣容許間隔 m(預設8;逾此視為該點未鄰接道路)")
     a = ap.parse_args()
     cfg = Cfg(buffer_m=a.buffer, tile_zoom=a.tile_zoom)
 
@@ -364,8 +442,21 @@ def main():
     sites_out.to_file(out / "sites.shp", encoding="utf-8")
     feats.to_file(out / "features.geojson", driver="GeoJSON")
 
+    # sites_status.csv + sitemap.csv：make_maps 圖6 的圖例來源（2026-07-29 補）。
+    # 原本只有 run_case 的 digest_fishpv 會寫，但 skill 的 ②c 是叫人直接跑本腳本
+    # → 圖6 圖例會靜默變成「S001 無資料」而 6 張圖仍全部回報成功（安南案實錯）。
+    # 格式與 run_case.digest_fishpv 一致，兩條路徑產出相同。
+    table[["site_id", "臨路狀態", "臨路距離_m", "臨路註記"]].to_csv(
+        out / "sites_status.csv", index=False, encoding="utf-8-sig")
+    try:
+        shutil.copy2(a.sitemap, out / "sitemap.csv")   # 案場定義/ 為權威（帶段欄）
+    except Exception as exc:  # noqa: BLE001 — 複製失敗不影響臨路計算結果
+        print(f"警告:sitemap.csv 複製失敗（{type(exc).__name__}），"
+              f"make_maps 圖6 需自行指定 --sitemap", file=sys.stderr)
+
     dist = table["臨路狀態"].value_counts().to_dict()
-    print(f"寫出 {out}\\成果.xlsx / sites.shp / features.geojson", file=sys.stderr)
+    print(f"寫出 {out}\\成果.xlsx / sites.shp / features.geojson"
+          f" / sites_status.csv / sitemap.csv", file=sys.stderr)
     print(f"臨路狀態分布:{dist}", file=sys.stderr)
 
 

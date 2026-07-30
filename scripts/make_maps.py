@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -152,6 +153,14 @@ WRITE_QGZ = True  # 是否輸出 .qgz（可用 --no-qgz 關閉；大批次崩潰
 MATERIALIZE = False  # --mem：把每案場向量層轉記憶體層再算圖，解大單案(周邊上千筆)
                      # 時同一 gpkg 多層平行算圖的 SQLite「unable to open」並發問題。
                      # 記憶體層不會存進 .qgz，故通常與 --no-qgz 併用。
+BASEMAP_DIR = None     # --basemap-dir=<路徑>：底圖 tif 改寫他處（見下方使用說明）
+SHOW_LOC_PARCEL = True # --no-loc-parcel：不畫圖上「位置／涵蓋地號」角落框
+                       # （使用者定案 2026-07-29：簡報本文已交代，圖上重複又遮圖面）
+REUSE_BASEMAP = False  # --reuse-basemap：底圖 tif 已存在就直接沿用，不重抓圖磚、不覆寫。
+                       # 用途:(a) 使用者桌面 QGIS 開著同案 → tif 被鎖，重寫必失敗(底圖變空白);
+                       # (b) 只改版面/主題重出圖時省下圖磚下載時間。
+                       # ⚠️ 換圖框(如改 --road-margin)時既有 tif 涵蓋範圍可能不符,
+                       # 故僅在 tif 已涵蓋本次 extent 時沿用,否則照常重建。
 
 # 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
 URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
@@ -168,6 +177,38 @@ URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分
 LUIMAP_COLORTABLE = (Path(_PATHS["luimap_colortable"]) if _PATHS["luimap_colortable"]
                      else REPO_ROOT / "config" / "luimap_colortable.csv")
 LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
+
+
+def _basemap(extent_3826, out_tif, **kw):
+    """build_basemap 的薄包裝：--reuse-basemap 且既有 tif 已涵蓋本次 extent 時直接沿用。
+
+    覆蓋判定用 GeoTIFF 自身的 geotransform（tif 為 EPSG:3857），把 extent 轉到 3857
+    後比對；涵蓋不足（例如改了 --road-margin）就照常重建，不會拿錯範圍的底圖充數。
+    """
+    if not REUSE_BASEMAP or not os.path.exists(out_tif) or os.path.getsize(out_tif) < 1024:
+        return build_basemap(extent_3826, out_tif, **kw)
+    try:
+        from osgeo import gdal
+        from nlsc_wmts import _tf_3826_to_3857
+        ds = gdal.Open(out_tif)
+        gt = ds.GetGeoTransform()
+        tx0, ty1 = gt[0], gt[3]
+        tx1 = tx0 + gt[1] * ds.RasterXSize
+        ty0 = ty1 + gt[5] * ds.RasterYSize
+        ds = None
+        rx0, ry0, rx1, ry1 = _tf_3826_to_3857(*extent_3826)
+        tol = 1.0  # 公尺；圖磚邊界四捨五入的容差
+        if (tx0 - tol <= rx0 and ty0 - tol <= ry0
+                and tx1 + tol >= rx1 and ty1 + tol >= ry1):
+            print(f"  沿用既有底圖（--reuse-basemap）：{os.path.basename(out_tif)}", flush=True)
+            return out_tif
+        print(f"  既有底圖範圍不足本次圖框，重建：{os.path.basename(out_tif)}\n"
+              f"    tif  = {tx0:.1f},{ty0:.1f},{tx1:.1f},{ty1:.1f}\n"
+              f"    需要 = {rx0:.1f},{ry0:.1f},{rx1:.1f},{ry1:.1f}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — 判不出來就照常重建
+        print(f"  既有底圖檢查失敗（{type(exc).__name__}），重建："
+              f"{os.path.basename(out_tif)}", flush=True)
+    return build_basemap(extent_3826, out_tif, **kw)
 
 # 主題（key=檔名用、title=圖名/圖說）
 THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊", "國土利用調查", "臨路判定"]
@@ -861,17 +902,26 @@ def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
     req = QgsFeatureRequest().setFilterRect(extent)
     attrs = [i for i in (i_color, i_zone) if i >= 0]
     req.setSubsetOfAttributes(attrs)
-    seen: dict[str, str] = {}
+    # ★2026-07-29 使用者定案：圖例只列「圖框內實際出現的分區名」。
+    # 舊寫法查官方 Color1→分區名對照表，但同色常對多個分區（農業區與保護區同為
+    # 127,255,0），全區都是農業區時圖例仍印「農業區／保護區　等」，是錯的資訊。
+    # 改為先掃出該色在 extent 內實際的 zone 值集合；掃不到才退回官方對照表。
+    actual: dict[str, list[str]] = {}
     for f in urban_lyr.getFeatures(req):
         color = attr_str(f[i_color])
-        if not color or color in seen:
+        if not color:
             continue
-        names = color_to_names.get(color)
-        if names:
-            # 圖例只列代表名（同色多分區取前2個＋等），完整分區名已標在各 polygon 上
-            label = "／".join(names[:2]) + ("　等" if len(names) > 2 else "")
+        zone = attr_str(f[i_zone]) if i_zone >= 0 else ""
+        lst = actual.setdefault(color, [])
+        if zone and zone not in lst:
+            lst.append(zone)
+    seen: dict[str, str] = {}
+    for color, zones in actual.items():
+        if zones:
+            label = "／".join(zones[:3]) + ("　等" if len(zones) > 3 else "")
         else:
-            label = attr_str(f[i_zone]) if i_zone >= 0 else color
+            names = color_to_names.get(color) or []
+            label = ("／".join(names[:2]) + ("　等" if len(names) > 2 else "")) or color
         seen[color] = label
     if not seen:
         return None
@@ -1187,7 +1237,7 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
 
 
 def main() -> None:
-    global WRITE_QGZ, MATERIALIZE
+    global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
     only: set[str] | None = None
@@ -1219,6 +1269,12 @@ def main() -> None:
             WRITE_QGZ = False
         elif a == "--mem":
             MATERIALIZE = True
+        elif a == "--reuse-basemap":
+            REUSE_BASEMAP = True
+        elif a.startswith("--basemap-dir="):
+            BASEMAP_DIR = a.split("=", 1)[1]
+        elif a == "--no-loc-parcel":
+            SHOW_LOC_PARCEL = False
         elif a == "--skip-extract":
             skip_extract = True
         elif a == "--extract-only":
@@ -1351,9 +1407,13 @@ def main() -> None:
             zones_lyr = to_memory(zones_lyr)
         # NLSC 正射/電子地圖底圖改用圖磚拼接（nlsc_wmts.build_basemap），逐案場產 GeoTIFF；
         # 不再用 QGIS WMS provider（會卡住/逾時）。這裡只準備快取資料夾。
-        basemap_dir = out_dir / "底圖"
+        # --basemap-dir：把底圖 tif 改寫到別的資料夾。用途＝使用者桌面 QGIS 開著同案
+        # 的 .qgz 時會鎖住 底圖\*.tif，重建必失敗（底圖變空白，且會把既有 tif 弄壞）；
+        # 指到新資料夾即可在不關閉對方 QGIS 的情況下重出圖。圖磚快取仍共用原處。
+        basemap_dir = Path(BASEMAP_DIR) if BASEMAP_DIR else (out_dir / "底圖")
         basemap_dir.mkdir(parents=True, exist_ok=True)
-        tile_cache = basemap_dir / "_tilecache"
+        tile_cache = (out_dir / "底圖") / "_tilecache"
+        tile_cache.mkdir(parents=True, exist_ok=True)
         wmts_ok = True  # 逐案場嘗試，失敗於該案場 05 清單標記
 
         # 都市計畫土地使用分區（補都市土地 使分/使類=None 缺口；Color1 官方色 data-defined）
@@ -1501,10 +1561,10 @@ def main() -> None:
             ext_3826 = (ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum())
             photo_rl = emap_rl = None
             try:
-                p_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_PHOTO2.tif"),
+                p_tif = _basemap(ext_3826, str(basemap_dir / f"{cid}_PHOTO2.tif"),
                                       layer="PHOTO2", cache_dir=str(tile_cache),
                                       buffer_ratio=0.05)
-                e_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_EMAP2.tif"),
+                e_tif = _basemap(ext_3826, str(basemap_dir / f"{cid}_EMAP2.tif"),
                                       layer="EMAP2", cache_dir=str(tile_cache),
                                       buffer_ratio=0.05, keep_alpha=True)
                 if p_tif:
@@ -1533,9 +1593,9 @@ def main() -> None:
                 road_ext = (_bb[0] - road_margin, _bb[1] - road_margin,
                             _bb[2] + road_margin, _bb[3] + road_margin)
                 try:
-                    rp = build_basemap(road_ext, str(basemap_dir / f"{cid}_臨路PHOTO2.tif"),
+                    rp = _basemap(road_ext, str(basemap_dir / f"{cid}_臨路PHOTO2.tif"),
                                        layer="PHOTO2", cache_dir=str(tile_cache), buffer_ratio=0.03)
-                    re_ = build_basemap(road_ext, str(basemap_dir / f"{cid}_臨路EMAP2.tif"),
+                    re_ = _basemap(road_ext, str(basemap_dir / f"{cid}_臨路EMAP2.tif"),
                                         layer="EMAP2", cache_dir=str(tile_cache),
                                         buffer_ratio=0.03, keep_alpha=True)
                     if rp:
@@ -1557,7 +1617,7 @@ def main() -> None:
             fishpv_dir = out_dir / "臨路評估"
             if "國土利用調查" in themes:
                 try:
-                    l_tif = build_basemap(ext_3826, str(basemap_dir / f"{cid}_LUIMAP.tif"),
+                    l_tif = _basemap(ext_3826, str(basemap_dir / f"{cid}_LUIMAP.tif"),
                                           layer="LUIMAP", cache_dir=str(tile_cache),
                                           buffer_ratio=0.05)
                     if l_tif:
@@ -1728,7 +1788,7 @@ def main() -> None:
                         layout, _mmpl = sheet.build_sheet_layout(
                             project, f"{cid}_{theme}", layers, leg_layers, hide,
                             geom, bbox, loc, collapse_parcels(c), keep_alive,
-                            map_overlay=overlay)
+                            map_overlay=overlay, show_loc_parcel=SHOW_LOC_PARCEL)
                     else:
                         caveat = ""
                         layout = build_layout(project, f"{cid}_{theme}", title, layers,
