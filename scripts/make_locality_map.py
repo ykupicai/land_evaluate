@@ -38,6 +38,12 @@ from nlsc_wmts import build_basemap  # noqa: E402
 CRS = "EPSG:3826"
 EXPORT_DPI = 300
 URBAN_COLOR_FIELD = "Color1"   # 都市計畫 shp 的官方數值化 RGB 欄
+# 宗基地分色盤（2026-08-01）：**刻意避開紅色**——紅色已固定給「基地地籍」圖層，
+# 單一案場時若宗基地也用紅色，兩層會長得一模一樣、圖例失去辨識作用。
+SITE_PALETTE = [
+    (0, 90, 220), (240, 140, 0), (20, 150, 60), (140, 40, 180), (0, 150, 150),
+    (200, 20, 140), (140, 90, 40), (100, 130, 20), (20, 60, 140), (230, 180, 0),
+]
 
 
 def main():
@@ -54,7 +60,9 @@ def main():
     ap.add_argument("--urban-alpha", type=float, default=0.45,
                     help="都市計畫分區不透明度 0~1（預設 0.45，讓電子地圖路名透出）")
     ap.add_argument("--no-loc-parcel", action="store_true",
-                    help="不畫圖上「位置／涵蓋地號」角落框")
+                    help="（相容旗標，已是預設值）不畫圖上「位置／涵蓋地號」角落框")
+    ap.add_argument("--loc-parcel", action="store_true",
+                    help="畫出「位置／涵蓋地號」角落框（舊版面；預設不畫）")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -95,26 +103,30 @@ def main():
     layers = [site]
     legend = [site]
 
-    # 案場面（標 site_id，讓讀者在第2頁就認識 S001/S002）
+    # 案場面：**依 site_id 分色，靠圖例辨識，不在圖上標註**
+    # （★2026-08-01 使用者定案：區位圖外擴後基地很小，標籤會整個蓋掉基地本身；
+    #   改為每宗基地一色並列入圖例，多宗基地時顏色即區分依據。）
     if a.sites and os.path.exists(a.sites):
         sl = QgsVectorLayer(a.sites, "宗基地", "ogr")
         if sl.isValid():
-            sl.renderer().setSymbol(QgsFillSymbol.createSimple({
-                "color": "255,255,255,0", "outline_color": "0,0,0,255",
-                "outline_width": "0.35", "outline_style": "dash"}))
             idx = sl.fields().indexFromName("site_id")
             if idx >= 0:
-                pal = QgsPalLayerSettings()
-                pal.fieldName = "site_id"
-                tf = QgsTextFormat()
-                tf.setFont(QFont("Microsoft JhengHei", 12, QFont.Bold))
-                tf.setSize(12)
-                buf = QgsTextBufferSettings(); buf.setEnabled(True); buf.setSize(1.2)
-                buf.setColor(QColor(255, 255, 255))
-                tf.setBuffer(buf)
-                pal.setFormat(tf)
-                sl.setLabeling(QgsVectorLayerSimpleLabeling(pal))
-                sl.setLabelsEnabled(True)
+                ids = sorted({str(f["site_id"] or "") for f in sl.getFeatures()} - {""})
+                cats = []
+                for i, sid in enumerate(ids):
+                    r, g, b = SITE_PALETTE[i % len(SITE_PALETTE)]
+                    cats.append(QgsRendererCategory(sid, QgsFillSymbol.createSimple({
+                        "color": f"{r},{g},{b},110",
+                        "outline_color": f"{r},{g},{b},255",
+                        "outline_width": "0.9"}), sid))
+                sl.setRenderer(QgsCategorizedSymbolRenderer("site_id", cats))
+                print(f"  宗基地 {len(ids)} 宗依 site_id 分色（圖例辨識，圖面不標註）："
+                      + "／".join(ids))
+            else:
+                sl.renderer().setSymbol(QgsFillSymbol.createSimple({
+                    "color": "220,30,30,110", "outline_color": "220,30,30,255",
+                    "outline_width": "0.9"}))
+            sl.setLabelsEnabled(False)
             project.addMapLayer(sl, False); keep.append(sl)
             layers.insert(0, sl)
             legend.insert(0, sl)
@@ -232,7 +244,7 @@ def main():
     fname = f"001_{a.case}_區位圖.png"
     layout, pl = sheet.build_sheet_layout(project, "001_區位圖", layers, legend, set(),
                                           geom, bbox, loc, pnote, keep,
-                                          show_loc_parcel=not a.no_loc_parcel)
+                                          show_loc_parcel=a.loc_parcel)
     exporter = QgsLayoutExporter(layout)
     st = QgsLayoutExporter.ImageExportSettings()
     st.dpi = EXPORT_DPI

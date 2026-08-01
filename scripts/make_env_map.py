@@ -178,7 +178,9 @@ def main():
     ap.add_argument("--alpha", type=float, default=DEFAULT_ALPHA,
                     help="敏感圖層不透明度 0~1（預設 0.40，讓正射底圖透出來）")
     ap.add_argument("--no-loc-parcel", action="store_true",
-                    help="不畫圖上「位置／涵蓋地號」角落框")
+                    help="（相容旗標，已是預設值）不畫圖上「位置／涵蓋地號」角落框")
+    ap.add_argument("--loc-parcel", action="store_true",
+                    help="畫出「位置／涵蓋地號」角落框（舊版面；預設不畫）")
     ap.add_argument("--out", default=None, help="輸出資料夾（預設 outputs/<案名>）")
     a = ap.parse_args()
 
@@ -321,7 +323,7 @@ def main():
     layout, _pl = sheet.build_sheet_layout(
         project, "001_環境敏感", layers, legend, set(), geom, bbox,
         loc, pnote, keep_alive,
-        show_loc_parcel=not a.no_loc_parcel)
+        show_loc_parcel=a.loc_parcel)
     exporter = QgsLayoutExporter(layout)
     st = QgsLayoutExporter.ImageExportSettings()
     st.dpi = EXPORT_DPI

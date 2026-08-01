@@ -142,9 +142,13 @@ SCALE_LEVELS = [500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000]
 BBOX_EXPAND = 1.12  # 基地 dissolve 範圍外擴約 12%（盡量放大基地以利辨識）
 NEIGH_EXPAND = 0.08  # 周邊地籍再外擴比例（相對出圖範圍寬度）
 EXPORT_DPI = 300
-ROAD_MARGIN_M = 700  # maxmap 臨路判定圖框外擴(m)——單一大基地預設(官田模式)。
+ROAD_MARGIN_M = 700  # maxmap 臨路判定圖框外擴(m)——大基地預設(官田模式)。
 # 2026-07-16 使用者定案:persite 多基地預設「不外擴」(=0,標準圖框+疊EMAP2 即可見周邊道路),
 # 避免逐案抓大範圍圖磚的時間成本;--road-margin=N 可強制指定(0=不外擴)。
+ROAD_MARGIN_MIN_HA = 2.0
+# 2026-07-29 使用者定案:**基地 <2 公頃一律不外擴**。小基地外擴後基地縮成一點,
+# 「路面距基地幾公尺、路寬幾公尺」全看不到,而那才是臨路判定要看的事。
+# 逐案場依實際面積判斷(見 main() 的 eff_margin);--road-margin=N 明示指定時以 CLI 為準。
 FONT_NAME = "Microsoft JhengHei"  # 微軟正黑體
 
 WMTS_URL = "https://wmts.nlsc.gov.tw/wmts"
@@ -154,13 +158,22 @@ MATERIALIZE = False  # --mem：把每案場向量層轉記憶體層再算圖，�
                      # 時同一 gpkg 多層平行算圖的 SQLite「unable to open」並發問題。
                      # 記憶體層不會存進 .qgz，故通常與 --no-qgz 併用。
 BASEMAP_DIR = None     # --basemap-dir=<路徑>：底圖 tif 改寫他處（見下方使用說明）
-SHOW_LOC_PARCEL = True # --no-loc-parcel：不畫圖上「位置／涵蓋地號」角落框
-                       # （使用者定案 2026-07-29：簡報本文已交代，圖上重複又遮圖面）
+SHOW_LOC_PARCEL = False  # 圖上「位置／涵蓋地號」角落框：**預設不畫**
+                       # （使用者定案 2026-07-29：簡報本文已交代，圖上重複又遮圖面）。
+                       # --no-loc-parcel 保留為相容旗標(等於預設值,帶了不影響);
+                       # 要回到舊版面畫出角落框請帶 --loc-parcel。
 REUSE_BASEMAP = False  # --reuse-basemap：底圖 tif 已存在就直接沿用，不重抓圖磚、不覆寫。
                        # 用途:(a) 使用者桌面 QGIS 開著同案 → tif 被鎖，重寫必失敗(底圖變空白);
                        # (b) 只改版面/主題重出圖時省下圖磚下載時間。
                        # ⚠️ 換圖框(如改 --road-margin)時既有 tif 涵蓋範圍可能不符,
                        # 故僅在 tif 已涵蓋本次 extent 時沿用,否則照常重建。
+ZONING_WMTS = True     # ★使用分區／使用地編定主題改以 NLSC WMTS 呈現（2026-08-02 使用者定案）：
+                       # nURBAN1=非都市土地使用分區圖、nURBAN2=非都市土地使用地類別圖。
+                       # 動機＝本機地籍快照是 111年2月 舊制，鄰近宗地近年的變更編定
+                       # （如布袋306-1 農牧→特目）在快照著色下會呈現舊值；WMTS 為
+                       # 官方現行套疊，永遠是最新公告。基地紅框與屬性表仍用平台官方值。
+                       # 圖磚抓取失敗時自動退回本機 QML 著色（05 備註會註記）。
+                       # --zoning-local 可整批退回舊制（歷史案重現用）。
 
 # 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
 URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
@@ -1237,7 +1250,7 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
 
 
 def main() -> None:
-    global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL
+    global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
     only: set[str] | None = None
@@ -1271,10 +1284,16 @@ def main() -> None:
             MATERIALIZE = True
         elif a == "--reuse-basemap":
             REUSE_BASEMAP = True
+        elif a == "--zoning-local":
+            ZONING_WMTS = False   # 使用分區/使用地編定退回本機 QML 著色（歷史案重現）
+        elif a == "--zoning-wmts":
+            ZONING_WMTS = True    # 已是預設值；保留旗標供指令明示
         elif a.startswith("--basemap-dir="):
             BASEMAP_DIR = a.split("=", 1)[1]
         elif a == "--no-loc-parcel":
-            SHOW_LOC_PARCEL = False
+            SHOW_LOC_PARCEL = False   # 已是預設值;保留旗標供既有指令/手冊沿用
+        elif a == "--loc-parcel":
+            SHOW_LOC_PARCEL = True    # 明示要回到舊版面(畫位置／涵蓋地號角落框)
         elif a == "--skip-extract":
             skip_extract = True
         elif a == "--extract-only":
@@ -1320,7 +1339,8 @@ def main() -> None:
         registry = yaml.safe_load(f)
 
     sitemap = load_sitemap(sitemap_path) if (trust_shp and sitemap_path) else {}
-    # 臨路判定外擴:CLI 指定優先;否則 persite 多基地=0(不外擴)、single=ROAD_MARGIN_M
+    # 臨路判定外擴:CLI 指定優先;否則 persite 多基地=0(不外擴)、single=ROAD_MARGIN_M。
+    # ⚠️ 這只是「上限」——實際每個案場還會依面積再判一次(<2 公頃不外擴),見下方 eff_margin。
     road_margin = road_margin_cli if road_margin_cli is not None else (0.0 if sitemap else float(ROAD_MARGIN_M))
     if trust_shp:
         cases = read_shp_trust_meta(trust_shp, sitemap, case_name, only, exclude)
@@ -1588,10 +1608,20 @@ def main() -> None:
             # maxmap 臨路判定專用底圖:基地外擴 ROAD_MARGIN_M,正射＋EMAP2 電子地圖(疊路名/
             # 道路分類),圖框放大到可見最近的區道/市道/縣道/鄉道(使用者定案)。
             road_photo_rl = road_emap_rl = None
-            if layout_mode == "maxmap" and "臨路判定" in themes and mm_ctx is not None and road_margin > 0:
+            # 逐案場面積分流(使用者定案 2026-07-29):基地 <ROAD_MARGIN_MIN_HA 公頃不外擴,
+            # 否則外擴後基地縮成一點、路寬與路面距基地距離全看不到。
+            # --road-margin=N 明示指定時以 CLI 為準(含刻意要小基地也外擴的情形)。
+            eff_margin = road_margin
+            if road_margin_cli is None and mm_ctx is not None:
+                _ha = mm_ctx[0].area() / 10_000.0
+                if _ha < ROAD_MARGIN_MIN_HA and eff_margin > 0:
+                    print(f"  {cid} 基地 {_ha:.4f} 公頃 < {ROAD_MARGIN_MIN_HA} 公頃"
+                          f"→ 臨路判定圖不外擴（原 {eff_margin:.0f}m）", flush=True)
+                    eff_margin = 0.0
+            if layout_mode == "maxmap" and "臨路判定" in themes and mm_ctx is not None and eff_margin > 0:
                 _bb = mm_ctx[1]
-                road_ext = (_bb[0] - road_margin, _bb[1] - road_margin,
-                            _bb[2] + road_margin, _bb[3] + road_margin)
+                road_ext = (_bb[0] - eff_margin, _bb[1] - eff_margin,
+                            _bb[2] + eff_margin, _bb[3] + eff_margin)
                 try:
                     rp = _basemap(road_ext, str(basemap_dir / f"{cid}_臨路PHOTO2.tif"),
                                        layer="PHOTO2", cache_dir=str(tile_cache), buffer_ratio=0.03)
@@ -1610,6 +1640,33 @@ def main() -> None:
                     c["_road_ext"] = road_ext
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(f"{cid} 臨路 EMAP2 底圖失敗：{type(exc).__name__}: {exc}")
+
+            # ★NLSC 非都市土地使用分區(nURBAN1)／使用地類別(nURBAN2) WMTS 底圖
+            #  （ZONING_WMTS 模式；抓不到就退回本機 QML 著色，見 theme_defs 覆寫處）
+            nurban1_rl = nurban2_rl = None
+            if ZONING_WMTS and ({"使用分區", "使用地編定"} & set(themes)):
+                for _lid, _nm in (("nURBAN1", "非都市土地使用分區圖(NLSC WMTS)"),
+                                  ("nURBAN2", "非都市土地使用地類別圖(NLSC WMTS)")):
+                    if _lid == "nURBAN1" and "使用分區" not in themes:
+                        continue
+                    if _lid == "nURBAN2" and "使用地編定" not in themes:
+                        continue
+                    try:
+                        _tif = _basemap(ext_3826, str(basemap_dir / f"{cid}_{_lid}.tif"),
+                                        layer=_lid, cache_dir=str(tile_cache),
+                                        buffer_ratio=0.05)
+                        if _tif:
+                            _rl = QgsRasterLayer(_tif, _nm)
+                            if _rl.isValid():
+                                project.addMapLayer(_rl, False)
+                                keep_alive.append(_rl)
+                                if _lid == "nURBAN1":
+                                    nurban1_rl = _rl
+                                else:
+                                    nurban2_rl = _rl
+                    except Exception as exc:  # noqa: BLE001
+                        warnings.append(f"{cid} {_lid} 底圖下載失敗：{type(exc).__name__}: {exc}"
+                                        "（該主題退回本機圖資著色）")
 
             # NLSC LUIMAP（國土利用調查）底圖＋圖面實際出現類別的圖例 proxy
             luimap_rl = None
@@ -1727,6 +1784,33 @@ def main() -> None:
             else:
                 _road_layers = [sites_lyr, roads_lyr] + ([photo_rl] if photo_rl else [])
 
+            # ★ZONING_WMTS：主題1/2 改以官方 WMTS 為主題底（本機快照著色是 111年2月
+            #  舊制，鄰近宗地近年變更編定會呈舊值——布袋306-1 實例）。都市土地部分
+            #  nURBAN 圖層空白，仍疊都市計畫 Color1 面補齊。抓不到圖磚＝維持舊制著色。
+            if nurban1_rl is not None:
+                zoning_layers = ([l_red]
+                                 + ([urban_lyr_zoning] if is_urban else [])
+                                 + [nurban1_rl])
+                zoning_legend = ([l_red, urban_legend_lyr] if (is_urban and
+                                 urban_legend_lyr is not None) else [l_red])
+                zoning_note = (common_note
+                               + "\n非都市土地使用分區：內政部國土測繪中心 WMTS"
+                               + f"（nURBAN1，官方現行套疊，查詢日期 "
+                               + datetime.now().strftime("%Y-%m-%d") + "）")
+                if is_urban:
+                    zoning_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
+            if nurban2_rl is not None:
+                landtype_layers = ([l_red]
+                                   + ([urban_lyr_zoning] if is_urban else [])
+                                   + [nurban2_rl])
+                landtype_legend = ([l_red, urban_legend_lyr] if (is_urban and
+                                   urban_legend_lyr is not None) else [l_red])
+                landtype_note = (common_note
+                                 + "\n非都市土地使用地類別：內政部國土測繪中心 WMTS"
+                                 + f"（nURBAN2，官方現行套疊，查詢日期 "
+                                 + datetime.now().strftime("%Y-%m-%d") + "）")
+                if is_urban:
+                    landtype_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
             theme_defs = {
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,

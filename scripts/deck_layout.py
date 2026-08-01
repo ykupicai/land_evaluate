@@ -304,7 +304,9 @@ def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None
     因為把 S002 欄留空只會浪費 2.9 吋版面。
     doubt_to：疑義列合併終點欄索引，預設 欄數-3（7 欄制留兩個判定欄）。"""
     s = new(); header(s, "綜合說明", sub, page)
-    tb(s, Inches(4.47), Inches(0.67), Inches(9.0), Inches(0.3), LEGEND, 11, False, GREY)
+    # 圖例框寬須 ≤ 版面右緣：4.47+8.60=13.07 < 13.33（原 9.00 會溢出 0.14"，
+    # 目視雖未切字但形狀跑出畫布，2026-07-31 修正）
+    tb(s, Inches(4.47), Inches(0.67), Inches(8.60), Inches(0.3), LEGEND, 11, False, GREY)
     ncol = len(rows[0])
     gf = table(s, SUM_L, top or SUM_T, SUM_W, rows,
                col_w=colw or SUM_COLW, size=SUM_SZ, ncol=ncol)

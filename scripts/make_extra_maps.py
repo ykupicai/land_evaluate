@@ -4,18 +4,23 @@
   --theme 權屬    依「公私別」分色（公有／私有），並標地號；正射為底
   --theme 環域    以 buffer 畫法定距離環域（預設 200m），環域內外一目瞭然
   --theme 隔離綠帶 綠帶＋現況建築物輪廓＋兩者交集（應拆除範圍），正射為底
+  --theme 灌排水道 農田水利灌溉／排水渠道；**有涉及才出圖**，涉及者加粗並標渠道名稱
+                  （法源：農地變更要點§5①二 妨礙農業灌排輸水能力者不同意變更）
 
 版面沿用 build_layout.build_sheet_layout（與六主題同框）。
 須用 QGIS 內建 python 執行。
 
   & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_extra_maps.py `
-      --joined <基地.shp> --case <案名> --theme 權屬 [--no-loc-parcel]
+      --joined <基地.shp> --case <案名> --theme 權屬
   & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_extra_maps.py `
       --joined <基地.shp> --case <案名> --theme 環域 --buffer 200
 """
 from __future__ import annotations
 
 import argparse
+import csv
+import gc
+import io
 import os
 import re
 import sys
@@ -27,7 +32,8 @@ sys.path.insert(0, str(HERE))
 
 from qgis.core import (  # noqa: E402
     QgsApplication, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
-    QgsFeature, QgsFillSymbol, QgsGeometry, QgsLayoutExporter, QgsPalLayerSettings,
+    QgsFeature, QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsLayoutExporter,
+    QgsLineSymbol, QgsPalLayerSettings,
     QgsProject, QgsRasterLayer, QgsRendererCategory, QgsTextBufferSettings,
     QgsTextFormat, QgsVectorLayer, QgsVectorLayerSimpleLabeling,
 )
@@ -51,11 +57,25 @@ OWNER_STYLE = {
 }
 
 
-def label_field(lyr, field, size=11):
+def label_field(lyr, field, size=11, line=False):
+    """標註欄位。line=True 用於**線圖層**——線圖層若沿用預設的 AroundPoint placement
+    會完全標不出來（2026-08-01 灌排水道實踩），須改為沿線（Curved）並允許線上／線上方。"""
     if lyr.fields().indexFromName(field) < 0:
         return
     pal = QgsPalLayerSettings()
     pal.fieldName = field
+    if line:
+        try:
+            from qgis.core import Qgis
+            pal.placement = Qgis.LabelPlacement.Curved
+            ls = pal.lineSettings()
+            ls.setPlacementFlags(Qgis.LabelLinePlacementFlag.AboveLine
+                                 | Qgis.LabelLinePlacementFlag.OnLine)
+            ls.setMergeLines(True)     # 同名分段合併，避免同一條渠道重複標
+            pal.setLineSettings(ls)
+        except Exception:                      # noqa: BLE001 — 舊版 API 後備
+            pal.placement = QgsPalLayerSettings.Curved
+        pal.labelPerPart = False
     tf = QgsTextFormat()
     tf.setFont(QFont("Microsoft JhengHei", size, QFont.Bold))
     tf.setSize(size)
@@ -71,7 +91,13 @@ def main():
     ap.add_argument("--joined", required=True)
     ap.add_argument("--case", required=True)
     ap.add_argument("--theme", required=True,
-                    choices=["權屬", "環域", "養殖漁業生產區", "隔離綠帶"])
+                    choices=["權屬", "環域", "養殖漁業生產區", "隔離綠帶", "灌排水道"])
+    ap.add_argument("--irr-dir", default=str(REPO_ROOT / "2021全台農田水利灌排" / "農田"),
+                    help="農田水利灌排圖資資料夾（內含 灌溉渠道.shp／排水渠道.shp）")
+    ap.add_argument("--irr-near", type=float, default=30.0,
+                    help="判定「涉及」之距離門檻(m)，預設 30；此範圍內之渠道加粗並標名稱")
+    ap.add_argument("--irr-context", type=float, default=200.0,
+                    help="周邊脈絡繪製半徑(m)，預設 200；僅細線不標名")
     ap.add_argument("--breed-shp", default=BREED_DEFAULT,
                     help="養殖漁業生產區 shp（預設 NAS 一級產業圖資）")
     ap.add_argument("--breed-km", type=float, default=10.0,
@@ -83,7 +109,10 @@ def main():
                     help="隔離綠帶主題：現況建築物 shp（預設 <案>/建蔽率判讀/現況建築物_判讀.shp）")
     ap.add_argument("--alpha", type=float, default=0.55, help="面填色不透明度 0~1")
     ap.add_argument("--basemap-dir", default=None)
-    ap.add_argument("--no-loc-parcel", action="store_true")
+    ap.add_argument("--no-loc-parcel", action="store_true",
+                    help="（相容旗標，已是預設值）不畫「位置／涵蓋地號」角落框")
+    ap.add_argument("--loc-parcel", action="store_true",
+                    help="畫出「位置／涵蓋地號」角落框（舊版面；預設不畫）")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -191,6 +220,102 @@ def main():
         elif got > want:
             pad = (bb.width() / want - bb.height()) / 2.0
             bb.setYMinimum(bb.yMinimum() - pad); bb.setYMaximum(bb.yMaximum() + pad)
+    elif a.theme == "灌排水道":
+        # 農田水利灌溉／排水渠道（農業部農田水利署）。
+        # 法源：農業用地變更審查作業要點§5①二「使用具農業灌溉功能之系統作廢污水排放，
+        #   或有妨礙上、下游農業灌排水系統輸水能力之虞者，不同意變更使用」——這是
+        #   **不同意變更事由**，不是成本問題，故要指名道姓查出涉及哪幾條、屬哪個工作站。
+        # 圖資：`2021全台農田水利灌排\農田\{灌溉,排水}渠道.shp`
+        #   LineString、EPSG:3826、**dbf 為 Big5**；`sys_cns`=渠道名稱、`sys_cls`=等級
+        #   （灌溉:幹線/分線/主給/小給；排水:中排/小排）、`ia_cns`=管理處、`stn_cns`=工作站。
+        #   ⚠ 資料夾名為 2021，但 `ymd` 欄顯示製作日為 2018-04-30 → 引用時以 2018 為準。
+        # ★ 使用者定案（2026-08-01）：**有涉及才出圖**；無涉及則不產圖、exit 0。
+        site.renderer().setSymbol(QgsFillSymbol.createSimple({
+            "color": "255,0,0,60", "outline_color": "200,0,0,255", "outline_width": "0.9"}))
+        SPECS = [("灌溉渠道", "0,90,200"), ("排水渠道", "0,150,130")]
+        rect = geom.boundingBox()
+        rect.grow(a.irr_context)
+        hit_all, near_all = [], []
+        for fname_, rgb in SPECS:
+            src = os.path.join(a.irr_dir, fname_ + ".shp")
+            if not os.path.exists(src):
+                print(f"  [warn] 找不到 {src} → 略過 {fname_}")
+                continue
+            sl = QgsVectorLayer(src, fname_, "ogr")
+            if not sl.isValid():
+                print(f"  [warn] {fname_} 讀取失敗 → 略過")
+                continue
+            sl.setProviderEncoding("BIG5")
+            if not sl.crs().isValid():
+                sl.setCrs(QgsCoordinateReferenceSystem(CRS))
+            # ⚠ 來源圖層**不可**放進 keep：全台 5.7 萬／5.4 萬條的 OGR provider 若活到
+            #   qgs.exitQgis() 才解構，會存取違例硬崩潰（0xC0000005，2026-08-01 實踩；
+            #   當時圖與 CSV 其實都已寫出，只是 exit code 非 0 且 stdout 緩衝遺失）。
+            #   幾何已深拷貝進記憶體圖層，故本迴圈末尾即釋放來源。
+            hit, ctx = [], []          # 涉及／周邊
+            for f in sl.getFeatures(QgsFeatureRequest().setFilterRect(rect)):
+                # ★必須深拷貝：f.geometry() 的物件會隨 iterator 前進而失效，
+                #   存進 list 事後再用會存取違例硬崩潰（0xC0000005，2026-08-01 實踩）。
+                g2 = QgsGeometry(f.geometry())
+                if g2.isEmpty():
+                    continue
+                d = geom.distance(g2)
+                rec = (d, str(f["sys_cns"] or "（未命名）"), str(f["sys_cls"] or ""),
+                       str(f["ia_cns"] or ""), str(f["stn_cns"] or ""), g2)
+                if d <= a.irr_near:
+                    hit.append(rec)
+                elif d <= a.irr_context:
+                    ctx.append(rec)
+            hit.sort(key=lambda r: r[0]); ctx.sort(key=lambda r: r[0])
+            hit_all += [(fname_,) + r for r in hit]
+            near_all += [(fname_,) + r for r in hit + ctx]
+            # 周邊：細線、不標名（只做脈絡）
+            for recs, width, do_label in ((ctx, "0.5", False), (hit, "1.4", True)):
+                if not recs:
+                    continue
+                nm = f"{fname_}（涉及）" if do_label else f"{fname_}（周邊）"
+                ml = QgsVectorLayer("LineString?crs=" + CRS + "&field=名稱:string(80)",
+                                    nm, "memory")
+                dp = ml.dataProvider(); dp.addAttributes([]); ml.updateFields()
+                feats = []
+                for d, cns, cls, ia, stn, g2 in recs:
+                    nf = QgsFeature(ml.fields())
+                    nf.setGeometry(g2)
+                    nf["名稱"] = f"{cns}（{cls}）" if cls else cns
+                    feats.append(nf)
+                dp.addFeatures(feats); ml.updateExtents()
+                sym = QgsLineSymbol.createSimple({"color": rgb + ",255", "width": width})
+                ml.renderer().setSymbol(sym)
+                if do_label:
+                    label_field(ml, "名稱", 10, line=True)
+                project.addMapLayer(ml, False); keep.append(ml)
+                layers.append(ml); legend.append(ml)
+            sl = None                  # ★見上方警告：先釋放大型來源 provider
+            gc.collect()
+        if not hit_all:
+            print(f"  {a.irr_near:.0f} m 內查無農田水利灌排渠道"
+                  f"（{a.irr_context:.0f} m 內 {len(near_all)} 條）→ 未涉及，不產圖")
+            return
+        print(f"  ★涉及：{a.irr_near:.0f} m 內共 {len(hit_all)} 條渠道")
+        stns = sorted({r[5] for r in hit_all if r[5]})
+        ias = sorted({r[4] for r in hit_all if r[4]})
+        for kind, d, cns, cls, ia, stn, _g in hit_all:
+            print(f"    {d:6.1f} m  {cns}（{cls}）　{kind}　{ia}管理處 {stn}")
+        print(f"  主管：{'／'.join(ias)}農田水利署　工作站：{'／'.join(stns)}")
+        csvp = out_dir / "灌排水道涉及清單.csv"
+        with io.open(csvp, "w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["類別", "渠道名稱", "等級", "距基地_m", "管理處", "工作站"])
+            for kind, d, cns, cls, ia, stn, _g in hit_all:
+                w.writerow([kind, cns, cls, f"{d:.2f}", ia, stn])
+        print(f"  → {csvp}")
+        # 圖框以基地為主：渠道是長條線狀物（本案「南考試潭中排２」長 1,889 m），
+        # 把整條併進 bbox 會把比例尺拉到 1/10000、基地縮成一點，名稱也擠成一團
+        # （2026-08-01 實踩）。只留足以看清涉及渠道與其名稱的邊界。
+        maxd = max(r[1] for r in hit_all)
+        ext_geom = geom
+        bb = ext_geom.boundingBox()
+        bb.grow(max(50.0, maxd * 4.0))
     elif a.theme == "隔離綠帶":
         # 隔離綠帶配置圖：綠帶 + 現況建築物輪廓 + 兩者交集（＝應拆除範圍）
         # 法源：特定工廠變更編定審查辦法§6①(一)（寬≥1.5m 且面積≥30%）、§8（綠帶內建物應拆）
@@ -213,6 +338,21 @@ def main():
         print(f"  隔離綠帶 {gg.area():,.2f} m²（占基地 {gg.area()/geom.area()*100:.2f}%）")
 
         stack = [gl]
+        # 臨路側另歸類為「隔離設施」（要點§11 通路、空地等非建築之開放性設施），
+        # 疊在綠帶之上分色呈現；兩者均計入面積比，分色只為說明性質
+        fc_p = str(out_dir / "隔離綠帶" / "隔離設施.shp")
+        if os.path.exists(fc_p):
+            fl = QgsVectorLayer(fc_p, "隔離設施(臨路側)", "ogr")
+            if fl.isValid():
+                fg = QgsGeometry.unaryUnion([f.geometry() for f in fl.getFeatures()])
+                fl.setName(f"隔離設施(臨路側) {fg.area():,.2f} m²")
+                gl.setName(f"隔離綠帶 {gg.area() - fg.area():,.2f} m²")
+                fl.renderer().setSymbol(QgsFillSymbol.createSimple({
+                    "color": "120,150,190,%d" % int(a.alpha * 255),
+                    "outline_color": "40,90,150,255", "outline_width": "0.5"}))
+                stack.insert(0, fl)
+                print(f"  其中隔離設施 {fg.area():,.2f} m²、"
+                      f"隔離綠帶 {gg.area() - fg.area():,.2f} m²")
         if os.path.exists(bd_p):
             bd = QgsVectorLayer(bd_p, "現況建築物", "ogr")
             if bd.isValid():
@@ -296,7 +436,7 @@ def main():
     fname = f"001_{a.case}_{a.theme}.png"
     layout, pl = sheet.build_sheet_layout(
         project, f"001_{a.theme}", layers, legend, set(), ext_geom, bbox, loc, pnote,
-        keep, show_loc_parcel=not a.no_loc_parcel)
+        keep, show_loc_parcel=a.loc_parcel)
     exporter = QgsLayoutExporter(layout)
     st = QgsLayoutExporter.ImageExportSettings(); st.dpi = EXPORT_DPI
     code = exporter.exportToImage(str(img_dir / fname), st)

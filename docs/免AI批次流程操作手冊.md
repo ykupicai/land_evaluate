@@ -22,7 +22,8 @@
 | 3. 出圖（六主題） | `scripts/make_maps.py` | 否 | 否（QGIS 內建 Python） |
 | 3b. 區位圖 | `scripts/make_locality_map.py` | 否 | 否 |
 | 3c. 環境敏感套疊圖 | `scripts/make_env_map.py` | 否 | 否 |
-| 3d. 補充主題圖（權屬／環域／養殖漁業生產區） | `scripts/make_extra_maps.py` | 否 | 否 |
+| 3d. 補充主題圖（權屬／環域／養殖漁業生產區／隔離綠帶／灌排水道） | `scripts/make_extra_maps.py` | 否 | 否 |
+| 3f. 隔離綠帶面積計算式圖說 | `scripts/greenbelt_triangles.py` | 否 | 否（不需 QGIS） |
 | 3e. 敏感設施距離初篩 | `scripts/osm_sensitive_poi.py` | 否（Overpass API） | 否 |
 | 3後. 整理成果 | `scripts/reorg_sheets_persite.py`、`organize_outputs.py`、`rebuild_05.py` | 否 | 否 |
 
@@ -83,8 +84,8 @@ python -X utf8 scripts\run_case.py --list <清冊> --resume --mode single --layo
 - `--from <步驟>`：從指定階段重跑。步驟為 `meta|match|roadaccess|overview|extract|maps`
   （`match` 為清冊模式限定）。**舊名 `fishpv` 仍相容**，會自動對映到 `roadaccess`。
 - `--layout maxmap|compact`：出圖版面。**簡報用一律 `maxmap`**（最大化地圖＋角落避讓）。
-- `--road-margin=<公尺>`：臨路判定圖框外擴。**有做區位圖（3b）時一律 `0`**，讓臨路圖與其他主題同比例尺；周邊脈絡交給區位圖。無區位圖且基地 ≥2 公頃才考慮 `700`。
-- `--no-loc-parcel`：圖上不畫「位置／涵蓋地號」角落框（簡報本文已交代，圖上重複又遮圖面）。
+- `--road-margin=<公尺>`：臨路判定圖框外擴。**基地 <2 公頃已自動不外擴**（程式逐案場依實際面積判斷並印一行說明，不必再手動帶 `=0`）。你仍要自己判斷的是：**有做區位圖（3b）時一律帶 `=0`**，讓臨路圖與其他主題同比例尺、周邊脈絡交給區位圖；無區位圖且基地 ≥2 公頃才用預設 `700`。帶了 `--road-margin=N` 就以你指定的為準（含刻意要小基地也外擴）。
+- 位置／涵蓋地號角落框：**預設就不畫**（簡報本文已交代，圖上重複又遮圖面）。`--no-loc-parcel` 保留為相容旗標、帶了不影響；要回到舊版面畫出角落框才帶 `--loc-parcel`。
 - `--reuse-basemap`：底圖 tif 已存在且涵蓋本次圖框就沿用，不重抓圖磚（涵蓋不足或檔案壞掉會照常重建）。
 - `--basemap-dir=<路徑>`：底圖 tif 改寫他處。**桌面 QGIS 開著同案 .qgz 時必用**（見下方「常見狀況」）。
 - `--mem`：向量層 materialize 成記憶體層算圖，免疫 SQLite 鎖衝突；記憶體層不進 `.qgz`，須搭 `--no-qgz`。
@@ -245,19 +246,24 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 ### 階段3：出圖（六主題）
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_maps.py <案子資料夾名> --layout maxmap [--cases=004,005] [--road-margin=0] [--no-loc-parcel]
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_maps.py <案子資料夾名> --layout maxmap [--cases=004,005] [--road-margin=0]
 ```
 
 讀 `02_比對結果.xlsx`（或 `--trust-shp=<shp>`）+ 圖資，**預設輸出每案場 6 張 PNG**＋`05_出圖清單_maxmap.csv`＋`.qgz`。
 
-- 旗標同前述「共通參數」，另有 `--themes=使用分區,使用地編定,國土功能分區`（只出免連網主題）、`--skip-extract`（重用既有 `圖層.gpkg`）、`--extract-only`、`--overview-only`。
+- 旗標同前述「共通參數」，另有 `--themes=使用分區,使用地編定,國土功能分區`、`--skip-extract`（重用既有 `圖層.gpkg`）、`--extract-only`、`--overview-only`。
 - 分區圖例只列**圖框內實際出現的分區**（不會再印「農業區／保護區　等」）。
+- **使用分區／使用地編定主題自 2026-08-02 起預設以 NLSC WMTS 呈現**
+  （`nURBAN1`＝非都市土地使用分區圖、`nURBAN2`＝使用地類別圖，官方**現行**套疊）——
+  本機地籍快照是 111年2月 舊制，鄰近宗地近年變更編定會著舊色（布袋306-1 農牧→特目實例）。
+  此後這兩張圖**需要連網**；圖磚抓取失敗自動退回本機 QML 著色（05 備註會註記）。
+  `--zoning-local` 可整批退回舊制（歷史案重現用）。05 備註會寫入查詢日期，交付照抄。
 - 沒跑過臨路評估就直跑 make_maps 時，圖6 在 05 清單記「**略過**：未跑臨路評估」（不是失敗）；跑過但產物不齊才記「失敗」。
 
 ### 階段3b：區位圖（簡報第2頁用）
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_locality_map.py --joined <面積join.shp> --case <案子名> --sites "outputs\<案子>\臨路評估\sites.shp" --margin 1200 --no-loc-parcel
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_locality_map.py --joined <面積join.shp> --case <案子名> --sites "outputs\<案子>\臨路評估\sites.shp" --margin 1200
 ```
 
 圖層順序：**透明電子地圖 EMAP2 置最上層** → 宗基地（標 `site_id`）→ 基地地籍 → 都市計畫分區（45%）→ 不透明 EMAP 置最底。
@@ -266,7 +272,7 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 ### 階段3c：環境敏感套疊圖
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_env_map.py --joined <面積join.shp> --case <案子名> --alpha 0.40 --no-loc-parcel
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_env_map.py --joined <面積join.shp> --case <案子名> --alpha 0.40
 ```
 
 讀 `環境敏感套疊.csv`（圖台①b 產物）挑出套疊面積>0 的圖層，解析到本機 `環境敏感相關/` 的 shp，出圖並產 `環境敏感套疊_逐類面積.csv`。
@@ -278,16 +284,107 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 ### 階段3d：補充主題圖
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 權屬 --no-loc-parcel
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 權屬
 ```
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 環域 --buffer 200 --no-loc-parcel
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 環域 --buffer 200
 ```
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 養殖漁業生產區 --no-loc-parcel
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 養殖漁業生產區
 ```
+
+**灌排水道（農田水利灌溉／排水渠道）**——法源：農地變更要點§5①二「有妨礙上、下游農業灌排水系統輸水能力之虞者，不同意變更使用」（**不同意變更事由，非成本問題**）。
+
+```powershell
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 灌排水道
+```
+
+### 階段3e-0：部分變更編定（基地涉及公路時，先切再算綠帶）
+
+基地被縣道等公路現況路面穿越／涵蓋時，比照前例（布袋306-1）把道路範圍分割出去
+維持農牧用地，**綠帶分母＝分割後之申請範圍**：
+
+```powershell
+python -X utf8 scripts\split_road.py --joined <面積join.shp> --features <臨路評估\features.geojson> --neighbours <鄰地_面積join.shp> --out "outputs\<案子>\申請範圍"
+```
+
+產 `申請範圍.shp`／`保留_道路.shp`／`鄰地_含保留地.shp`，之後 3e-2 的 greenbelt_ratio
+改吃這三個檔（`--joined 申請範圍.shp --neighbours 鄰地_含保留地.shp --facility-near 保留_道路.shp`）。
+銳角尖端與切分細條已自動處理；分割線係 LUIMAP 現況判讀，交付須載明以地政複丈為準。
+
+### 階段3e-2：隔離綠帶構法二選一（`greenbelt_ratio.py --shape`）
+
+| 構法 | 適用 | 特徵 |
+|---|---|---|
+| `offset`（預設） | 既有案沿用 | 最小寬度基礎帶＋指定側加寬；round 接合故**有圓弧角、頂點多** |
+| `minimal` | 需附三角形計算式時 | **最少頂點／無圓弧角（mitre 尖角）／面積嚴格大於門檻** |
+
+```powershell
+python -X utf8 scripts\greenbelt_ratio.py --joined <面積join.shp> --neighbours <鄰地_面積join.shp> --only-on 農業用地 --shape minimal --min-width 1.5 --ratio 0.30 --out "outputs\<案子>"
+```
+
+`minimal` 的三原則（使用者 2026-08-01 定案）：①非綠帶區域三角形數最少（＝頂點數−2）
+②綠帶轉折點最少且不得有圓弧角 ③綠帶面積**嚴格大於** `--ratio`。
+
+⚠ **必須有面積上限**：`--ratio-max`（預設 `--ratio`+0.03）。沒有上限時「頂點最少」會把基地
+一路退縮到形狀最單純為止——布袋306 實測會退到 27 公尺、綠帶佔 76.79%，把大半土地讓掉。
+面積比是**約束**不是最大化目標。
+
+布袋306 實測效果：`offset` 50 個三角形（含 4 個退化細片，其中一個高 0.00）
+→ `minimal` **6 個三角形**、綠帶 735.50 ㎡（34.31%）。
+
+⚠ **實務上不留銳角尖端**（使用者 2026-08-01 定案）：`--min-angle`（預設 25 度）在**搜尋
+階段**就把會產生銳角的候選淘汰掉。**不可事後修補**——開運算會把整條帶子縮到寬度不足、
+截角會改變局部拓樸（布袋306 實測：真不足由 0 點變成 10～11 點）。
+角度只量帶身，**與非應留設側銜接的收尾端一律不計**（那裡必然收斂成 0 度針尖，是差集的
+拓樸產物；不排除的話全部候選都是 0.0°，等於把所有解否決）。
+找不到解時多半是被 `--ratio-max` 卡住：布袋306 消除銳角需退縮 4.00 公尺、占比 33.5%，
+超過預設上限 33%，放寬到 `--ratio-max 0.35` 即得解（代價是多讓出約 25 ㎡）。
+
+`--facility-near <臨路側.shp>`：臨此範圍者另歸類為**隔離設施**、其餘為**隔離綠帶**
+（要點§11 隔離設施得為通路、空地等非建築之開放性設施，兩者均計入面積比），
+產 `隔離設施.shp`／`隔離綠帶.shp`，計算式圖與 `make_extra_maps --theme 隔離綠帶` 會自動分色。
+分界是**直線**（沿外緣找臨路／非臨路轉換點，向可配置範圍拉最短直線切開），
+兩者各為完整一段——不是用 buffer 去交集（那會產生圓弧邊界與並排細長條）。
+
+⚠ **銳角要從基地端解決，不是在綠帶端**：綠帶＝基地−可配置範圍，基地邊界有銳角，
+綠帶必然跟著有。部分變更編定案請在切分階段就把銳角尖端切除併入保留範圍
+（作法見 `outputs/20260731_布袋考試潭段306/_split_road.py` 的 `trim_spikes`，
+以既有頂點之間的直線弦跨越整個尖端切除；只切尖端那一個三角形會讓相鄰頂點變得更尖）。
+
+### 階段3f：隔離綠帶面積計算式圖說（送審用）
+
+送審須以**計算式**說明綠帶面積，不能只給 GIS 實算值。公式：
+基地面積 － 非隔離綠帶或設施之面積 ＝ 隔離綠帶或設施之面積。
+
+```powershell
+python -X utf8 scripts\greenbelt_triangles.py --joined <面積join.shp> --out "outputs\<案子>"
+```
+
+跑在系統 Python（**不需 QGIS**）。前置＝已跑完 `greenbelt_ratio.py`。
+輸出 `隔離綠帶計算式.csv/.json`、`隔離綠帶\非綠帶三角形.shp`、
+`圖檔_maxmap\001_<案>_綠帶計算式.png`（左圖：編號三角形；右上：公式與比例檢核；
+右下：編號／底／高／面積計算表含合計）。
+底取**最長邊**、高＝2×面積÷底；編號北→南、西→東（重跑不變）。
+**內建正確性閘門**：三角形面積合計必須等於非綠帶區域面積，不符即中止。
+圖上另沿基地各邊標**留設寬度**（綠色雙箭頭，一邊一個數字；`--no-width` 可關），
+並依 `隔離設施.shp` 將綠帶分色為隔離設施／隔離綠帶並列圖例。
+`--retained <保留.shp>`：部分變更編定時把分割出去的道路畫成斜線區並在公式區加分割式。
+
+⚠ **綠帶恰好解到 30.00% 時不可簡化邊界**：布袋306 實測，簡化容差 0.05 公尺就讓占比掉到
+29.98%、0.5 公尺掉到 29.59%，計算式反而會「證明不合格」。要少一點三角形（表格較好讀）
+就得把 `greenbelt_ratio --ratio` 目標提高留餘裕（例 0.305 → 容差 0.5 可得 16 個三角形、
+占比仍 30.25%），代價是多讓出可建地。
+
+
+**有涉及才出圖**：預設 `--irr-near 30`（判定涉及之距離）、`--irr-context 200`（周邊脈絡半徑）。
+30 公尺內查無渠道 → 不產圖、exit 0（與 `make_env_map` 同一原則）。
+涉及者**加粗並沿線標渠道名稱**，另產 `灌排水道涉及清單.csv`
+（類別／渠道名稱／等級／距基地_m／管理處／工作站）——**工作站欄直接告訴你該函詢哪個單位**。
+⚠ 圖資 `ymd` 欄製作日為 2018-04-30，資料夾名雖為 2021，引用年度寫 **2018**。
+
 
 - `權屬`：依「公私別」分色（公有暖色／私有冷色）並標地號，正射為底。
 - `環域`：以 buffer 畫法定距離環域（`--buffer` 公尺），環域內外一目瞭然。

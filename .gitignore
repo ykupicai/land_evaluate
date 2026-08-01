@@ -8,9 +8,13 @@ outputs/
 環境敏感相關/
 農地重劃區/
 2021 國道省道以外道路/
+2021全台農田水利灌排/
 *.qgz
 __pycache__/
 .pytest_cache/
+
+# Claude Code：本機設定不進版控，但 .claude/rules/（團隊共用規則）要進
+.claude/settings.local.json
 
 # 案件來源/暫存檔（非程式碼）
 *.xls
