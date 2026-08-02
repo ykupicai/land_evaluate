@@ -59,7 +59,7 @@
 | `make_maps.py` | 六主題 A4 成果圖 ＋ .qgz（maxmap 版面）。位置／涵蓋地號角落框**預設不畫**；基地 <2 公頃**自動不外擴**臨路圖框 |
 | `make_locality_map.py` | 區位圖（EMAP2 透明置頂＋都市計畫分區） |
 | `make_env_map.py` | 環境敏感套疊圖（無套疊則不出圖） |
-| `make_extra_maps.py` | 補充主題：權屬分色／環域／養殖漁業生產區 |
+| `make_extra_maps.py` | 補充主題圖（`--theme`）：權屬分色／法定距離環域／養殖漁業生產區／**隔離綠帶或設施**（設施與綠帶分色＋圖例，農業用地變更案必備）／農田水利灌排水道（有涉及才出圖、標渠道名與工作站） |
 
 出圖支援模組（被 import，不單獨執行）：`build_layout.py`（版面計算）、
 `overlay_placement.py`（角落疊圖避讓）、`nlsc_wmts.py`（WMTS 圖磚拼接）、

@@ -301,6 +301,16 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 & "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 灌排水道
 ```
 
+**隔離綠帶或設施配置圖**——農業用地變更案的必備圖（簡報「隔離綠帶劃設」頁）。正射為底，
+依 `隔離設施.shp` 將綠帶分色為**隔離設施（臨路側）**與**隔離綠帶（其餘各側）**並列圖例；
+另會疊現況建築物與兩者交集（＝綠帶內應拆除範圍，特定工廠案用）。
+前置＝已跑完 3e-2 的 `greenbelt_ratio.py`。**部分變更編定案的 `--joined` 要給
+`申請範圍.shp`，不是原地號的面積join.shp。**
+
+```powershell
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <申請範圍.shp 或 面積join.shp> --case <案子名> --theme 隔離綠帶
+```
+
 ### 階段3e-0：部分變更編定（基地涉及公路時，先切再算綠帶）
 
 基地被縣道等公路現況路面穿越／涵蓋時，比照前例（布袋306-1）把道路範圍分割出去
