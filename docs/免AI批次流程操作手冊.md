@@ -19,6 +19,7 @@
 | 2b. 新舊地號查詢 | `scripts/query_landno.py` | 否（純 HTTP `requests`） | 否 |
 | 2c. 案場定義 | `scripts/build_sites_sitemap.py` | 否 | 否 |
 | 2d. 臨路評估 | `scripts/road_access.py`（**產線內建**） | 否 | 否（QGIS 內建 Python） |
+| 0a. 免登入取地籍（基地＋鄰地） | `scripts/cadastre_fetch.py` | **是**（免帳號免驗證碼） | 否 |
 | 3. 出圖（六主題） | `scripts/make_maps.py` | 否 | 否（QGIS 內建 Python） |
 | 3b. 區位圖 | `scripts/make_locality_map.py` | 否 | 否 |
 | 3c. 環境敏感套疊圖 | `scripts/make_env_map.py` | 否 | 否 |
@@ -130,6 +131,34 @@ python -X utf8 scripts\run_case.py --shp <基地.shp> --mode single --layout max
 - 系統 Python（跑階段1/2/2b）需有：`pandas`、`openpyxl`、`pyogrio`、`geopandas`、`pdfplumber`、`requests`、`pyyaml`、`dbfread`
 
 ## 逐階段指令
+
+### 階段0a：免登入取地籍（★新案先跑這步，再決定何時佔用平台登入）
+
+走 skill `cadastre-check`（農業部地籍圖資＋內政部 getLandInfo），**免帳號、免驗證碼、
+無 10.5 秒節流**。基地與鄰地各跑一次：
+
+```powershell
+python -X utf8 scripts\cadastre_fetch.py fetch --county 嘉義縣 --town 布袋鎮 --section 考試潭段鹿寮小段 --landnos 306 --out "outputs\<案子>\cadastre" --name 基地
+```
+
+```powershell
+python -X utf8 scripts\cadastre_fetch.py fetch --county 嘉義縣 --town 布袋鎮 --section 考試潭段鹿寮小段 --landnos 305 278 298 391 323 306-1 --out "outputs\<案子>\cadastre" --name 鄰地
+```
+
+產 `基地.shp`／`鄰地.shp`（EPSG:3826、UTF-8，欄位含 地號／使分／使類／登面積／圖面積／版次），
+可直接餵 `greenbelt_ratio --neighbours`、`check_zones --joined`。
+
+**布袋306 實測**：幾何與 TCDGIS 官方 shp **完全相同**（IoU 100.00%、面積差 0.00 ㎡）；
+使分／使類 7/7 一致；登記面積＝平台標示面積。舊地號會**自動追蹤重測改號**。
+
+⚠ **三件事這步拿不到，仍要上 TCDGIS**：①公私別／所有權人／管理者（寫因應手段前必須知道）
+②環境敏感套疊 53 項 ③離島幾何。
+
+每案順手跑一次對帳，累積「能否升為主來源」的證據：
+
+```powershell
+python -X utf8 scripts\cadastre_fetch.py verify --cad "outputs\<案子>\cadastre\基地.shp" --official "outputs\<案子>\joined\<案子>_面積join.shp"
+```
 
 ### 階段0：禁止事由檢核（★評估案第一步，出圖前先跑）
 
