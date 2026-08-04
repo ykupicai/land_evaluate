@@ -200,12 +200,25 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
                 in_slope = bool(g.geometry.intersects(su).any())
         th = item["山坡地_公頃"] if in_slope else item["非山坡地_公頃"]
         ha = tot / 10000
-        ok = ha >= th
+        # ★ 兩種相反的門檻語意，`反向: true` 切換（2026-08-02 龍崎光電案補）：
+        #   預設（反向 false）＝「**達**門檻才符合」——如管制規則§52-1 山坡地 ≥10 公頃、
+        #     土資場自治條例§18①1 面積下限。
+        #   反向 true＝「**逾**門檻即觸發」——如環評法§5Ⅲ⑨「40 公頃以上應實施環評」、
+        #     各種面積上限。沒有這個開關時只能寫成前者，輸出會印成「✓ 符合」，
+        #     與「逾門檻＝應辦環評」的真意完全相反（本案實踩，YAML 已寫 反向 但引擎忽略）。
+        rev = bool(item.get("反向"))
+        ok = (ha < th) if rev else (ha >= th)
+        how = f"逾 {th} 公頃即觸發" if rev else f"門檻 {th} 公頃"
+        res = ("未逾門檻" if ok else f"**逾門檻**→{mark}") if rev else \
+              ("符合" if ok else mark)
         log.append(f"  {'✓' if ok else '✗'} {name}（{ref}）：基地 {ha:.4f} 公頃、"
-                   f"{'位於' if in_slope else '非'}山坡地 → 門檻 {th} 公頃"
-                   f" → {'符合' if ok else mark}")
-        rec["判定"] = "符合" if ok else mark
+                   f"{'位於' if in_slope else '非'}山坡地 → {how} → {res}")
+        rec["判定"] = ("未逾門檻" if ok else mark) if rev else ("符合" if ok else mark)
         rec["公頃"] = round(ha, 4)
+        rec["門檻公頃"] = th
+        rec["反向"] = rev
+        if not ok and item.get("備註"):
+            log.append("      " + str(item["備註"]).strip().replace("\n", " "))
         results.append(rec)
         return
 
@@ -282,7 +295,20 @@ def main():
 
     site = gpd.read_file(a.joined, engine="pyogrio")
     su = site.geometry.union_all()
-    tot = float(site.area.sum())
+    # ★ 基地面積用 **dissolve 後的面積**，不可逐筆相加（2026-08-02 龍崎光電案實踩）：
+    #   官方界址環對「內含飛地」的宗地，回的是**含飛地在內**的整圈範圍——龍崎案
+    #   112-19 的環 100% 包住 108／109／140-5／140-6／140-7 五筆獨立宗地，112-17 包住 60。
+    #   逐筆相加會把飛地重複計一次（本案多算 8,140 ㎡），分母被灌大 →
+    #   **套疊占比被系統性低估**（山坡地實為 100%，卻印成 98.5%），
+    #   而「全區位於」與「部分位於」在法律論述上差很多。
+    #   佐證：扣除飛地後 112-19 的圖登偏差由 +9.41% 降到 +2.04%、112-17 由 +0.32% 降到 +0.08%。
+    tot = float(su.area)
+    raw = float(site.area.sum())
+    enclave_note = None
+    if raw - tot > max(1.0, tot * 1e-6):
+        enclave_note = (f"⚠ 宗地幾何含內含飛地或重疊：逐筆相加 {raw:,.2f} m²、"
+                        f"dissolve 後 {tot:,.2f} m²（差 {raw - tot:,.2f}）。"
+                        f"**以 dissolve 面積為基地面積**，避免飛地被重複計入分母。")
     sites = gpd.read_file(a.sites, engine="pyogrio") if a.sites else None
     county = ""
     for c in ("縣市名稱", "縣市"):
@@ -293,6 +319,8 @@ def main():
 
     log, results = [], []
     log.append(f"基地 {len(site)} 筆、{tot:,.2f} m² = {tot/10000:.4f} 公頃　縣市：{county}")
+    if enclave_note:
+        log.append(enclave_note)
     log.append(f"檢核清單：{a.checklist}\n")
     for cl in a.checklist:
         p = os.path.join(CFG_DIR, cl + ".yaml")

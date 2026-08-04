@@ -21,3 +21,10 @@ __pycache__/
 *.xlsx
 *.pdf
 scratch_*.txt
+
+# 憑證檔一律不進版控（2026-08-02：曾被 git add -A 誤加，已從歷史移除）
+login.txt
+*login*.txt
+credential*
+*.pem
+*.key
