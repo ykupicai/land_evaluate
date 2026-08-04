@@ -247,7 +247,11 @@ def cover(line1, line2, line3, date_str,
     return s
 
 
-def table(slide, l, t, w, rows, col_w=None, size=11, header_row=True, ncol=None):
+def table(slide, l, t, w, rows, col_w=None, size=11, header_row=True, ncol=None,
+          align=None):
+    """align：逐欄對齊字串，如 "clll"（c=置中 l=靠左 r=靠右），長度不足者其餘沿用預設。
+    預設啟發式＝「非第一欄且字數 ≤12 就置中」，對數值欄很好，但**條文／說明欄會出現
+    長句靠左、短句置中的參差**（2026-08-04 保育區頁實見）→ 這種欄位請明確給 align。"""
     nc = ncol or len(rows[0])
     rows = [list(r)[:nc] + [""] * max(0, nc - len(r)) for r in rows]
     nr = len(rows)
@@ -268,8 +272,13 @@ def table(slide, l, t, w, rows, col_w=None, size=11, header_row=True, ncol=None)
             c.fill.solid()
             c.fill.fore_color.rgb = HDR if (header_row and ri == 0) else RGBColor(255, 255, 255)
             for p in c.text_frame.paragraphs:
-                p.alignment = (PP_ALIGN.CENTER if (ci > 0 and len(str(val)) <= 12)
-                               else PP_ALIGN.LEFT)
+                a = (align or "")[ci] if align and ci < len(align) else None
+                if a:
+                    p.alignment = {"c": PP_ALIGN.CENTER, "l": PP_ALIGN.LEFT,
+                                   "r": PP_ALIGN.RIGHT}.get(a, PP_ALIGN.LEFT)
+                else:
+                    p.alignment = (PP_ALIGN.CENTER if (ci > 0 and len(str(val)) <= 12)
+                                   else PP_ALIGN.LEFT)
                 p.line_spacing = 1.0
                 for r in p.runs:
                     r.font.name = FONT; r.font.size = Pt(size)

@@ -6,6 +6,9 @@
   --theme 隔離綠帶 綠帶＋現況建築物輪廓＋兩者交集（應拆除範圍），正射為底
   --theme 灌排水道 農田水利灌溉／排水渠道；**有涉及才出圖**，涉及者加粗並標渠道名稱
                   （法源：農地變更要點§5①二 妨礙農業灌排輸水能力者不同意變更）
+  --theme 緩衝綠帶 開發審議規範總編§40 的等寬緩衝綠帶＋退縮後可利用範圍，正射為底。
+                  ⚠ 與「隔離綠帶」是兩套不同制度：農地變更＝隔離綠帶（要點§9~§11）、
+                  開發許可 ≥2 公頃＝緩衝綠帶（總編§40，≥10 公尺）。前置＝buffer-greenbelt。
   --theme 坡度    坡度依開發審議規範總編§16 三段分色（<30% 可開發／30~40% 僅開放性
                   公共設施／≥40% 不可開發區），吃 scripts/slope_check.py 的
                   坡度_percent.tif；有緩衝綠帶 shp 時一併疊上。
@@ -101,7 +104,9 @@ def main():
     ap.add_argument("--case", required=True)
     ap.add_argument("--theme", required=True,
                     choices=["權屬", "環域", "養殖漁業生產區", "隔離綠帶", "灌排水道",
-                             "坡度"])
+                             "坡度", "緩衝綠帶"])
+    ap.add_argument("--setback", default=None,
+                    help="緩衝綠帶主題：退縮後基地 shp（預設 <案>/緩衝綠帶/退縮後基地.shp）")
     ap.add_argument("--slope-tif", default=None,
                     help="坡度主題：坡度百分比 raster（預設 <案>/坡度分級/坡度_percent.tif）")
     ap.add_argument("--buffer-greenbelt", default=None,
@@ -331,6 +336,47 @@ def main():
         ext_geom = geom
         bb = ext_geom.boundingBox()
         bb.grow(max(50.0, maxd * 4.0))
+    elif a.theme == "緩衝綠帶":
+        # 緩衝綠帶配置圖（開發審議規範總編§40，2 公頃以上開發許可案）。
+        # ⚠ 與「隔離綠帶」是**兩套不同制度**，不可混用：
+        #   農業用地變更＝隔離綠帶（要點§9~§11，面積比＋最小寬度雙門檻，greenbelt_ratio）
+        #   開發許可 ≥2ha ＝緩衝綠帶（總編§40，等寬內縮 ≥10m，buffer-greenbelt）
+        site.renderer().setSymbol(QgsFillSymbol.createSimple({
+            "color": "255,255,255,0", "outline_color": "200,0,0,255",
+            "outline_width": "0.9"}))
+        gb_p = a.buffer_greenbelt or str(out_dir / "緩衝綠帶" / "緩衝綠帶10m.shp")
+        if not os.path.exists(gb_p):
+            raise SystemExit(f"找不到緩衝綠帶 shp：{gb_p}"
+                             "（先跑 buffer-greenbelt 的 make_greenbelt.py）")
+        gl = QgsVectorLayer(gb_p, "緩衝綠帶／總編§40", "ogr")
+        if not gl.isValid():
+            raise SystemExit(f"緩衝綠帶 shp 讀取失敗：{gb_p}")
+        gl.renderer().setSymbol(QgsFillSymbol.createSimple({
+            "color": "56,168,0,%d" % A,
+            "outline_color": "30,110,0,255", "outline_width": "0.5"}))
+        gg = QgsGeometry.unaryUnion([f.geometry() for f in gl.getFeatures()])
+        print(f"  緩衝綠帶 {gg.area():,.0f} m²（占基地 {gg.area()/geom.area()*100:.2f}%）")
+
+        stack = [gl]
+        sb_p = a.setback or str(out_dir / "緩衝綠帶" / "退縮後基地.shp")
+        if os.path.exists(sb_p):
+            sl = QgsVectorLayer(sb_p, "退縮後可利用範圍", "ogr")
+            if sl.isValid():
+                sl.renderer().setSymbol(QgsFillSymbol.createSimple({
+                    "color": "255,210,80,%d" % int(A * 0.7),
+                    "outline_color": "180,130,0,255", "outline_width": "0.4"}))
+                sg = QgsGeometry.unaryUnion([f.geometry() for f in sl.getFeatures()])
+                print(f"  退縮後可利用 {sg.area():,.0f} m²"
+                      f"（占基地 {sg.area()/geom.area()*100:.2f}%）")
+                stack.insert(0, sl)      # 可利用範圍畫在綠帶之下
+        else:
+            print(f"  （無退縮後基地 shp，略過：{sb_p}）")
+        for lyr in stack:
+            project.addMapLayer(lyr, False); keep.append(lyr)
+            layers.append(lyr); legend.append(lyr)
+        ext_geom = geom
+        bb = geom.boundingBox()
+
     elif a.theme == "坡度":
         # 坡度分段圖（開發審議規範總編§16 三段）。這張圖回答的是「可開發的地在哪裡」，
         # 不只是「占多少百分比」——量體配置與不可開發區的空間關係要看得見。
