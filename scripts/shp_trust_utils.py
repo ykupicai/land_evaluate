@@ -116,6 +116,22 @@ def shp_get(rec, keys) -> str:
     return ""
 
 
+# ── trust-shp 的欄名別名表（★集中在此，勿在呼叫處各自寫死）─────────────────
+# 基地 shp 有兩種來源，欄名完全不同：
+#   ② shp-xls-area-join --trust-fields → `20251201_*` 系列（TCDGIS 匯出 Excel 的欄序）
+#   ⓪a cadastre_fetch（免登入）        → 中文短欄名 縣市/鄉鎮/段/使分/使類
+# ⚠ 2026-08-04 龍崎案實錯：這些清單原本只寫 `20251201_*`，⓪a 路徑逐欄取到空字串，
+#   於是 county="" → registry 查不到 → 印出「(空白)無地籍圖資（周邊地籍略過）」
+#   並 continue，**連功能分區一起被跳過**；gpkg 的 使分/使類 也全被填成
+#   「都市土地（使用分區另查）」。因主題1/2 已改走 WMTS，錯誤被遮住整整一輪才發現。
+F_LANDNO = ["地號", "20251201_4"]
+F_COUNTY = ["縣市", "縣市名稱", "20251201_1"]
+F_TOWN = ["鄉鎮", "鄉鎮區", "鄉鎮市區", "20251201_2"]
+F_SEG = ["段", "段別", "地段名稱", "20251201_3"]
+F_ZONE = ["使分", "使用分區", "20251201_6"]
+F_LTYPE = ["使類", "使用地類別", "20251201_7"]
+
+
 def shp_norm_city(s: str) -> str:
     """縣市名正規化：巿→市、台→臺、去空白（對齊 registry 鍵與 shp_to_meta）。"""
     return normalize_county((s or "").replace("巿", "市")) or ""
@@ -209,8 +225,8 @@ def read_shp_trust_meta(shp_path: str, sitemap: dict, case_name: str,
     sitemap 查無的地號歸 UNMAPPED_ID 並列名警告。"""
     dbf_path = str(Path(shp_path).with_suffix(".dbf"))
     recs = read_dbf(dbf_path)
-    cnt_c = Counter(shp_norm_city(shp_get(r, ["20251201_1"])) for r in recs)
-    cnt_t = Counter(shp_get(r, ["20251201_2"]) for r in recs)
+    cnt_c = Counter(shp_norm_city(shp_get(r, F_COUNTY)) for r in recs)
+    cnt_t = Counter(shp_get(r, F_TOWN) for r in recs)
 
     def top(cnt):
         vals = [(k, v) for k, v in cnt.items() if k]
@@ -220,21 +236,21 @@ def read_shp_trust_meta(shp_path: str, sitemap: dict, case_name: str,
     cases: dict = {}
     missed: list[str] = []
     for r in recs:
-        landno = shp_get(r, ["地號", "20251201_4"])
-        raw_seg = shp_get(r, ["段別", "20251201_3"])
+        landno = shp_get(r, F_LANDNO)
+        raw_seg = shp_get(r, F_SEG)
         sites = assign_site(landno, sitemap, case_name, seg=raw_seg)
         if sites is None:
             missed.append(f"{raw_seg}{landno}" if raw_seg else landno)
             sites = ((UNMAPPED_ID, UNMAPPED_NAME),)
-        county = shp_norm_city(shp_get(r, ["20251201_1"])) or def_c
-        town = shp_get(r, ["20251201_2"]) or def_t
-        seg = re.sub(r"段$", "", shp_get(r, ["段別", "20251201_3"]))
+        county = shp_norm_city(shp_get(r, F_COUNTY)) or def_c
+        town = shp_get(r, F_TOWN) or def_t
+        seg = re.sub(r"段$", "", shp_get(r, F_SEG))
         seg_code = shp_get(r, ["段號"])
         mother = child = ""
         if len(seg_code) >= 14:
             mother, child = seg_code[6:10], seg_code[10:14]
-        zone = shp_get(r, ["20251201_6"])
-        ltype = shp_get(r, ["20251201_7"])
+        zone = shp_get(r, F_ZONE)
+        ltype = shp_get(r, F_LTYPE)
         for cid, cname in sites:      # 一宗地可同屬多案場,各案場都收這列
             if cid in exclude or (only and cid not in only):
                 continue

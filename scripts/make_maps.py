@@ -58,6 +58,10 @@ from openpyxl.styles import Alignment, Font
 from zone_utils import normalize_zone
 from nlsc_wmts import build_basemap
 from shp_trust_utils import (
+    F_LANDNO,
+    F_LTYPE,
+    F_SEG,
+    F_ZONE,
     UNMAPPED_ID,
     UNMAPPED_NAME,
     assign_site,
@@ -400,13 +404,13 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
     bboxes: dict[str, QgsRectangle] = {}
     landnos: dict[str, set] = defaultdict(set)
     for f, r in zip(feats, recs):
-        landno = shp_get(r, ["地號", "20251201_4"])
+        landno = shp_get(r, F_LANDNO)
         sites = assign_site(landno, sitemap, case_name,
-                            seg=shp_get(r, ["段別", "20251201_3"]))
+                            seg=shp_get(r, F_SEG))
         if sites is None:
             sites = ((UNMAPPED_ID, UNMAPPED_NAME),)
-        zone = shp_get(r, ["20251201_6"])
-        ltype = shp_get(r, ["20251201_7"])
+        zone = shp_get(r, F_ZONE)
+        ltype = shp_get(r, F_LTYPE)
         g = f.geometry()
         for cid, cname in sites:      # 一宗地可同屬多案場,各案場都收幾何
             if cid not in cases:
@@ -436,15 +440,25 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
         if "extent" in c:
             by_county[c["county"]].append(c)
     for county, clist in sorted(by_county.items()):
+        rects = [c["extent"].buffered(c["extent"].width() * 0.05)
+                 for c in clist if "extent" in c]
         cad = registry["counties"].get(county, {}).get("cadastral")
-        if not cad:
-            warnings.append(f"{county} 無地籍圖資（周邊地籍略過）")
+        if not cad or not QgsVectorLayer(str(REPO_ROOT / cad), county, "ogr").isValid():
+            # ★周邊地籍拿不到**不可連坐跳過功能分區**——兩者是不同圖資、不同用途
+            # （2026-08-04 龍崎案實錯：⓪a 路徑因欄名不符使 county=""，撞上這裡的
+            #  continue，功能分區一起沒抽，主題3 出成空白圖卻回報「成功」）。
+            warnings.append(f"{county or '(縣市欄空白)'} 無可用地籍圖資（周邊地籍略過）"
+                            + ("" if county else "——基地 shp 的縣市欄取不到值，"
+                                                "請檢查欄名別名表 shp_trust_utils.F_COUNTY"))
+            if rects:
+                n = load_zones_for_county(zones, registry, county, rects, warnings)
+                print(f"  {county} 功能分區要素 {n} 筆（周邊地籍略過）", flush=True)
+                if n == 0:
+                    warnings.append(f"{county or '(縣市欄空白)'} 功能分區抽出 0 筆"
+                                    "——主題3 將是空白圖，勿當成「成功」交付")
             continue
         shp = REPO_ROOT / cad
         lyr = QgsVectorLayer(str(shp), county, "ogr")
-        if not lyr.isValid():
-            warnings.append(f"{county} 地籍 shp 載入失敗：{cad}")
-            continue
         ensure_qix(lyr, shp)
         fld = lyr.fields()
         i_mother, i_child = fld.indexOf("宗地母"), fld.indexOf("宗地子")
@@ -479,11 +493,12 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                     f"{c['id']} {c['name']}：{len(orig)} 筆基地地號在周邊官方地籍層"
                     f"找不到相符（是否基地無 Y，疑地號格式/疊字不一致）：{'、'.join(orig)}")
             print(f"  {c['id']} {c['name']}：基地 {len(base_set)} 地號、1/{c['scale']}、周邊 {n} 筆", flush=True)
-        rects = [c["extent"].buffered(c["extent"].width() * 0.05)
-                 for c in clist if "extent" in c]
         if rects:
             n = load_zones_for_county(zones, registry, county, rects, warnings)
             print(f"  {county} 功能分區要素 {n} 筆", flush=True)
+            if n == 0:
+                warnings.append(f"{county} 功能分區抽出 0 筆"
+                                "——主題3 將是空白圖，勿當成「成功」交付")
 
     _write_gpkg((base, neigh, zones), gpkg)
     return warnings
@@ -1290,6 +1305,8 @@ def main() -> None:
             ZONING_WMTS = True    # 已是預設值；保留旗標供指令明示
         elif a.startswith("--basemap-dir="):
             BASEMAP_DIR = a.split("=", 1)[1]
+        elif a == "--basemap-dir":
+            BASEMAP_DIR = args[i + 1]; i += 1
         elif a == "--no-loc-parcel":
             SHOW_LOC_PARCEL = False   # 已是預設值;保留旗標供既有指令/手冊沿用
         elif a == "--loc-parcel":
@@ -1310,7 +1327,16 @@ def main() -> None:
             road_margin_cli = float(a.split("=", 1)[1])
         elif a.startswith("--themes="):
             themes_filter = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif not a.startswith("--"):
+        elif a.startswith("--"):
+            # ★未知旗標一律硬停，不可靜默忽略（2026-08-04 實踩：`--basemap-dir <路徑>`
+            #   當時只支援 `=` 形式，空格形式落到下面的位置參數分支，**路徑被當成案名**，
+            #   於是 12 張圖與 圖層.gpkg 全寫到 outputs/<那串路徑>/ 的岔路資料夾，
+            #   真正的案件資料夾一個字都沒動，而程式全程回報「成功」。）
+            raise SystemExit(
+                f"未知旗標：{a}\n"
+                "  （若是值型旗標，請確認拼字；本腳本的值型旗標皆同時支援 "
+                "`--flag=值` 與 `--flag 值` 兩種寫法）")
+        else:
             case_name = a
         i += 1
 

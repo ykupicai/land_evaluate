@@ -6,6 +6,13 @@
   --theme 隔離綠帶 綠帶＋現況建築物輪廓＋兩者交集（應拆除範圍），正射為底
   --theme 灌排水道 農田水利灌溉／排水渠道；**有涉及才出圖**，涉及者加粗並標渠道名稱
                   （法源：農地變更要點§5①二 妨礙農業灌排輸水能力者不同意變更）
+  --theme 坡度    坡度依開發審議規範總編§16 三段分色（<30% 可開發／30~40% 僅開放性
+                  公共設施／≥40% 不可開發區），吃 scripts/slope_check.py 的
+                  坡度_percent.tif；有緩衝綠帶 shp 時一併疊上。
+                  ⚠ 該 tif 覆蓋基地 bbox 矩形、**未裁到基地邊界**，本主題會先以
+                  cutline 裁切再上色——直接畫未裁的會把基地外的坡度一起著色，
+                  且畫面占比與權威占比不符（2026-08-04 龍崎案：未裁 44.8/20.4/34.9，
+                  裁切後 38.5/23.4/38.2）。
 
 版面沿用 build_layout.build_sheet_layout（與六主題同框）。
 須用 QGIS 內建 python 執行。
@@ -31,10 +38,12 @@ REPO_ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 from qgis.core import (  # noqa: E402
-    QgsApplication, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
+    QgsApplication, QgsCategorizedSymbolRenderer, QgsColorRampShader,
+    QgsCoordinateReferenceSystem,
     QgsFeature, QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsLayoutExporter,
     QgsLineSymbol, QgsPalLayerSettings,
-    QgsProject, QgsRasterLayer, QgsRendererCategory, QgsTextBufferSettings,
+    QgsProject, QgsRasterLayer, QgsRasterShader, QgsRectangle, QgsRendererCategory,
+    QgsSingleBandPseudoColorRenderer, QgsTextBufferSettings,
     QgsTextFormat, QgsVectorLayer, QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtGui import QColor, QFont  # noqa: E402
@@ -91,7 +100,13 @@ def main():
     ap.add_argument("--joined", required=True)
     ap.add_argument("--case", required=True)
     ap.add_argument("--theme", required=True,
-                    choices=["權屬", "環域", "養殖漁業生產區", "隔離綠帶", "灌排水道"])
+                    choices=["權屬", "環域", "養殖漁業生產區", "隔離綠帶", "灌排水道",
+                             "坡度"])
+    ap.add_argument("--slope-tif", default=None,
+                    help="坡度主題：坡度百分比 raster（預設 <案>/坡度分級/坡度_percent.tif）")
+    ap.add_argument("--buffer-greenbelt", default=None,
+                    help="坡度主題：緩衝綠帶 shp（預設 <案>/緩衝綠帶/緩衝綠帶10m.shp，"
+                         "有才疊）")
     ap.add_argument("--irr-dir", default=str(REPO_ROOT / "2021全台農田水利灌排" / "農田"),
                     help="農田水利灌排圖資資料夾（內含 灌溉渠道.shp／排水渠道.shp）")
     ap.add_argument("--irr-near", type=float, default=30.0,
@@ -316,6 +331,68 @@ def main():
         ext_geom = geom
         bb = ext_geom.boundingBox()
         bb.grow(max(50.0, maxd * 4.0))
+    elif a.theme == "坡度":
+        # 坡度分段圖（開發審議規範總編§16 三段）。這張圖回答的是「可開發的地在哪裡」，
+        # 不只是「占多少百分比」——量體配置與不可開發區的空間關係要看得見。
+        from osgeo import gdal          # noqa: PLC0415 — 僅本主題需要，且須 QGIS python
+        gdal.UseExceptions()
+
+        src = a.slope_tif or str(out_dir / "坡度分級" / "坡度_percent.tif")
+        if not os.path.exists(src):
+            raise SystemExit(f"找不到坡度 raster：{src}（先跑 scripts/slope_check.py）")
+
+        # ★必須先以基地為 cutline 裁切：slope_check 產出的 tif 是基地 bbox 矩形，
+        #   直接畫會把基地外的坡度一起著色，畫面占比也對不上權威占比。
+        clipped = str(out_dir / "坡度分級" / "坡度_percent_基地裁切.tif")
+        gdal.Warp(clipped, src, cutlineDSName=a.joined, cropToCutline=True,
+                  dstNodata=-9999.0, dstSRS=CRS)
+        print(f"  坡度 raster 已以基地為 cutline 裁切 → {Path(clipped).name}")
+
+        rl = QgsRasterLayer(clipped, "坡度分段（總編§16）")
+        if not rl.isValid():
+            raise SystemExit(f"坡度 raster 讀取失敗：{clipped}")
+        # 離散色階：值 ≤ 門檻者取該色。標籤直接寫法律效果，圖例才看得懂。
+        shader = QgsRasterShader()
+        ramp = QgsColorRampShader()
+        ramp.setColorRampType(QgsColorRampShader.Discrete)
+        # 標籤用「／」斷詞：右欄圖例只有 45mm 寬，build_layout 以 setWrapString("／")
+        # 換行；不放「／」的長標籤會被直接切掉（2026-08-04 實錯）。
+        ramp.setColorRampItemList([
+            QgsColorRampShader.ColorRampItem(
+                30.0, QColor(64, 160, 64, A), "坡度<30%／可開發"),
+            QgsColorRampShader.ColorRampItem(
+                40.0, QColor(255, 190, 60, A), "坡度30~40%／僅開放性設施"),
+            QgsColorRampShader.ColorRampItem(
+                1e6, QColor(214, 39, 40, A), "坡度≥40%／不可開發區"),
+        ])
+        shader.setRasterShaderFunction(ramp)
+        rl.setRenderer(QgsSingleBandPseudoColorRenderer(rl.dataProvider(), 1, shader))
+        project.addMapLayer(rl, False); keep.append(rl)
+        layers.append(rl); legend.append(rl)
+
+        site.renderer().setSymbol(QgsFillSymbol.createSimple({
+            "color": "255,255,255,0", "outline_color": "200,0,0,255",
+            "outline_width": "0.9"}))
+
+        # 緩衝綠帶（總編§40）有就疊——它與不可開發區是可開發面積的兩大壓縮因素，
+        # 同一張圖看得出兩者是否重疊（重疊部分不重複扣）。
+        gb_p = a.buffer_greenbelt or str(out_dir / "緩衝綠帶" / "緩衝綠帶10m.shp")
+        if os.path.exists(gb_p):
+            gl = QgsVectorLayer(gb_p, "緩衝綠帶10公尺／總編§40", "ogr")
+            if gl.isValid():
+                gl.renderer().setSymbol(QgsFillSymbol.createSimple({
+                    "color": "255,255,255,0", "outline_color": "0,110,40,255",
+                    "outline_width": "0.8", "outline_style": "dash"}))
+                project.addMapLayer(gl, False); keep.append(gl)
+                layers.append(gl); legend.append(gl)
+                gg = QgsGeometry.unaryUnion([f.geometry() for f in gl.getFeatures()])
+                print(f"  緩衝綠帶 {gg.area():,.0f} m²"
+                      f"（占基地 {gg.area() / geom.area() * 100:.1f}%）")
+        else:
+            print(f"  （無緩衝綠帶 shp，略過：{gb_p}）")
+        ext_geom = geom
+        bb = geom.boundingBox()
+
     elif a.theme == "隔離綠帶":
         # 隔離綠帶配置圖：綠帶 + 現況建築物輪廓 + 兩者交集（＝應拆除範圍）
         # 法源：特定工廠變更編定審查辦法§6①(一)（寬≥1.5m 且面積≥30%）、§8（綠帶內建物應拆）
@@ -416,13 +493,24 @@ def main():
     layers.append(site); legend.append(site)
     bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
 
+    # ★底圖照「版面引擎算出的最終圖框」抓，不是 bbox（bbox 較窄，成品左右會露白邊；
+    # 2026-08-04 坡度圖實錯，同一個 bug 也修過 make_env_map）。place_overlays 純幾何、
+    # 無副作用，可先算一次拿 extent，build_sheet_layout 再算一次必得同結果。
+    import overlay_placement as op          # noqa: PLC0415 — 與 build_layout 同一顆引擎
+
+    def _inter(x1, y1, x2, y2):
+        r = ext_geom.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
+        return 0.0 if r.isEmpty() else r.area()
+
+    _fl, _fr, _fb, _ft = op.place_overlays(_inter, bbox).extent
+    bm_bbox = (_fl, _fb, _fr, _ft)
     bm = Path(a.basemap_dir) if a.basemap_dir else (out_dir / "底圖")
     bm.mkdir(parents=True, exist_ok=True)
     try:
         base = "EMAP" if a.theme == "養殖漁業生產區" else "PHOTO2"
-        tif = build_basemap(bbox, str(bm / f"extra_{a.theme}_{base}.tif"), layer=base,
+        tif = build_basemap(bm_bbox, str(bm / f"extra_{a.theme}_{base}.tif"), layer=base,
                             cache_dir=str((out_dir / "底圖") / "_tilecache"),
-                            buffer_ratio=0.1)
+                            buffer_ratio=0.02)
         if tif:
             rl = QgsRasterLayer(tif, f"{'通用電子地圖' if base == 'EMAP' else '正射影像'}"
                                      f"(NLSC {base})")

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -34,7 +35,9 @@ from qgis.core import (
     QgsLayoutSize,
     QgsLegendRenderer,
     QgsLegendStyle,
+    QgsMapLayerLegendUtils,
     QgsPrintLayout,
+    QgsRasterLayer,
     QgsRectangle,
     QgsTextFormat,
     QgsUnitTypes,
@@ -202,6 +205,20 @@ def build_sheet_layout(project, name, layers, legend_layers,
         if lyr.name() in legend_hide_title:
             QgsLegendRenderer.setNodeLegendStyle(node, QgsLegendStyle.Hidden)
     leg.model().setRootGroup(root)
+    # 光柵圖例會自動多一行「Band 1 (Gray)」（波段名）——對讀者毫無意義，又在只有
+    # 45mm 寬的右欄白占一行。逐層挑掉該節點（2026-08-04 坡度分段圖實需）。
+    for lyr in legend_layers:
+        if not isinstance(lyr, QgsRasterLayer):
+            continue
+        node = root.findLayer(lyr.id())
+        if node is None:
+            continue
+        nodes = leg.model().layerLegendNodes(node)
+        keep_idx = [i for i, n in enumerate(nodes)
+                    if not re.match(r"^Band \d+", str(n.data(Qt.DisplayRole) or ""))]
+        if 0 < len(keep_idx) < len(nodes):
+            QgsMapLayerLegendUtils.setLegendNodeOrder(node, keep_idx)
+            leg.model().refreshLayerLegend(node)
     leg.setLegendFilterByMapEnabled(True)
     leg.setTitle("圖例")
     try:
