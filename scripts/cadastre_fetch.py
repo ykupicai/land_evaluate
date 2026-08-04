@@ -11,15 +11,18 @@
   · 登記面積 ＝ TCDGIS 標示面積（306 2,500.00／306-1 4,897.97 完全一致）
   · 使用分區／使用地類別 7/7 完全一致  ← **綠帶應留設側判定所需的欄位，這裡就夠**
 
-**但它拿不到的三件事，仍必須上 TCDGIS（見 skill `tcdgis-parcels-to-shp`）**：
-  ① **公私別／所有權人／管理者**——`getLandInfo` 回傳的 20 個欄位裡沒有。
-     因應手段完全取決於權屬（西港案：國有水利地買不到，只能申請搭版橋），
-     **不可用本腳本的成果去推論權屬**。
-  ② **環境敏感地區套疊分析 53 項**——只有平台有。
-  ③ **離島（澎湖／金門／連江）幾何**——農業部服務無資料，一律回 NOT_FOUND。
+**權屬（公私別／所有權人／管理者）**：`getLandInfo` 沒有這些欄位，但
+**2026-08-02 起改由 `scripts/public_land.py`（內政部 MOI_API_039 公有土地開放資料）補上**，
+同樣免登入。本腳本預設會自動帶入（`--no-owner` 可關）。
+布袋案七筆與 TCDGIS 逐筆對帳 7/7 正確，含農田水利署與縣政府經管者。
+⚠ 「未列 ＝ 私有」是反面推論；⚠ 管理機關可能是改制前舊名。詳見 `public_land.py` docstring。
 
-因此本腳本的定位是「**免登入先跑一輪**」：幾何、使分使類、鄰地應留設側判定都先做完，
-把 TCDGIS 那次登入縮到只為「權屬＋環敏」而跑。
+**仍必須上 TCDGIS 的只剩兩件（見 skill `tcdgis-parcels-to-shp`）**：
+  ① **環境敏感地區套疊分析 53 項**——只有平台有。
+  ② **離島（澎湖／金門／連江）幾何**——農業部服務無資料，一律回 NOT_FOUND。
+
+因此本腳本的定位是「**免登入先跑一輪**」：幾何、使分使類、權屬、鄰地應留設側判定
+都先做完，把 TCDGIS 那次登入縮到只為「環敏」而跑。
 **送審交付的基地幾何權威仍以平台官方 shp 為準**（使用者 2026-07-15 鐵律），
 本腳本成果請以 `verify` 子命令與平台 shp 對帳後再沿用。
 
@@ -37,9 +40,11 @@
       --official outputs/<案>/joined/<案>_面積join.shp
 
 輸出：<name>.shp（EPSG:3826、UTF-8）＋ <name>_cadastre.json（完整回傳，含警告）
-欄位：地號／使分／使類／縣市／鄉鎮／段／登面積／圖面積／偏差pct／版次／狀態／原地號
-      （⚠ DBF 欄名上限 10 bytes，故一律短欄名；與 shp-xls-area-join 的 使分／使類 同名，
-        greenbelt_ratio --neighbours 可直接吃）
+欄位：地號／使分／使類／縣市／鄉鎮／段／登面積／圖面積／偏差pct／版次／狀態／未登記／
+      公私別／所有權／管理者／原地號
+      ⚠ DBF 欄名上限 **10 bytes**，故一律短欄名。**「所有權人」是 12 bytes 會被截斷成
+        壞 UTF-8、整份 shp 讀不出來**（2026-08-02 實踩）→ 用「所有權」（9 bytes）。
+      與 shp-xls-area-join 的 使分／使類 同名，`greenbelt_ratio --neighbours` 可直接吃。
 """
 from __future__ import annotations
 
@@ -91,10 +96,35 @@ def _load_api():
 
 def cmd_fetch(a):
     api = _load_api()
+    import sys as _s
+    _s.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     r = api.query(a.county, a.town, a.section, a.landnos, version=a.version)
     print(f"地籍版次 {r['version']}（schema {r['schema']}）　"
           f"查 {r['summary']['total']} 筆：成功 {r['summary']['ok']}、"
           f"失敗 {r['summary']['failed']}")
+    # 權屬：以**段**為單位查一次公有土地名冊，再以地號 join。
+    # 用 QueryByUnit（事務所2碼＋段4碼）而非 QueryByTown——api 回傳有 office/sec，
+    # 但沒有鄉鎮 2 碼，走事務所這條剛好對得上，少一次代碼轉換。
+    own_idx, own_msg = {}, None
+    if not a.no_owner:
+        p0 = next((rec["parcel"] for rec in r["records"] if rec["ok"] and rec["parcel"]),
+                  None)
+        if p0:
+            try:
+                import public_land as PL
+                rows = PL.query_section(None, None, p0["sec"], unit=p0["office"])
+                for rw in rows:
+                    os_ = PL.owners(rw)
+                    if os_:
+                        o = os_[0]
+                        own_idx[PL.norm_no(PL._g(rw, "No") or "")] = (
+                            o["公私別"], o["所有權人"], o["管理者"], len(os_))
+                own_msg = (f"公有土地名冊 {len(rows)} 筆"
+                           f"（事務所 {p0['office']}／段 {p0['sec']}）")
+            except Exception as e:  # noqa: BLE001
+                own_msg = f"⚠ 權屬查詢失敗（{type(e).__name__}: {e}），權屬欄留空"
+    if own_msg:
+        print(f"權屬來源：{own_msg}")
 
     import geopandas as gpd
     from shapely.geometry import shape
@@ -115,6 +145,15 @@ def cmd_fetch(a):
         #      → 分區要另查都市計畫圖資（本產線走 都市計畫/*.shp 的 Color1）
         #   空值一律原樣留著，不可填「未知」之類的假值。
         unreg = is_unregistered(p["landno"])
+        # 權屬：命中公有土地名冊＝公有；未命中＝私有（**反面推論**，關鍵筆數請覆核）。
+        # 未登記土地本來就不在該名冊，故不下私有的判斷。
+        ow = own_idx.get(p["landno"])
+        if ow:
+            pri, onm, omgr = ow[0], ow[1], ow[2]
+        elif unreg or not own_idx:
+            pri = onm = omgr = ""
+        else:
+            pri, onm, omgr = "私(推論)", "", ""
         rows.append({
             "地號": p["landno"], "使分": reg.get("zone") or "",
             "使類": reg.get("land_type") or "",
@@ -122,6 +161,7 @@ def cmd_fetch(a):
             "登面積": reg.get("area"), "圖面積": rec.get("map_area"),
             "偏差pct": rec.get("deviation_pct"), "版次": r["version"],
             "狀態": st, "未登記": "是" if unreg else "",
+            "公私別": pri, "所有權": onm, "管理者": omgr,
             "原地號": (rec["resurveyed_from"] or {}).get("landno") or "",
         })
         geoms.append(shape(rec["geometry"]))
@@ -135,6 +175,12 @@ def cmd_fetch(a):
         print(f"  ✔ {p['landno']:<11}{st:<11}{lab:<14}"
               f"登記 {reg.get('area')}　圖 {rec.get('map_area')}"
               + (f"（{dev:+.2f}%）" if dev is not None else ""))
+        if ow:
+            print(f"      權屬 {ow[0]}／{ow[1]}"
+                  + (f"／管理者 {ow[2]}" if ow[2] else "")
+                  + ("　⚠ 多所有權人" if len(ow) > 3 and ow[3] > 1 else ""))
+        elif pri:
+            print(f"      權屬 {pri}（未列於公有土地名冊）")
         if rec["resurveyed_from"]:
             print(f"      ↳ 原查詢 {rec['resurveyed_from']['landno']} 已重測改號")
         for w in rec["warnings"]:
@@ -165,8 +211,16 @@ def cmd_fetch(a):
     if n_blank:
         print(f"\n⚠ 另有 {n_blank} 筆使分／使類空白但母號 <9000 ＝ **都市土地**"
               "（getLandInfo 只適用非都市土地）：分區請另查都市計畫圖資。")
-    print("\n⚠ 權屬（公私別／所有權人／管理者）本管線取不到，"
-          "要寫因應手段前必須另上 TCDGIS 或調謄本。")
+    if own_idx:
+        n_pub = sum(1 for x in rows if x["公私別"] and "推論" not in x["公私別"])
+        print(f"\n權屬：公有 {n_pub} 筆（含所有權人與管理者）、"
+              f"其餘以「未列於公有土地名冊」推論為私有。")
+        print("  ⚠ 「未列＝私有」是反面推論；涉及取得方式／因應手段的關鍵筆數，"
+              "仍建議以土地登記謄本或 TCDGIS 覆核。")
+        print("  ⚠ 管理機關可能是改制前舊名（實測回「行政院農業委員會農田水利署」，"
+              "現行為「農業部農田水利署」）——交付文字請用現行名稱。")
+    else:
+        print("\n⚠ 未取得權屬（--no-owner 或查詢失敗）：寫因應手段前必須另查。")
     return 1 if bad else 0
 
 
@@ -213,6 +267,8 @@ def main():
     f.add_argument("--out", required=True, help="輸出資料夾，建議 outputs/<案>/cadastre")
     f.add_argument("--name", default="基地", help="輸出檔名，預設 基地（鄰地請給 鄰地）")
     f.add_argument("--version", default=None, help="地籍版次，省略＝最新（建議省略）")
+    f.add_argument("--no-owner", action="store_true",
+                   help="不查權屬（預設會用 public_land.py 免登入查公有土地名冊）")
     f.set_defaults(fn=cmd_fetch)
 
     v = sub.add_parser("verify", help="與平台官方 shp 對帳（IoU／面積／質心）")
