@@ -59,15 +59,35 @@
 
 | 腳本 | 用途 |
 |---|---|
-| `make_maps.py` | 六主題 A4 成果圖 ＋ .qgz（maxmap 版面）。位置／涵蓋地號角落框**預設不畫**；基地 <2 公頃**自動不外擴**臨路圖框 |
+| `make_maps.py` | 六主題 A4 成果圖 ＋ .qgz（maxmap 版面）。位置／涵蓋地號角落框**預設不畫**；基地 <2 公頃**自動不外擴**臨路圖框。**未知旗標硬停**（原靜默忽略，會把旗標值當成案名）；值型旗標皆支援 `--flag=值` 與 `--flag 值` |
 | `make_locality_map.py` | 區位圖（EMAP2 透明置頂＋都市計畫分區） |
-| `make_env_map.py` | 環境敏感套疊圖（無套疊則不出圖） |
-| `make_extra_maps.py` | 補充主題圖（`--theme`）：權屬分色／法定距離環域／養殖漁業生產區／**隔離綠帶或設施**（設施與綠帶分色＋圖例，農業用地變更案必備）／農田水利灌排水道（有涉及才出圖、標渠道名與工作站） |
+| `make_env_map.py` | 環境敏感套疊圖（無套疊則不出圖）。多圖層自動**分色**（保護類綠／災害類橙紅）；逐類面積依（圖層×分級）**彙總**；`<案>/環敏/<圖層名>.geojson` 可**覆蓋**過舊的本機圖資 |
+| `make_extra_maps.py` | 補充主題圖（`--theme`）：權屬分色／法定距離環域／養殖漁業生產區／**隔離綠帶或設施**（設施與綠帶分色＋圖例，農業用地變更案必備）／農田水利灌排水道（有涉及才出圖、標渠道名與工作站）／**坡度**（審議規範總編§16 三段分色＋疊緩衝綠帶，山坡地案必備） |
 
 出圖支援模組（被 import，不單獨執行）：`build_layout.py`（版面計算）、
 `overlay_placement.py`（角落疊圖避讓）、`nlsc_wmts.py`（WMTS 圖磚拼接）、
-`shp_trust_utils.py`（DBF 容錯／地號正規化／sitemap 分派）、`zone_utils.py`（分區名正規化）、
+`shp_trust_utils.py`（DBF 容錯／地號正規化／sitemap 分派／**欄名別名表 `F_*`**）、
+`zone_utils.py`（分區名正規化）、
 `parse_helpers.py`（解析工具）、`csv_to_xlsx.py`（獨立乾淨子進程寫 xlsx，繞開 openpyxl×GDAL 衝突）。
+
+**改出圖腳本前先知道的三件事**（皆 2026-08-04 修，都會靜默出錯）：
+
+1. **底圖要照「版面引擎算出的最終圖框」抓，不是基地 bbox**——圖框因 A4 比例與整數
+   比例尺退階而更寬，用 bbox 抓成品會左右露白邊。作法：先呼叫一次
+   `overlay_placement.place_overlays(...).extent`（純幾何、無副作用），再交給
+   `build_sheet_layout` 重算（同輸入必得同結果）。`make_maps` 一直是對的
+   （用 `c["extent"]`），`make_env_map`／`make_extra_maps` 已補齊。
+2. **多個圖層疊在同一張圖時，每層必須是可區辨的顏色**——否則圖例好幾格同一個紅、
+   看不出哪塊屬哪項。`make_env_map` 以 REGISTRY 的 `rgb` 指定語意色，
+   未指定者取 `GENERIC_PALETTE` 色環（色相間距 ≥60°）。
+3. **右欄圖例只有 45mm 寬**，`build_layout` 以 `setWrapString("／")` 換行 →
+   **長標籤裡沒有「／」就會被直接切掉**。另光柵圖例會自動多一行「Band 1 (Gray)」，
+   `build_layout` 已逐層挑掉該節點。
+
+**新增基地 shp 來源時只改一處**：`shp_trust_utils` 的 `F_LANDNO/F_COUNTY/F_TOWN/
+F_SEG/F_ZONE/F_LTYPE`。② area_join 用 `20251201_*`、⓪a cadastre_fetch 用中文短欄名
+（縣市/鄉鎮/段/使分/使類）；漏一個欄名的後果見 CLAUDE.md「踩過的坑」——
+周邊地籍、功能分區、使分/使類三者會一起靜默降級而回報「成功」。
 
 ## 簡報
 
