@@ -134,8 +134,23 @@ TCDGIS_TO_ELAND = {
 }
 
 
-def _elandtext(f: dict) -> str:
-    return f"{f.get('sub_name') or ''}{f.get('question') or ''}"
+def match_finding(findings: list, kw: str):
+    """依關鍵字找對應的 eland 列。
+
+    ⚠ **不可比對題目文字**（2026-08-04 龍崎案實錯）：同一題號的多個子項，題目文字
+    往往把所有子項並列（例：第二級#1 三個子項的題目都是「是否位屬地質敏感地區
+    （活動斷層、山崩與地滑、土石流）？」）。用關鍵字比題目會抓到**第一個子項**，
+    而非真正對應的那個——把「山崩與地滑（應查）」配成「活動斷層（免查）」，
+    憑空產生一個假的★不一致。
+    → 先比**子項名**（精準）；沒有子項名的單一項目（如河川區域）才用題目比。
+    """
+    for f in findings:
+        if kw in (f.get("sub_name") or ""):
+            return f
+    for f in findings:
+        if not (f.get("sub_name") or "") and kw in (f.get("question") or ""):
+            return f
+    return None
 
 
 def reconcile(findings: list, tcdgis_csv: Path) -> list[dict]:
@@ -150,13 +165,12 @@ def reconcile(findings: list, tcdgis_csv: Path) -> list[dict]:
             area = (r.get("套疊面積_m2") or "").strip()
             plat = "涉及" if area else "未涉及"
             kw = TCDGIS_TO_ELAND.get(name)
-            hits = [f for f in findings if kw and kw in _elandtext(f)] if kw else []
-            if not hits:
+            h = match_finding(findings, kw) if kw else None
+            if h is None:
                 rows.append({"平台圖層名稱": name, "平台結果": plat, "平台面積_m2": area,
                              "eland項目": "（無對應）", "eland應免查": "",
                              "初篩結果": "", "是否一致": "無法比對"})
                 continue
-            h = hits[0]
             st = h.get("eland_status") or ""
             act = str(h.get("action") or "")
             if st == "免查":
