@@ -4,6 +4,11 @@
 用法見 spec §3。停點：
 - 清冊模式首跑：解析出 01 後停（人工核對；--resume 續跑）。
 - 兩模式：00_總區位圖 產出後停，等 --mode single|persite。
+
+★ 2026-08-04 接上 ⓪a 免登入主路徑（使用者 2026-08-02 定案「⓪a 主路徑、①＋② 備選」）：
+  `--fetch <清冊.csv|xlsx>`（欄位：縣市/鄉鎮(區)/段[/小段]/地號）會先跑
+  cadastre_fetch 產 `outputs/<案>/cadastre/基地.shp`，再自動轉入 --shp 流程。
+  ⓪a 失敗＝**硬停通知使用者**——備選路徑需本人登入，不自行改走（skill 規定）。
 """
 import subprocess
 import sys
@@ -38,6 +43,107 @@ COLORTABLE = (Path(_P["luimap_colortable"]) if _P["luimap_colortable"]
 FROM_STEPS = ("meta", "match", "roadaccess", "overview", "extract", "maps")
 # 舊步驟名別名(--from fishpv 仍可用)
 FROM_ALIASES = {"fishpv": "roadaccess"}
+
+
+def norm_section(seg, subseg="") -> str:
+    """段＋小段 → cadastre_fetch 的 --section 字串（純函式，供單測）。
+    '考試潭'/'鹿寮' → '考試潭段鹿寮小段'；'番社段'/'' → '番社段'。"""
+    seg = str(seg or "").strip()
+    sub = str(subseg or "").strip()
+    if seg.lower() in ("nan", "none"):
+        seg = ""
+    if sub.lower() in ("nan", "none"):
+        sub = ""
+    if seg and not seg.endswith("段"):
+        seg += "段"
+    if sub:
+        if not sub.endswith("小段"):
+            sub += "小段"
+        seg += sub
+    return seg
+
+
+def roster_groups(df) -> list[tuple]:
+    """清冊 DataFrame → [(縣市, 鄉鎮, 段名, [地號…]), …]（純函式，供單測）。
+
+    欄名容錯（⓪a 清冊與各式公文表格）：縣市/縣市名稱、鄉鎮區/鄉鎮市區/鄉鎮、
+    段/段別/地段/地段名稱、小段（選填）、地號。縣市正規化 台→臺（對齊圖資鍵）。
+    缺必要欄 → ValueError 點名缺哪些，不靜默猜。
+    """
+    cols = {c: str(c).strip() for c in df.columns}
+
+    def pick(*names):
+        for n in names:
+            for c, cn in cols.items():
+                if cn == n:
+                    return c
+        return None
+
+    c_cty = pick("縣市", "縣市名稱")
+    c_town = pick("鄉鎮區", "鄉鎮市區", "鄉鎮")
+    c_seg = pick("段", "段別", "地段", "地段名稱")
+    c_sub = pick("小段")
+    c_no = pick("地號")
+    missing = [n for n, c in (("縣市", c_cty), ("鄉鎮", c_town),
+                              ("段", c_seg), ("地號", c_no)) if c is None]
+    if missing:
+        raise ValueError(f"清冊缺欄位：{missing}（需 縣市/鄉鎮(區)/段/地號，小段選填）")
+    groups: dict = {}
+    for _, r in df.iterrows():
+        no = str(r[c_no]).strip()
+        if not no or no.lower() == "nan":
+            continue
+        key = (str(r[c_cty]).strip().replace("台", "臺"), str(r[c_town]).strip(),
+               norm_section(r[c_seg], r[c_sub] if c_sub is not None else ""))
+        lst = groups.setdefault(key, [])
+        if no not in lst:                      # 清冊重複列只取一次
+            lst.append(no)
+    return [(k[0], k[1], k[2], v) for k, v in groups.items()]
+
+
+def fetch_roster(list_path: Path, case_dir: Path) -> Path:
+    """⓪a 免登入取地籍（主路徑）：清冊 → `cadastre/基地.shp`。
+
+    逐（縣市/鄉鎮/段）組呼叫 cadastre_fetch（界址環＋getLandInfo＋MOI_API_039 權屬），
+    多組時合併。已有 基地.shp 就跳過（要重抓先刪 cadastre/）。
+    🚧 閘門：shp 筆數＝清冊筆數；任一組失敗＝硬停——**備選的平台路徑需使用者本人
+    登入，不可自行改走**（skill「⓪a 走不通時停下通知使用者」）。
+    """
+    import pandas as pd
+    out_dir = case_dir / "cadastre"
+    final = out_dir / "基地.shp"
+    if final.exists():
+        print(f"[run_case] ⓪a 已有 {final}，跳過重抓（要重抓請先刪 cadastre/）")
+        return final
+    lp = str(list_path).lower()
+    df = (pd.read_excel(list_path) if lp.endswith((".xlsx", ".xls"))
+          else pd.read_csv(list_path, encoding="utf-8-sig"))
+    groups = roster_groups(df)
+    total = sum(len(g[3]) for g in groups)
+    print(f"[run_case] ⓪a 免登入取地籍：{len(groups)} 組（縣市/鄉鎮/段）、共 {total} 筆")
+    parts = []
+    for i, (cty, town, seg, nos) in enumerate(groups, 1):
+        name = "基地" if len(groups) == 1 else f"基地_g{i:02d}"
+        print(f"[run_case] ⓪a {i}/{len(groups)}：{cty}{town}{seg}　{len(nos)} 筆")
+        r = subprocess.run([sys.executable, "-X", "utf8",
+                            str(REPO / "scripts" / "cadastre_fetch.py"), "fetch",
+                            "--county", cty, "--town", town, "--section", seg,
+                            "--landnos", *nos, "--out", str(out_dir), "--name", name],
+                           cwd=REPO)
+        if r.returncode != 0:
+            sys.exit(f"[run_case] ⓪a 取地籍失敗（{cty}{town}{seg}）——主路徑走不通，"
+                     "停下通知使用者。備選＝平台路徑（①＋②）需本人登入，不自行改走。")
+        parts.append(out_dir / f"{name}.shp")
+    import geopandas as gpd
+    if len(parts) > 1:
+        merged = pd.concat([gpd.read_file(p) for p in parts], ignore_index=True)
+        gpd.GeoDataFrame(merged, crs="EPSG:3826").to_file(final, encoding="utf-8")
+    n = len(gpd.read_file(final))
+    if n != total:
+        sys.exit(f"[run_case] 🚧 ⓪a 閘門：shp {n} 筆 ≠ 清冊 {total} 筆——"
+                 "查無／失敗的地號請先釐清（新舊地號？未登記 9xxx？）再續跑")
+    print(f"[run_case] ⓪a 完成：{final}（{n} 筆，含使分/使類/登記面積/權屬推論）")
+    return final
 
 
 def plan_steps(mode_shp: bool, resume: bool, chosen_mode, artifacts: dict) -> list:
@@ -256,7 +362,7 @@ def from_prereq_errors(from_step: str, mode_shp: bool, case_dir: Path,
 
 def main():
     args = sys.argv[1:]
-    shp = lst = case = chosen = from_step = None
+    shp = lst = fetch = case = chosen = from_step = None
     resume = False
     passthru = []
     i = 0
@@ -264,6 +370,8 @@ def main():
         a = args[i]
         if a == "--shp":
             shp = args[i + 1]; i += 2
+        elif a == "--fetch":               # ⓪a 免登入主路徑：清冊 → cadastre/基地.shp → --shp 流程
+            fetch = args[i + 1]; i += 2
         elif a == "--list":
             lst = args[i + 1]; i += 2
         elif a == "--case":
@@ -285,18 +393,23 @@ def main():
             passthru.append(a); i += 1             # 透傳 make_maps
         else:
             sys.exit(f"未知參數 {a}")
-    if not (shp or lst):
-        sys.exit("需 --shp <基地.shp> 或 --list <清冊>")
+    if not (shp or lst or fetch):
+        sys.exit("需 --shp <基地.shp>、--fetch <清冊(⓪a 免登入)> 或 --list <清冊(平台比對)>")
+    if fetch and shp:
+        sys.exit("--fetch 與 --shp 擇一（--fetch 抓完會自動轉入 --shp 流程）")
     if chosen not in (None, "single", "persite"):
         sys.exit("--mode 需為 single|persite")
     from_step = FROM_ALIASES.get(from_step, from_step)   # 舊名 fishpv → roadaccess
     if from_step is not None and from_step not in FROM_STEPS:
         sys.exit(f"--from 需為 {'|'.join(FROM_STEPS)} 之一")
-    mode_shp = shp is not None
     if not case:
-        case = Path(shp or lst).stem
+        case = Path(shp or lst or fetch).stem
     case_dir = REPO / "outputs" / case
     case_dir.mkdir(parents=True, exist_ok=True)
+    if fetch:
+        # ⓪a 前置：抓完即為 trust-shp 輸入，後續與 --shp 完全同流程
+        shp = str(fetch_roster(Path(fetch), case_dir))
+    mode_shp = shp is not None
     fp = case_dir / "臨路評估"
 
     def art():

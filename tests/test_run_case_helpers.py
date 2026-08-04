@@ -387,3 +387,42 @@ def test_run_fatal_false_returns_false_without_exit(monkeypatch, capsys):
     assert run_case._run(["env.bat", "roadaccess"], label="臨路評估(內建)",
                          fatal=False) is False
     assert "不中斷" in capsys.readouterr().out
+
+
+# ── ⓪a 前置（--fetch，2026-08-04 接上免登入主路徑）──────────────────────────
+
+def test_norm_section_variants():
+    from run_case import norm_section
+    assert norm_section("番社段") == "番社段"
+    assert norm_section("番社") == "番社段"
+    assert norm_section("考試潭", "鹿寮") == "考試潭段鹿寮小段"
+    assert norm_section("考試潭段", "鹿寮小段") == "考試潭段鹿寮小段"
+    assert norm_section("nan", "") == ""          # pandas 空值字串化的殘影
+
+
+def test_roster_groups_column_tolerance_and_dedup():
+    import pandas as pd
+    from run_case import roster_groups
+    df = pd.DataFrame({"縣市名稱": ["台南市", "台南市", "台南市"],
+                       "鄉鎮市區": ["龍崎區"] * 3,
+                       "地段名稱": ["番社"] * 3,
+                       "地號": ["56-4", "56-4", "58"]})   # 重複列只取一次
+    g = roster_groups(df)
+    assert g == [("臺南市", "龍崎區", "番社段", ["56-4", "58"])]   # 台→臺、補「段」
+
+
+def test_roster_groups_missing_columns_raise():
+    import pandas as pd
+    import pytest
+    from run_case import roster_groups
+    with pytest.raises(ValueError, match="縣市"):
+        roster_groups(pd.DataFrame({"地號": ["1"]}))
+
+
+def test_fetch_roster_skips_when_shp_exists(tmp_path):
+    """已有 cadastre/基地.shp → 直接沿用，不重抓（續跑行為）。"""
+    from run_case import fetch_roster
+    (tmp_path / "cadastre").mkdir()
+    shp = tmp_path / "cadastre" / "基地.shp"
+    shp.write_bytes(b"")
+    assert fetch_roster(tmp_path / "不存在的清冊.csv", tmp_path) == shp

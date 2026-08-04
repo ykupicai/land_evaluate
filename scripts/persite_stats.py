@@ -27,6 +27,23 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URBAN = os.path.join(REPO, "都市計畫", "全台都市計畫土地使用分區.shp")
 
 
+def classify_ownership(v) -> str | None:
+    """公私別欄值 → '公'／'私'／None（無法判定）。
+
+    ⚠ 不可用 `== "公"` 精確比對（2026-08-04 龍崎案實錯：⓪a cadastre_fetch 寫的值是
+    「私(推論)」、TCDGIS 匯出可能是「公/國有」，精確比對讓公有與私有筆數**同時歸 0**，
+    而 逐案場統計.json 是簡報數字的唯一來源）。判字首：「公」開頭＝公有、「私」開頭＝私有，
+    其餘（空白、None、「未登記」……）回 None、不計入任一類——空白不等於私有，
+    見 CLAUDE.md「本機地籍快照的所有權欄不可作為權屬依據」。
+    """
+    s = str(v or "").strip()
+    if s.startswith("公"):
+        return "公"
+    if s.startswith("私"):
+        return "私"
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joined", required=True)
@@ -57,9 +74,13 @@ def main():
         if no_col:
             d["地號"] = sorted(inner[no_col].astype(str).tolist())
         if pub_col:
-            d["公有筆數"] = int((inner[pub_col] == "公").sum())
-            d["私有筆數"] = int((inner[pub_col] == "私").sum())
-            pub = inner[inner[pub_col] == "公"]
+            cls = inner[pub_col].map(classify_ownership)
+            d["公有筆數"] = int((cls == "公").sum())
+            d["私有筆數"] = int((cls == "私").sum())
+            n_unk = int(cls.isna().sum())
+            if n_unk:
+                d["公私別無法判定筆數"] = n_unk   # 空白≠私有，明著標出來
+            pub = inner[cls == "公"]
             d["公有面積_m2"] = round(float(pub.area.sum()), 2)
             if no_col:
                 d["公有地號"] = sorted(pub[no_col].astype(str).tolist())
