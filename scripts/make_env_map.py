@@ -68,10 +68,26 @@ REGISTRY = [
     {"match": r"地質敏感區.*活動斷層|活動斷層",
      "shp": ["第二級/2-01 地質敏感區(活動斷層、山崩與地滑、土石流)(1051221update)/全國活動斷層帶.shp"],
      "field": None, "crs": 3826, "title": "地質敏感區（活動斷層）"},
+    {"match": r"山崩與地滑|山崩地滑",
+     "shp": ["第二級/2-01 地質敏感區(活動斷層、山崩與地滑、土石流)(1051221update)"
+             "/地質敏感區山崩與地滑.shp"],
+     "field": None, "crs": 3826, "rgb": (255, 127, 14),
+     "title": "地質敏感區（山崩與地滑）"},
+    # 自然保留區：**一律用 1152（115年第2版，TGOS 下載）**，106 年版只留作 fallback。
+    # 2026-08-04 龍崎案實踩：106 年版只有 23 筆、**不含 110.07.30 公告的 NR23 龍崎牛埔
+    # 惡地自然保留區**，逐筆距離算出「最近 13,089 公尺、未涉及」，而 TCDGIS 平台正確
+    # 回報套疊 8.88 ㎡——**是「有／沒有」的差異，不是面積門檻或邊界誤差**。
+    # 換上 1152 後本機重算 8.88 ㎡，與平台一字不差。舊版另漏 NR22 北投石、
+    # 且 NR10 台灣一葉蘭為 114 年前的舊範圍。
+    {"match": r"自然保留區",
+     "shp": ["第一級/1-07 自然保留區 (1152_115年第2版)/自然保留區1152.shp",
+             "第一級/1-07 自然保留區 (1060523update)/自然保留區1061.shp"],
+     "field": None, "crs": 3826, "rgb": (44, 160, 44),
+     "title": "自然保留區"},
     {"match": r"嚴重地層下陷", "shp": ["第二級/2-03 嚴重地層下陷地區(941215update)/941215{county}all_1.shp"],
      "field": None, "crs": 3826, "title": "嚴重地層下陷地區"},
     {"match": r"山坡地", "shp": ["第二級/2-06 山坡地 (1060531update)/BOUNDARY.shp"],
-     "field": None, "crs": 3826, "title": "山坡地"},
+     "field": None, "crs": 3826, "rgb": (148, 103, 189), "title": "山坡地"},
     {"match": r"自來水水質水量保護區",
      "shp": ["第二級/2-20 自來水水質水量保護區(1060629update)/WaterQualityAndQuantityProtectionArea_Twd97_V3.0.shp"],
      "field": None, "crs": 3826, "title": "自來水水質水量保護區"},
@@ -91,6 +107,20 @@ REGISTRY = [
      "field": None, "crs": 3826, "title": "地下水管制區第二級", "encoding": "big5"},
 ]
 GENERIC_RGB = (255, 80, 80)
+# 多個敏感圖層同時套疊時，**每層必須是可區辨的顏色**——否則圖例好幾格同一個紅、
+# 看不出哪一塊屬哪一項，等於白畫（2026-08-04 龍崎案實錯：自然保留區與山崩地滑同色）。
+# 規則層各自在 REGISTRY 用 "rgb" 指定語意色（保護類偏綠／災害類偏橙紅），
+# 未指定者依出現順序取下列色環。色相間距 ≥60°，40% 不透明度疊在正射上仍分得出。
+GENERIC_PALETTE = [
+    (214, 39, 40),    # 紅
+    (255, 127, 14),   # 橙
+    (148, 103, 189),  # 紫
+    (23, 190, 207),   # 青
+    (188, 189, 34),   # 黃綠
+    (227, 119, 194),  # 粉
+    (44, 160, 44),    # 綠
+    (31, 119, 180),   # 藍
+]
 DEFAULT_ALPHA = 0.40   # 使用者定案 2026-07-29：套疊圖層 40% 不透明度
 
 
@@ -104,8 +134,35 @@ def _norm_county(name: str) -> list[str]:
     return out
 
 
-def resolve_layer(layer_name: str, county: str):
-    """把平台圖層名稱解析成 (shp 路徑, 規則)；找不到回 (None, 規則或 None)。"""
+def resolve_case_override(layer_name: str, case_dir: Path):
+    """案件層覆蓋：`<案>/環敏/<平台圖層名>.{geojson,shp}` 存在就優先用它。
+
+    用途＝**本機圖資比平台舊**時，把平台的權威幾何拉進來出圖。本機環敏圖資多為
+    105~106 年版快照，其後新增／修正的範圍本機一律查不到（2026-08-04 龍崎案：
+    NR23 龍崎牛埔惡地自然保留區 110.07.30 新增，本機 106 年版沒有這一筆，
+    逐筆距離算出「13 公里外」，而平台正確回報套疊 8.88 ㎡）。
+
+    ⚠ 這是「有／沒有」的差異，不是面積門檻差異——**不可當成邊界誤差忽略**。
+    平台幾何取法見 docs 與 skill：MapServer `/identify` 帶 returnGeometry=true。
+    """
+    d = case_dir / "環敏"
+    if not d.is_dir():
+        return None
+    for p in sorted(d.iterdir()):
+        if p.suffix.lower() not in (".geojson", ".json", ".shp"):
+            continue
+        # 檔名含平台圖層名即視為該項的覆蓋檔（允許加 NR23_ 這類前綴備註）
+        if layer_name in p.stem:
+            return p
+    return None
+
+
+def resolve_layer(layer_name: str, county: str, case_dir: Path | None = None):
+    """把平台圖層名稱解析成 (路徑, 規則)；找不到回 (None, 規則或 None)。
+
+    案件層 `<案>/環敏/` 的覆蓋檔優先於本機 `環境敏感相關/`（見 resolve_case_override）。
+    """
+    ov = resolve_case_override(layer_name, case_dir) if case_dir else None
     for rule in REGISTRY:
         m = re.search(rule["match"], layer_name)
         if not m:
@@ -115,6 +172,9 @@ def resolve_layer(layer_name: str, county: str):
             groups = m.groups()
             if len(groups) >= 2:
                 subs["h"], subs["mm"] = groups[0], groups[1]
+        if ov is not None:
+            print(f"    （{layer_name}：採案件層覆蓋檔 {ov.name}，不用本機 環境敏感相關/）")
+            return ov, dict(rule, _subs=subs, _override=True)
         for tmpl in rule["shp"]:
             for c in _norm_county(county):
                 s = dict(subs, county=c)
@@ -126,16 +186,23 @@ def resolve_layer(layer_name: str, county: str):
                 if p.exists():
                     return p, dict(rule, _subs=s)
         return None, rule
+    # REGISTRY 沒有這一項，但案件層有覆蓋檔 → 仍然出得了圖（單色、無分類）
+    if ov is not None:
+        print(f"    （{layer_name}：REGISTRY 未登錄，採案件層覆蓋檔 {ov.name}）")
+        return ov, {"match": "", "shp": [], "field": None, "crs": 3826,
+                    "title": layer_name, "_subs": {}, "_override": True}
     return None, None
 
 
 def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPHA,
-                   outline_only: bool = False):
+                   outline_only: bool = False, color_idx: int = 0):
     lyr = QgsVectorLayer(str(shp), name, "ogr")
     if not lyr.isValid():
         return None
     if not lyr.crs().isValid() and rule.get("crs"):
         lyr.setCrs(QgsCoordinateReferenceSystem(f"EPSG:{rule['crs']}"))
+    # 本層代表色：規則層指定的語意色優先，否則依疊圖順序取色環（見 GENERIC_PALETTE）
+    base = tuple(rule.get("rgb") or GENERIC_PALETTE[color_idx % len(GENERIC_PALETTE)])
     fld = rule.get("field")
     if fld and lyr.fields().indexFromName(fld) >= 0:
         cats = []
@@ -144,7 +211,7 @@ def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPH
         vals = sorted({f[fld] for f in lyr.getFeatures()},
                       key=lambda v: list(colors).index(v) if v in colors else 99)
         for v in vals:
-            rgb = colors.get(v, GENERIC_RGB)
+            rgb = colors.get(v, base)
             sym = QgsFillSymbol.createSimple({
                 "color": "%d,%d,%d,%d" % (rgb + (0 if outline_only
                                                  else int(alpha * 255),)),
@@ -154,10 +221,11 @@ def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPH
             cats.append(QgsRendererCategory(v, sym, labels.get(v, str(v))))
         lyr.setRenderer(QgsCategorizedSymbolRenderer(fld, cats))
     else:
+        dark = tuple(int(c * 0.6) for c in base)   # 外框用同色調暗版，維持可區辨
         sym = QgsFillSymbol.createSimple({
-            "color": "%d,%d,%d,%d" % (GENERIC_RGB + (0 if outline_only
-                                                     else int(alpha * 255),)),
-            "outline_color": "150,0,0,255",
+            "color": "%d,%d,%d,%d" % (base + (0 if outline_only
+                                              else int(alpha * 255),)),
+            "outline_color": "%d,%d,%d,255" % dark,
             "outline_width": "0.8" if outline_only else "0.3",
             "outline_style": "dash" if outline_only else "solid"})
         lyr.setRenderer(lyr.renderer().__class__(sym) if False else lyr.renderer())
@@ -256,8 +324,8 @@ def main():
     # 敏感圖層
     geom_area = geom.area()
     env_layers, legend_layers, notes, stats = [], [], [], []
-    for name, area in hits:
-        shp, rule = resolve_layer(name, county)
+    for color_idx, (name, area) in enumerate(hits):
+        shp, rule = resolve_layer(name, county, case_dir=out_dir)
         if shp is None:
             print(f"  ⚠ 無法解析為本機圖資：{name}（該項僅以表格呈現）")
             notes.append(f"{name}（本機無對應圖資）")
@@ -269,7 +337,7 @@ def main():
         # 「100% 涵蓋」這件事由表格與文字交代即可。
         outline_only = area >= 0.99 * geom_area
         lyr = load_env_layer(shp, rule, title, alpha=a.alpha,
-                             outline_only=outline_only)
+                             outline_only=outline_only, color_idx=color_idx)
         if outline_only:
             print(f"    （{title} 覆蓋率 {100 * area / geom_area:.1f}% ≥99%，"
                   f"改畫外框不填色）")
@@ -277,14 +345,20 @@ def main():
             print(f"  ⚠ 圖層讀取失敗：{shp}")
             continue
         # 逐類套疊面積（供簡報引用；數字只能來自實算）
+        # ★必須依（圖層×分級）彙總，不可逐 feature 各記一列——同一分級的敏感範圍在圖資裡
+        # 常是幾十個破碎多邊形（本案山崩與地滑 17 個），逐筆寫出等於給簡報一張沒法用的表
+        # （2026-08-04 龍崎案實錯）。分級圖層（如淹水潛勢）才會有多列，且列數＝分級數。
         fld = rule.get("field")
         req = QgsFeatureRequest().setFilterRect(bb)
+        agg: dict = {}
         for f in lyr.getFeatures(req):
             inter = geom.intersection(f.geometry())
             if inter.isEmpty():
                 continue
             key = f[fld] if (fld and lyr.fields().indexFromName(fld) >= 0) else "（全區）"
-            stats.append([title, key, round(inter.area(), 2)])
+            agg[key] = agg.get(key, 0.0) + inter.area()
+        for key, ar in agg.items():
+            stats.append([title, key, round(ar, 2)])
         project.addMapLayer(lyr, False)
         keep_alive.append(lyr)
         env_layers.append(lyr)
@@ -292,13 +366,26 @@ def main():
         print(f"  ✓ {title} ← {shp.relative_to(ENV_ROOT)}")
 
     # 正射底圖
+    # ★底圖要照「版面引擎算出的最終圖框範圍」抓，不是基地 bbox（2026-08-04 龍崎案實錯：
+    # 用 bbox+15% 抓，圖框因 A4 比例與整數比例尺退階而更寬，成品左右各露一條白邊）。
+    # place_overlays 是純幾何、無副作用，可以先算一次拿 extent，再交給 build_sheet_layout
+    # 重算一次（同輸入必得同結果），與 make_maps 用 c["extent"] 的作法一致。
+    import overlay_placement as op          # noqa: PLC0415 — 與 build_layout 同一顆幾何引擎
+
+    def _inter(x1, y1, x2, y2):
+        r = geom.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
+        return 0.0 if r.isEmpty() else r.area()
+
+    frame_ext = op.place_overlays(_inter, bbox).extent      # (L, R, B, T)
+    fl, fr, fb, ft = frame_ext
+    bm_bbox = (fl, fb, fr, ft)                              # build_basemap 吃 (xmin,ymin,xmax,ymax)
     bm_dir = Path(a.basemap_dir) if a.basemap_dir else (out_dir / "底圖")
     bm_dir.mkdir(parents=True, exist_ok=True)
     photo_rl = None
     try:
-        tif = build_basemap(bbox, str(bm_dir / "env_PHOTO2.tif"), layer="PHOTO2",
+        tif = build_basemap(bm_bbox, str(bm_dir / "env_PHOTO2.tif"), layer="PHOTO2",
                            cache_dir=str((out_dir / "底圖") / "_tilecache"),
-                           buffer_ratio=0.15)
+                           buffer_ratio=0.02)
         if tif:
             photo_rl = QgsRasterLayer(tif, "正射影像(NLSC PHOTO2)")
             if photo_rl.isValid():
