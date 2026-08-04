@@ -28,7 +28,10 @@
 | 3e. 敏感設施距離初篩 | `scripts/osm_sensitive_poi.py` | 否（Overpass API） | 否 |
 | 3後. 整理成果 | `scripts/reorg_sheets_persite.py`、`organize_outputs.py`、`rebuild_05.py` | 否 | 否 |
 
-不在此表：政府圖台（NGIS/TCDGIS）批次選取＋下載官方 shp，仍需人工瀏覽器操作（含帳密登入、圖形驗證碼），見文末。
+不在此表：政府圖台（NGIS/TCDGIS）操作，仍需人工瀏覽器（含帳密登入、圖形驗證碼），見文末。
+**自 2026-08-02 起，平台只為「環境敏感套疊 53 項」而登入**——幾何、使分使類、登記面積、
+權屬都改由階段0a 免登入取得；階段1／2（解析＋屬性接回）降為**備選路徑**，
+只在 0a 走不通時使用（退回條件見階段0a 末段）。
 
 ## 一鍵整合流程 run_case（推薦：shp／清冊 → 六張圖 + qgz）
 
@@ -168,6 +171,19 @@ python -X utf8 scripts\public_land.py --city Q --town 03 --sec 1410 --landnos 30
 ```powershell
 python -X utf8 scripts\cadastre_fetch.py verify --cad "outputs\<案子>\cadastre\基地.shp" --official "outputs\<案子>\joined\<案子>_面積join.shp"
 ```
+
+**已累積的對帳結果**
+
+| 案 | 筆數 | IoU | 登記面積 | 使分/使類 | 權屬 | 端到端 |
+|---|---|---|---|---|---|---|
+| 布袋考試潭段306 | 7 | 100.00% | 7/7 | 7/7 | 7/7 | — |
+| 安南港西段（都市土地＋國產署地） | 5 | 100.00% | 5/5 | 5/5 | 5/5 | 禁止事由檢核 JSON **209 欄 0 差異**，重現 ╳ |
+
+**⓪a 走不通時停下來、通知使用者改走原路徑（階段1/2 的 TCDGIS 登入）**——因為那條需要
+本人輸入帳密與圖形驗證碼。五個觸發條件：①有地號回 MISMATCH/NOT_FOUND/ERROR 且新舊地號
+對照也追不到 ②離島案（澎湖／金門／連江無幾何）③`verify` IoU <99.9% 或面積差 >0.1%
+④權屬吃重而公有名冊未列（反面推論不夠）⑤免登入服務中斷。
+⚠ 環敏套疊 53 項**本來就要上平台**，與 ⓪a 成敗無關。
 
 ### 階段0：禁止事由檢核（★評估案第一步，出圖前先跑）
 
@@ -503,3 +519,4 @@ python -X utf8 "outputs\<案子>uild_deck.py"
 2. **政府圖台（NGIS/TCDGIS）批次選取＋加入主題＋ShapeFile下載**：該平台無公開 API，「批次地籍匯入選取」可上傳 xlsx 但**沒有「加入主題」功能**；要下載官方 shp 必須把地籍逐段輸入「多重地籍選取」視窗才能加入主題並下載。目前只能人工操作（含帳密登入、圖形驗證碼，這兩項依規範不能由 AI 代勞）。
    自動化 driver 已固化在 skill `tcdgis-parcels-to-shp/scripts/`（`batch_driver.js` 批次選取、`finalize_download.js` 收尾下載），但**登入與驗證碼仍須人工先完成**。
 3. **法規檢核與簡報敘述**：法規條號與判定取自法令檢核規則庫，但逐案的○△╳判定、翻轉條件與建議仍須人工或 AI 判斷。
+
