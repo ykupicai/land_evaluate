@@ -28,3 +28,6 @@ login.txt
 credential*
 *.pem
 *.key
+
+# 環敏應免查範圍 PDF（每月從平台『匯出全部項目』重下，14.6MB 不進版控；解析後的 .json 才進）
+config/環敏應免查範圍_*.pdf

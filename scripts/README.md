@@ -23,6 +23,11 @@
 | `nlsc_facility.py` | 醫療／文教／鄰避設施環域查詢（國土測繪中心免認證 API） |
 | `osm_sensitive_poi.py` | OSM 敏感設施初篩。**已降級為輔助**（社福、宗教場所用），聚落判定不要再用它 |
 | `persite_stats.py` | 逐案場統計 → `逐案場統計.json`，簡報數字的唯一來源 |
+| `env_prescreen.py` | ⓪b 環敏**免登入**初篩（主路徑）＋與平台結果對帳。初篩用**離線『應免查範圍』PDF**（取代線上 eland，2026-08-05）判應查/免查 → 應查項套疊遠端/本機圖資。橋接 skill `env-sensitivity-check`。自動讀 ⓪a 的 `cadastre/基地.shp`；有 `環境敏感套疊.csv` 時產 `環境敏感對帳.csv` 標★不一致。**初篩非正式判定，法定用途以平台／正式查復為準** |
+| `parse_exempt_pdf.py` | 官方『應免查範圍』PDF → `config/環敏應免查範圍.json`（初篩資料源）。⚠ 長項目名會換行、免查列取相反、粒度三種——坑寫在 `tests/test_exempt_prescreen.py` |
+| `update_exempt.py` | 每月更新初篩 PDF：`--download` **一鍵免登入下載**（POST eland `ExportPdfAll`）＋重解析；或 `--pdf` 給本地檔重解析。PDF 不進版控、JSON 進 |
+| `env_registry.py` | **薄殼**（2026-08-05）：單一登記表已移至 skill `env-sensitivity-check/tgos_layers.py`（遠端＋本機同檔），本檔 re-export 並注入 env_root＝`環境敏感相關/`。改圖層去該檔，不是這裡 |
+| `tgos_fetch.py` | TGOS 本機環敏 shp **換版下載**（免登入）：`--list`／`--layer 自然保留區`／`--all`。NR23 教訓——本機 105~106 年快照查不到新增範圍，TGOS 有新版 SHP 直接下載。換版後核對 `test_env_registry` 版本順序 |
 
 ## 輸入解析與地籍比對
 

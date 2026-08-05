@@ -20,8 +20,12 @@
 
 現行端到端：
 ```
+⓪a 免登入取地籍(scripts/cadastre_fetch.py，主路徑) → run_case.py --fetch 可一鍵起跑
+⓪b 環敏免登入初篩(scripts/env_prescreen.py，主路徑；離線 PDF『應免查範圍』判應查/免查
+     → 應查項套疊遠端/本機圖資；每月 update_exempt.py --download 更新 PDF)
 ⓪ 清冊健檢(parcel-roster-verify，需本人登入)
-① 取官方地籍 shp(tcdgis-parcels-to-shp，沿用同一次登入)   ①b 環敏套疊(選用)
+① 取官方地籍 shp(tcdgis-parcels-to-shp，沿用同一次登入)   ①b 環敏平台查詢(需登入，降為備選：
+     權威背書或初篩涵蓋不到者才登入；有平台結果時 env_prescreen 自動對帳)
 ⓪c 國土功能分區逐筆查(nluz-landzone-query，選用，不佔登入、可與②③並行)
 ② 屬性接回(shp-xls-area-join --trust-fields)
 ②b 案場定義(scripts/build_sites_sitemap.py → 帶「段」欄的權威 sitemap)
@@ -237,16 +241,38 @@ outputs/<日期>_<案名>/
   看不到「規劃模組」）；下載時 log 出現 `GetShape.ashx ERR_ABORTED` 是**成功交接下載管理器
   的正常訊號**，檔案已在 `Downloads\`；zip 內檔名是 **Big5**（解壓要 cp437→big5 轉）。
   主題 shp 只有繪圖屬性（無地號/使分/使類），完整屬性靠平台「匯出Excel」。
-- **環敏一律「先平台查詢 53 項，再只對有涉及者做本機套疊」**（使用者 2026-08-02 定案）。
-  不要用本機 119 個 shp 全掃：慢（全台級圖層逐筆算距離跑 15 分鐘未完）且非權威來源。
-  本機圖資的正確用途＝平台說有涉及之後，補「逐分級面積」與「逐案場面積」。
-  （曾寫 `env_sweep.py` 全掃，同日淘汰進 `scripts/legacy/`。）
+- **環敏新做法（2026-08-05 使用者定案，取代 08-02 舊 doctrine）：初篩＝離線官方 PDF、
+  平台登入降為備選。** 流程：
+  1. **⓪b 免登入初篩**（`scripts/env_prescreen.py --case`）：用官方「應免查範圍」**離線
+     全表 PDF**（`config/環敏應免查範圍.json`）逐項判應查/免查 → 只有應查項進第二階段套疊。
+     PDF 由平台『匯出全部項目』下載，`scripts/update_exempt.py --download` **一鍵下載＋重解析**
+     （每月更新）。取代線上 eland：離線、權威、有版本日期、不受 eland SSL／快取污染坑影響。
+     已用龍崎案對線上 eland 逐項驗證 **77/77 一致、零漏查**（PDF 缺列項一律應查交第二階段）。
+  2. **第二階段套疊**：對應查項套疊——遠端現行源（TGOS/GIC/coastal/地質雲/boch）或本機圖資
+     （山坡地/礦區等只有本機者），**單一登記表**在 skill `tgos_layers.py`（遠端 `LAYERS` ＋
+     本機 `LOCAL_LAYERS` 同檔；主專案 `env_registry.py` 已成薄殼 re-export，注入 env_root＝
+     `環境敏感相關/`）。
+  3. **①b 平台查詢＝備選**：需權威背書、或初篩涵蓋不到（無公開圖資之逕洽項）時才登入 TCDGIS。
+     有平台 `環境敏感套疊.csv` 時，env_prescreen **自動逐項對帳**產 `環境敏感對帳.csv`、標★不一致。
+  - 不要用本機 119 個 shp 全掃（慢、非權威；`env_sweep.py` 已淘汰進 `scripts/legacy/`）。
+  ⚠ 交付口徑三條：①初篩是自我篩檢非正式判定，法定用途仍以平台／正式查復為準；
+  ②「免查」＝法定應免查範圍，與「查了無交集」不同，勿混寫；③兩來源不一致一律以平台為準
+  並寫進報告（NR23 前例：本機較舊會出現方向相反的結論）。
+  引擎踩坑（長名換行漏列、免查列取相反、粒度三種、單一登記表基線）已寫成
+  `tests/test_exempt_prescreen.py`＋`test_env_registry.py`，改動後務必 pytest。
+  ⚠ **嚴重地層下陷地區**在 eland 無單一窗口資料、水利署也無公開下陷區下載 → 使用者定案
+  **以「地下水管制區第一級」（GIC `fname=gwconare`）作替代判斷**，報告須載明此代理關係。
+  該 skill 的三個實修坑（政府憑證缺 SKI／HTTP 200+HTML 快取污染／大圖層 where=1=1 逾時）
+  見 skill 自己的 SKILL.md「踩過的坑」，與本專案 `nlsc_wmts.py` 圖磚快取污染同型。
 - **環敏本機圖資過舊時的兩條補充來源（2026-08-04 打通）**：
   - **TGOS 國家空間資料資產**（`www.tgos.tw/tgos/NgdaMap`，免登入）：搜資料集名 →
     metadata 頁列各版本產品與**直接下載連結**（`/MDE/VirtualDir_TC/Product/<guid>/<檔名>.zip`）。
     實例：`自然保留區1152_SHP`（115年第2版，農業部林業及自然保育署，公布 2026-05-29，
     EPSG:3826、開放三星、欄名與本機舊版同構）。⚠ 有些圖層**只提供 WMS 無 SHP**
     （山崩與地滑就是），拿不到向量。
+    → **已固化成 `scripts/tgos_fetch.py`**（`--list`／`--layer 自然保留區`／`--all`，免登入
+    一鍵下載＋解壓到對應 `環境敏感相關/` 夾＋寫 `.版本.txt`）。換版後核對
+    `tests/test_env_registry.py` 的版本順序斷言。
   - **地質雲**（`geologycloud.tw`）：`GET https://www.geologycloud.tw/data/zh-tw/`
     `GeologicalSensitiveAreas?category=<山崩與地滑|活動斷層|地下水補注|地質遺跡>`
     `&name=<縣市>&town=<鄉鎮>&all=true` → **回 GeoJSON（WGS84）**，免登入。

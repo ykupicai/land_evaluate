@@ -79,9 +79,11 @@ def read_site(shp: Path):
 
     county = g(recs[0], "縣市", "縣市名稱")
     town = g(recs[0], "鄉鎮", "鄉鎮區", "鄉鎮市區")
-    section = re.sub(r"^\[\w+\]", "", g(recs[0], "段", "段別", "地段名稱"))
+    _sec = lambda r: re.sub(r"^\[\w+\]", "", g(r, "段", "段別", "地段名稱"))
+    section = _sec(recs[0])
     nos = [g(r, "地號") for r in recs]
-    return county, town, section, [n for n in nos if n]
+    sections = sorted({_sec(r) for r in recs} - {""})   # 多段基地：PDF 段級項目要全部段
+    return county, town, section, [n for n in nos if n], sections
 
 
 # 平台 53 項名稱 → eland 題目關鍵字（只放能明確對上的；對不上就留空，不硬湊）
@@ -221,7 +223,10 @@ def main():
                     help="⓪a 產出的基地 shp（預設 outputs/<案>/cadastre/基地.shp）")
     ap.add_argument("--county"), ap.add_argument("--town"), ap.add_argument("--section")
     ap.add_argument("--landnos", nargs="*", default=None)
-    ap.add_argument("--village", default=None, help="村里（可提高 eland 判定精度）")
+    ap.add_argument("--village", default=None, help="村里（回退線上 eland 時用）")
+    ap.add_argument("--exempt-json", default=str(REPO / "config" / "環敏應免查範圍.json"),
+                    help="離線『應免查範圍』JSON（parse_exempt_pdf 產出）；"
+                         "存在即用它初篩（取代線上 eland）。設為 '' 強制走線上 eland")
     ap.add_argument("--max-parcels", type=int, default=8,
                     help="送進套疊比對的地號上限（每筆都要逐圖層相交，預設 8 筆代表基地）")
     a = ap.parse_args()
@@ -229,15 +234,18 @@ def main():
     case_dir = REPO / "outputs" / a.case
     case_dir.mkdir(parents=True, exist_ok=True)
     county, town, section, nos = a.county, a.town, a.section, a.landnos
+    sections = [section] if section else []
     if not all([county, town, section]) or not nos:
         shp = Path(a.cadastre) if a.cadastre else (case_dir / "cadastre" / "基地.shp")
         if not shp.exists():
             sys.exit(f"[env_prescreen] 未給行政區/地號，且找不到 {shp}\n"
                      "  先跑 ⓪a（run_case --fetch 或 cadastre_fetch.py fetch）")
-        c2, t2, s2, n2 = read_site(shp)
+        c2, t2, s2, n2, secs2 = read_site(shp)
         county, town, section = county or c2, town or t2, section or s2
         nos = nos or n2
-        print(f"[env_prescreen] 自 {shp.name} 讀得 {county}{town}{section}，{len(nos)} 筆地號")
+        sections = secs2 or sections
+        print(f"[env_prescreen] 自 {shp.name} 讀得 {county}{town}{section}，"
+              f"{len(nos)} 筆地號、{len(sections)} 段")
 
     use = nos[: a.max_parcels]
     if len(nos) > len(use):
@@ -245,8 +253,18 @@ def main():
               f"（eland 應免查是按行政區、不受此影響；要全部比對加 --max-parcels）")
 
     run = _load_skill_api()
+    exempt_json = a.exempt_json if (a.exempt_json and Path(a.exempt_json).exists()) else None
+    env_root = REPO / "環境敏感相關"
+    if exempt_json:
+        import json as _json  # noqa: PLC0415
+        ver = _json.loads(Path(exempt_json).read_text(encoding="utf-8")).get("version")
+        print(f"[env_prescreen] 初篩來源＝離線『應免查範圍』PDF（{ver}）＋第二階段本機/遠端套疊")
+    else:
+        print("[env_prescreen] ⚠ 無 exempt-json，回退線上 eland 查詢")
     print(f"[env_prescreen] 呼叫 skill env-sensitivity-check：{county}{town}{section} {use}")
-    res = run(county, town, section, use, village=a.village)
+    res = run(county, town, section, use, village=a.village,
+              exempt_json=exempt_json, sections=sections,
+              env_root=str(env_root) if env_root.exists() else None)
 
     (case_dir / "環境敏感初篩.json").write_text(
         json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
