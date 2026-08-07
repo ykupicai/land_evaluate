@@ -117,23 +117,10 @@ from qgis.PyQt.QtGui import QColor, QFont
 # 常數
 # ---------------------------------------------------------------------------
 
-def _load_paths() -> dict:
-    """外部相依路徑集中於 config/paths.yaml；缺檔/缺項回退內建預設，故絕不因此壞掉。"""
-    defaults = {
-        "qgis_prefix": r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr",
-        "luimap_colortable": "",
-    }
-    cfg_path = REPO_ROOT / "config" / "paths.yaml"
-    if cfg_path.exists():
-        try:
-            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            defaults.update({k: v for k, v in cfg.items() if v})
-        except Exception as exc:  # noqa: BLE001
-            print(f"[警告] config/paths.yaml 讀取失敗，改用內建預設：{exc}", flush=True)
-    return defaults
+from config_loader import load_paths, luimap_colortable_path
 
 
-_PATHS = _load_paths()
+_PATHS = load_paths(REPO_ROOT, warn=lambda msg: print(f"[警告] {msg}", flush=True))
 
 QGIS_PREFIX = _PATHS["qgis_prefix"]
 CRS_3826 = "EPSG:3826"
@@ -171,13 +158,20 @@ REUSE_BASEMAP = False  # --reuse-basemap：底圖 tif 已存在就直接沿用�
                        # (b) 只改版面/主題重出圖時省下圖磚下載時間。
                        # ⚠️ 換圖框(如改 --road-margin)時既有 tif 涵蓋範圍可能不符,
                        # 故僅在 tif 已涵蓋本次 extent 時沿用,否則照常重建。
-ZONING_WMTS = True     # ★使用分區／使用地編定主題改以 NLSC WMTS 呈現（2026-08-02 使用者定案）：
-                       # nURBAN1=非都市土地使用分區圖、nURBAN2=非都市土地使用地類別圖。
-                       # 動機＝本機地籍快照是 111年2月 舊制，鄰近宗地近年的變更編定
-                       # （如布袋306-1 農牧→特目）在快照著色下會呈現舊值；WMTS 為
-                       # 官方現行套疊，永遠是最新公告。基地紅框與屬性表仍用平台官方值。
-                       # 圖磚抓取失敗時自動退回本機 QML 著色（05 備註會註記）。
-                       # --zoning-local 可整批退回舊制（歷史案重現用）。
+ZONING_WMTS = False    # ★使用分區／使用地編定主題預設改回向量著色（2026-08-06 使用者定案，
+                       # 取代 2026-08-02～2026-08-06 的 WMTS 預設）：
+                       # 動機＝當初改用 WMTS 是因為本機地籍快照是 111年2月 舊制，鄰地近年
+                       # 變更編定會呈現舊值；現在 cadastre_neighbors.py（run_case.py --fetch
+                       # 已自動接掛）改用**即時回填**的鄰地.shp（⓪a getLandInfo 現行屬性），
+                       # 舊制問題已從源頭解決，向量著色不再有「著舊色」的風險，且比 WMTS
+                       # 圖磚更精確（逐宗地矢量邊界，非影像套疊誤差）、免圖磚下載更快更穩。
+                       # ⚠ 前提是案子有 cadastre/鄰地.shp（⓪a 路徑才有）；trust-shp 若無
+                       # 鄰地.shp 會退回官方縣市舊快照（見 extract_layers_trust），此時
+                       # 建議改用 --zoning-wmts 或先跑 cadastre_neighbors.py 補鄰地.shp。
+                       # --zoning-wmts＝改走 NLSC WMTS（nURBAN1/nURBAN2，官方現行套疊，
+                       # 圖磚抓取失敗時自動退回向量著色）；--zoning-local 為相容別名
+                       # （2026-08-02～08-06 曾是「退回舊制」的意思，現在向量著色已是
+                       # 預設，此旗標等於 no-op，保留不擋舊指令碼）。
 
 # 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
 URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
@@ -191,8 +185,7 @@ URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分
 # 國土利用調查（LUIMAP）：官方色碼表 + 臨路評估的 features.geojson 分類結果。
 # 色碼表 2026-07-26 起 vendor 於 config/luimap_colortable.csv（不再取自 fishpv 專案）；
 # paths.yaml 的 luimap_colortable 可覆寫。
-LUIMAP_COLORTABLE = (Path(_PATHS["luimap_colortable"]) if _PATHS["luimap_colortable"]
-                     else REPO_ROOT / "config" / "luimap_colortable.csv")
+LUIMAP_COLORTABLE = luimap_colortable_path(REPO_ROOT, _PATHS)
 LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
 
 
@@ -403,6 +396,7 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
         warnings.append(f"trust-shp 幾何數({len(feats)})與屬性數({len(recs)})不一致，按位置配對")
     bboxes: dict[str, QgsRectangle] = {}
     landnos: dict[str, set] = defaultdict(set)
+    own_feats: dict[str, list] = defaultdict(list)   # cid -> [(geom, landno, zone, ltype)]
     for f, r in zip(feats, recs):
         landno = shp_get(r, F_LANDNO)
         sites = assign_site(landno, sitemap, case_name,
@@ -420,6 +414,7 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                 continue
             add_feat(base, g, [cid, cname, landno, zone or URBAN_LABEL, ltype or URBAN_LABEL])
             landnos[cid].add(landno)
+            own_feats[cid].append((g, landno, zone, ltype))
             bb = g.boundingBox()
             bboxes[cid] = bb if cid not in bboxes else (
                 bboxes[cid].combineExtentWith(bb) or bboxes[cid])
@@ -434,11 +429,82 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
         c["has_urban_rows"] = any(row["使分"] is None for row in c["rows"])
         c["_landnos"] = landnos[cid]
 
-    # 2. 周邊地籍 + 功能分區：仍從官方縣市 shp 按地圖範圍撈（與比對無關）
+    # 2. 周邊地籍：優先吃 ⓪a 即時回填的鄰地.shp（現行屬性），沒有才退回官方縣市舊
+    #    快照（2026-08-06 使用者定案，取代 WMTS 當主題1/2 預設底）。
+    #    鄰地.shp 由 cadastre_neighbors.py 產（run_case.py --fetch 已自動接掛），
+    #    欄位是「地號」（已組字，不必再用 宗地母+宗地子 兜）、使分、使類。
+    neigh_fresh_p = gpkg.parent / "cadastre" / "鄰地.shp"
+    neigh_fresh = None
+    if neigh_fresh_p.exists():
+        neigh_fresh = QgsVectorLayer(str(neigh_fresh_p), "鄰地_即時", "ogr")
+        if not neigh_fresh.isValid():
+            warnings.append(f"⚠ 鄰地.shp 讀取失敗（{neigh_fresh_p}），退回官方縣市舊快照")
+            neigh_fresh = None
+        else:
+            print(f"周邊地籍：使用 ⓪a 即時回填的 {neigh_fresh_p.name}"
+                 f"（{neigh_fresh.featureCount()} 筆，現行屬性）", flush=True)
+
+    # 2b. 功能分區：仍從官方縣市 shp 按地圖範圍撈（與周邊地籍是不同圖資，互不影響）
     by_county: dict[str, list[dict]] = defaultdict(list)
     for c in cases.values():
         if "extent" in c:
             by_county[c["county"]].append(c)
+
+    if neigh_fresh is not None:
+        fld = neigh_fresh.fields()
+        i_ln, i_zone, i_type = fld.indexOf("地號"), fld.indexOf("使分"), fld.indexOf("使類")
+        for c in cases.values():
+            if "extent" not in c:
+                continue
+            base_norm = {normalize_landno(x) for x in c.get("_landnos", set()) if x}
+            matched: set[str] = set(base_norm)   # 基地自身視為已配對，見下方直接灌入
+            rect = c["extent"].buffered(c["extent"].width() * NEIGH_EXPAND)
+            n = 0
+            # ★ 基地自身也要進「周邊地籍」層——這層才是實際套 使用分區/使用地編定
+            #   QML 上色的圖層（基地紅框層 l_red 只畫外框+標籤，不上色），鄰地.shp
+            #   依設計排除了基地自身（cadastre_neighbors.py 的 _ov<0.5 過濾），若不
+            #   在這裡補回，主題1/2 會在基地範圍內開天窗（2026-08-06 實測抓到）。
+            for g, ln, zone, typ in own_feats.get(c["id"], []):
+                add_feat(neigh, g, [c["id"], ln, zone or URBAN_LABEL,
+                                    typ or URBAN_LABEL, "Y"])
+                n += 1
+            for f in neigh_fresh.getFeatures(QgsFeatureRequest().setFilterRect(rect)):
+                ln = attr_str(f[i_ln]) if i_ln >= 0 else ""
+                zone = attr_str(f[i_zone]) if i_zone >= 0 else ""
+                typ = attr_str(f[i_type]) if i_type >= 0 else ""
+                is_base = normalize_landno(ln) in base_norm
+                if is_base:
+                    matched.add(normalize_landno(ln))
+                add_feat(neigh, f.geometry(), [
+                    c["id"], ln, zone or URBAN_LABEL, typ or URBAN_LABEL,
+                    "Y" if is_base else ""])
+                n += 1
+            miss = base_norm - matched
+            if miss:
+                orig = sorted({x for x in c.get("_landnos", set())
+                              if normalize_landno(x) in miss})
+                warnings.append(
+                    f"{c['id']} {c['name']}：{len(orig)} 筆基地地號在鄰地.shp找不到相符"
+                    f"（是否落在鄰地.shp的50m外擴範圍外？可能需擴大 cadastre_neighbors "
+                    f"的 --buffer）：{'、'.join(orig)}")
+            print(f"  {c['id']} {c['name']}：基地 {len(c.get('_landnos', set()))} 地號、"
+                 f"1/{c['scale']}、周邊(即時) {n} 筆", flush=True)
+        for county, clist in sorted(by_county.items()):
+            rects = [c["extent"].buffered(c["extent"].width() * 0.05)
+                    for c in clist if "extent" in c]
+            if rects:
+                n = load_zones_for_county(zones, registry, county, rects, warnings)
+                print(f"  {county} 功能分區要素 {n} 筆", flush=True)
+                if n == 0:
+                    warnings.append(f"{county} 功能分區抽出 0 筆"
+                                    "——主題3 將是空白圖，勿當成「成功」交付")
+        n_ov = apply_nluz_override(zones, gpkg.parent, warnings)
+        if n_ov:
+            print(f"  nluz 逐筆覆蓋 {n_ov} 筆（優先於本機面圖層）", flush=True)
+        _write_gpkg((base, neigh, zones), gpkg)
+        return warnings
+
+    # ↓↓↓ 退回官方縣市舊快照（無鄰地.shp 時的既有邏輯，未動）
     for county, clist in sorted(by_county.items()):
         rects = [c["extent"].buffered(c["extent"].width() * 0.05)
                  for c in clist if "extent" in c]
@@ -499,6 +565,10 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
             if n == 0:
                 warnings.append(f"{county} 功能分區抽出 0 筆"
                                 "——主題3 將是空白圖，勿當成「成功」交付")
+
+    n_ov = apply_nluz_override(zones, gpkg.parent, warnings)
+    if n_ov:
+        print(f"  nluz 逐筆覆蓋 {n_ov} 筆（優先於本機面圖層）", flush=True)
 
     _write_gpkg((base, neigh, zones), gpkg)
     return warnings
@@ -753,6 +823,10 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
             n = load_zones_for_county(zones, registry, county, rects, warnings)
             print(f"  {county} 功能分區要素 {n} 筆", flush=True)
 
+    n_ov = apply_nluz_override(zones, gpkg.parent, warnings)
+    if n_ov:
+        print(f"  nluz 逐筆覆蓋 {n_ov} 筆（優先於本機面圖層）", flush=True)
+
     # 寫 gpkg
     gpkg.parent.mkdir(parents=True, exist_ok=True)
     if gpkg.exists():
@@ -771,6 +845,28 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
             raise RuntimeError(f"gpkg 寫入失敗 {lyr.name()}: {res}")
     print(f"已寫入 {gpkg}", flush=True)
     return warnings
+
+
+def apply_nluz_override(zones_mem: QgsVectorLayer, case_dir: Path, warnings: list[str]) -> int:
+    """套用 scripts/nluz_landzone.py 產出的逐筆覆蓋（nluz 優先，2026-08-06 使用者定案）。
+    <案>/國土功能分區/逐筆覆蓋.gpkg 存在時，把裡面的宗地面附加進 zones_mem（後插入，
+    繪製順序疊在原本本機面圖層之上）——比照 make_env_map 的案件層覆蓋機制，不改
+    本機圖資本身，只在該案覆蓋。沒跑過 nluz_landzone.py 的案子（沒有這份 gpkg）
+    行為完全不變。"""
+    override = case_dir / "國土功能分區" / "逐筆覆蓋.gpkg"
+    if not override.exists():
+        return 0
+    lyr = QgsVectorLayer(f"{override}|layername=逐筆覆蓋", "nluz覆蓋", "ogr")
+    if not lyr.isValid():
+        warnings.append(f"nluz 逐筆覆蓋圖層讀取失敗：{override}")
+        return 0
+    n = 0
+    for f in lyr.getFeatures():
+        add_feat(zones_mem, f.geometry(), ["", f["zone"]])
+        n += 1
+    if n:
+        warnings.append(f"已套用 nluz 逐筆覆蓋 {n} 筆（見 {override.name}，nluz 優先於本機面圖層）")
+    return n
 
 
 def load_zones_for_county(zones_mem: QgsVectorLayer, registry: dict, county: str,
@@ -1300,9 +1396,9 @@ def main() -> None:
         elif a == "--reuse-basemap":
             REUSE_BASEMAP = True
         elif a == "--zoning-local":
-            ZONING_WMTS = False   # 使用分區/使用地編定退回本機 QML 著色（歷史案重現）
+            ZONING_WMTS = False   # 已是預設值（2026-08-06起）；保留旗標供指令明示/相容舊指令
         elif a == "--zoning-wmts":
-            ZONING_WMTS = True    # 已是預設值；保留旗標供指令明示
+            ZONING_WMTS = True    # 改走 NLSC WMTS 官方現行套疊（2026-08-06起為備選）
         elif a.startswith("--basemap-dir="):
             BASEMAP_DIR = a.split("=", 1)[1]
         elif a == "--basemap-dir":
@@ -1546,17 +1642,21 @@ def main() -> None:
                 if not ok and not qml_warned:
                     warnings.append(f"QML 套用失敗：{qml}")
                     qml_warned = True
-                # 周邊宗地不標地號（僅基地宗地由 l_red 標；依使用者指示地號只呈現基地範圍）
-                l.setLabelsEnabled(False)
-            if layout_mode == "maxmap":
-                # maxmap：周邊地籍只留填色不畫邊線（使用者定案）
-                strip_outlines(l_nz)
-                strip_outlines(l_nt)
+                # 周邊宗地也標地號（2026-08-06 使用者定案，取代先前「只標基地」的做法）。
+                # 基地宗地本身仍交給 l_red 標（避免與此處重複疊字），用既有
+                # NEIGH_LABEL_EXPR 表達式排除「是否基地=Y」者。
+                l.setLabeling(label_settings(NEIGH_LABEL_EXPR, is_expression=True))
+                l.setLabelsEnabled(True)
+            # 周邊地籍一律去除 QML 自帶外框（各分類粗細不一），改疊下面統一的
+            # 細灰界線層 l_gray，畫面才乾淨一致（2026-08-06 起 maxmap 也畫邊線，
+            # 取代先前「maxmap 只留填色不畫邊線」的做法——加了地號標註後，沒有邊線
+            # 分不清標籤屬於哪個宗地）。
+            strip_outlines(l_nz)
+            strip_outlines(l_nt)
             # 地籍界線（使用者符號多無外框，疊一層細灰界線；主題3/4 亦作周邊淡灰線）
-            # maxmap 不上圖（周邊不畫邊線），僅 compact 版面使用
             l_gray = open_gpkg_layer(neigh_uri, "周邊地籍界線", subset)
             l_gray.renderer().setSymbol(outline_symbol(color="130,130,130,255", width="0.18"))
-            gray_opt = [] if layout_mode == "maxmap" else [l_gray]
+            gray_opt = [l_gray]
 
             if MATERIALIZE:
                 l_red, l_nz, l_nt, l_gray = (to_memory(x) for x in (l_red, l_nz, l_nt, l_gray))

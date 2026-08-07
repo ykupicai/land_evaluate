@@ -51,7 +51,11 @@ def main():
     ap.add_argument("--joined", required=True)
     ap.add_argument("--case", required=True)
     ap.add_argument("--sites", default=None, help="案場面 shp（有則標 site_id）")
-    ap.add_argument("--margin", type=float, default=1500.0, help="外擴公尺數")
+    ap.add_argument("--margin", type=float, default=None,
+                    help="外擴公尺數。未給時優先讀 <案>/區位圖_道路基準.json"
+                         "（scripts/road_network.py 算出的「外擴到第一條國道/省道/"
+                         "市道/縣道/鄉道/市區快速道路為止」距離），沒有該檔才退回"
+                         "固定 1500m 舊制")
     ap.add_argument("--basemap-dir", default=None)
     ap.add_argument("--site-outline", type=float, default=0.5,
                     help="基地範圍框線粗度(mm)；使用者定案 2026-07-29 由 1.1 減為 0.5")
@@ -95,10 +99,32 @@ def main():
     loc = f"{county}{town}"
 
     geom = QgsGeometry.unaryUnion([f.geometry() for f in site.getFeatures()])
+
+    margin = a.margin
+    road_note = ""
+    if margin is None:
+        # ★ 2026-08-06 使用者定案：外擴基準改用「碰到第一條夠格公路為止」，不用固定
+        #   距離。這裡不直接算（QGIS 內建 python 沒有 geopandas），改讀
+        #   scripts/road_network.py 系統 python 預先算好的結果——它已由
+        #   run_case.py 的 ⓪a 流程自動產出；獨立跑本腳本時若沒有該檔，
+        #   先跑一次 `python scripts/road_network.py --joined ... --out ...`。
+        road_json = out_dir / "區位圖_道路基準.json"
+        if road_json.exists():
+            import json
+            rd = json.loads(road_json.read_text(encoding="utf-8"))
+            margin = rd["margin_m"]
+            if rd.get("road_name"):
+                road_note = (f"（外擴基準：{rd['road_type']}「{rd['road_name']}」"
+                             f"距基地 {rd.get('distance_m', 0):,.0f} m，來源 {rd['source']}）")
+        else:
+            margin = 1500.0
+            road_note = (f"（⚠ 找不到 {road_json.name}，退回固定 1500m 舊制——"
+                         "建議先跑 scripts/road_network.py 產生道路基準）")
+
     bb = geom.boundingBox()
-    bb.grow(a.margin)
+    bb.grow(margin)
     bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
-    print(f"位置：{loc}　地段：{section}　外擴 {a.margin:.0f} m")
+    print(f"位置：{loc}　地段：{section}　外擴 {margin:.0f} m{road_note}")
 
     layers = [site]
     legend = [site]

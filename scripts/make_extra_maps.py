@@ -9,6 +9,17 @@
   --theme 緩衝綠帶 開發審議規範總編§40 的等寬緩衝綠帶＋退縮後可利用範圍，正射為底。
                   ⚠ 與「隔離綠帶」是兩套不同制度：農地變更＝隔離綠帶（要點§9~§11）、
                   開發許可 ≥2 公頃＝緩衝綠帶（總編§40，≥10 公尺）。前置＝buffer-greenbelt。
+                  對開發許可案這是**主流程必經步驟**，不是加值選配。
+                  ★★ 總編§17 保育區（≥扣除不可開發區後剩餘基地面積 30%）與§40 緩衝綠帶
+                  都要滿足，但**§40 緩衝綠帶可納入§17 保育區 30% 的計算，不是外加**
+                  （2026-08-06 定案）——緩衝綠帶是保育區的最小基礎配置，量緩衝綠帶占比，
+                  達 30% 即滿足；未達 30% 則有缺口，缺口＝30%×(基地−不可開發區)−緩衝綠帶
+                  面積，補法待個案函詢（加寬緩衝綠帶或另劃保育區）。太陽光電因第十四編§2
+                  豁免§17 是**目前唯一查到的例外**，其他用途未經確認有專章豁免前一律假定
+                  §17 仍適用，不可比照光電案「開發許可就不受 30%」。詳見
+                  .claude/rules/隔離綠帶與緩衝綠帶判準.md。
+                  ⚠ 本主題**一律全部畫成緩衝綠帶，不做隔離設施細分**（評估階段簡化
+                  原則，`greenbelt_ratio.py --facility-near` 的臨路側分色不適用本主題）。
   --theme 坡度    坡度依開發審議規範總編§16 三段分色（<30% 可開發／30~40% 僅開放性
                   公共設施／≥40% 不可開發區），吃 scripts/slope_check.py 的
                   坡度_percent.tif；有緩衝綠帶 shp 時一併疊上。
@@ -43,12 +54,14 @@ sys.path.insert(0, str(HERE))
 from qgis.core import (  # noqa: E402
     QgsApplication, QgsCategorizedSymbolRenderer, QgsColorRampShader,
     QgsCoordinateReferenceSystem,
-    QgsFeature, QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsLayoutExporter,
+    QgsFeature, QgsFeatureRequest, QgsField, QgsFillSymbol, QgsGeometry,
+    QgsLayoutExporter,
     QgsLineSymbol, QgsPalLayerSettings,
     QgsProject, QgsRasterLayer, QgsRasterShader, QgsRectangle, QgsRendererCategory,
     QgsSingleBandPseudoColorRenderer, QgsTextBufferSettings,
     QgsTextFormat, QgsVectorLayer, QgsVectorLayerSimpleLabeling,
 )
+from qgis.PyQt.QtCore import QVariant  # noqa: E402
 from qgis.PyQt.QtGui import QColor, QFont  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
@@ -63,10 +76,14 @@ EXPORT_DPI = 300
 BREED_DEFAULT = (r"\\192.168.1.134\Public-TN\3. 圖資\gis圖資\產業相關"
                  r"\一級產業\養殖漁業生產區\養殖漁業生產區_114_SHP\養殖漁業生產區.shp")
 # 權屬配色（公有偏暖、私有偏冷，圖例一眼可分）
+# ⚠ key 是 classify_ownership() 正規化後的 '公'／'私'，**不是 shp 裡的原始字串**——
+#   原始值兩條路徑不同（⓪a：國有／直轄市有／私(推論)；TCDGIS：公／私），
+#   直接拿原始值當 key 會全部落到預設灰色、公私分不出來（2026-08-07 實錯）。
 OWNER_STYLE = {
-    "公": ((255, 140, 0), "公有（國有／公有）"),
+    "公": ((255, 140, 0), "公有"),
     "私": ((80, 140, 255), "私有"),
 }
+OWNER_UNKNOWN = ((165, 165, 165), "無法判定（空白／未登記）")
 
 
 def label_field(lyr, field, size=11, line=False):
@@ -88,6 +105,11 @@ def label_field(lyr, field, size=11, line=False):
         except Exception:                      # noqa: BLE001 — 舊版 API 後備
             pal.placement = QgsPalLayerSettings.Curved
         pal.labelPerPart = False
+    else:
+        # ★ 面圖層強制標註點落在該宗地**內部**（2026-08-07 安南案權屬圖實見）：
+        #   凹形宗地（如環抱基地一角的 302-1）質心會落在多邊形之外——落在基地裡，
+        #   讀圖的人會誤以為那筆是基地的一部分。centroidInside 改用內部可容點定位。
+        pal.centroidInside = True
     tf = QgsTextFormat()
     tf.setFont(QFont("Microsoft JhengHei", size, QFont.Bold))
     tf.setSize(size)
@@ -105,6 +127,9 @@ def main():
     ap.add_argument("--theme", required=True,
                     choices=["權屬", "環域", "養殖漁業生產區", "隔離綠帶", "灌排水道",
                              "坡度", "緩衝綠帶"])
+    ap.add_argument("--neighbours", default=None,
+                    help="權屬主題：周邊地籍 shp（預設 <案>/cadastre/鄰地.shp，⓪a′ 產出）。"
+                         "與基地同一套公私別配色但淡化、不標地號；找不到就只畫基地。")
     ap.add_argument("--setback", default=None,
                     help="緩衝綠帶主題：退縮後基地 shp（預設 <案>/緩衝綠帶/退縮後基地.shp）")
     ap.add_argument("--slope-tif", default=None,
@@ -165,23 +190,79 @@ def main():
     layers, legend = [], []
 
     if a.theme == "權屬":
-        i_pub = site.fields().indexFromName("公私別")
-        if i_pub < 0:
-            raise SystemExit("基地 shp 無「公私別」欄，無法做權屬分色圖")
-        vals = []
-        for f in site.getFeatures():
-            v = str(f[i_pub] or "").strip()
-            if v and v not in vals:
-                vals.append(v)
-        cats = []
-        for v in vals:
-            rgb, lab = OWNER_STYLE.get(v, ((150, 150, 150), v or "未載"))
-            cats.append(QgsRendererCategory(v, QgsFillSymbol.createSimple({
-                "color": "%d,%d,%d,%d" % (rgb + (A,)),
-                "outline_color": "60,60,60,255", "outline_width": "0.4"}), lab))
-        site.setRenderer(QgsCategorizedSymbolRenderer("公私別", cats))
-        label_field(site, "地號", 11)
-        print("權屬類別：", vals)
+        # ★ 分色依 persite_stats.classify_ownership 正規化後的值（全產線唯一判定），
+        #   不是 shp 原始字串——原始值兩條路徑用詞不同（見 OWNER_STYLE 上方註解）。
+        #   為此在圖層上新增暫存欄 `_權屬`，渲染與圖例都吃它。
+        from persite_stats import classify_ownership  # noqa: PLC0415
+
+        def _style_by_owner(lyr, name, label_size=0, outline="60,60,60,255",
+                            outline_w="0.4", alpha=a.alpha):
+            """就地把圖層依權屬分色；回傳出現過的類別（保序）。"""
+            i_pub = lyr.fields().indexFromName("公私別")
+            if i_pub < 0:
+                raise SystemExit(f"{name} 無「公私別」欄，無法做權屬分色圖")
+            lyr.startEditing()
+            if lyr.fields().indexFromName("_權屬") < 0:
+                lyr.addAttribute(QgsField("_權屬", QVariant.String))
+                lyr.updateFields()
+            i_new = lyr.fields().indexFromName("_權屬")
+            seen = []
+            for f in lyr.getFeatures():
+                k = classify_ownership(f[i_pub]) or "未判定"
+                lyr.changeAttributeValue(f.id(), i_new, k)
+                if k not in seen:
+                    seen.append(k)
+            lyr.commitChanges()
+            order = [k for k in ("公", "私", "未判定") if k in seen]
+            cats = []
+            for k in order:
+                rgb, lab = (OWNER_STYLE.get(k) if k != "未判定" else OWNER_UNKNOWN)
+                cats.append(QgsRendererCategory(k, QgsFillSymbol.createSimple({
+                    "color": "%d,%d,%d,%d" % (rgb + (int(alpha * 255),)),
+                    "outline_color": outline, "outline_width": outline_w}), lab))
+            lyr.setRenderer(QgsCategorizedSymbolRenderer("_權屬", cats))
+            if label_size:
+                label_field(lyr, "地號", label_size)
+            return order
+
+        # 周邊地籍（⓪a' 鄰地.shp）：同一套配色但淡化、不標地號，才看得出基地位置
+        nb_path = a.neighbours or str(out_dir / "cadastre" / "鄰地.shp")
+        nb = None
+        if os.path.exists(nb_path):
+            nb = QgsVectorLayer(nb_path, "周邊地籍", "ogr")
+            if not nb.isValid():
+                print(f"  ⚠ 鄰地讀取失敗，僅畫基地：{nb_path}")
+                nb = None
+        if nb is not None:
+            # ★ 周邊地籍同樣要**畫宗地外框線並標地號**（使用者 2026-08-07 定案）——
+            #   權屬圖要能逐筆看出哪一號是公有／私有，只有色塊沒有地號無法對照。
+            #   框線與字級都比基地小一級（基地 0.4／11，周邊 0.3／9），靠粗細與
+            #   紅框區分主從；QGIS 標註引擎會自動避讓重疊，過密處只顯示部分。
+            # ⚠ 不要再疊 setOpacity()：符號本身已帶 alpha，再乘圖層透明度會變成
+            #   0.55×0.55≈0.30，周邊在正射底圖上幾乎看不見（2026-08-07 基地尺度
+            #   出圖時實見）。改為只把符號 alpha 調低一級，維持可辨識度。
+            ordn = _style_by_owner(nb, "鄰地", label_size=9,
+                                   outline="70,70,70,255", outline_w="0.3",
+                                   alpha=max(0.30, a.alpha - 0.10))
+            print(f"  周邊地籍 {nb.featureCount()} 筆，權屬類別：{ordn}")
+        else:
+            print(f"  （無鄰地.shp，僅畫基地）")
+
+        ords = _style_by_owner(site, "基地", label_size=11)
+        print("基地權屬類別：", ords)
+        # 基地輪廓另加粗紅框，與周邊區隔（分色相同，靠框線與標註分辨）
+        red = QgsVectorLayer(f"MultiPolygon?crs={CRS}", "申請範圍", "memory")
+        red.dataProvider().addAttributes([QgsField("n", QVariant.String)])
+        red.updateFields()
+        ft = QgsFeature(red.fields()); ft.setGeometry(geom); ft.setAttributes([""])
+        red.dataProvider().addFeatures([ft])
+        red.renderer().setSymbol(QgsFillSymbol.createSimple({
+            "color": "0,0,0,0", "outline_color": "208,0,0,255",
+            "outline_width": "0.9"}))
+        # ★ 圖框一律以**基地範圍**為準（使用者 2026-08-07 定案），與其他六主題同尺度。
+        #   周邊地籍照畫，但只顯示落在圖框內的部分——若把圖框放大到涵蓋全部鄰地
+        #   （安南案 225 筆會撐到 1/4000），基地會縮成一小塊，反而看不出各筆的權屬，
+        #   與「基地<2公頃不外擴」的既定原則同理（見 CLAUDE.md 簡報深淺四通則）。
         bb = geom.boundingBox()
         ext_geom = geom
     elif a.theme == "養殖漁業生產區":
@@ -341,6 +422,10 @@ def main():
         # ⚠ 與「隔離綠帶」是**兩套不同制度**，不可混用：
         #   農業用地變更＝隔離綠帶（要點§9~§11，面積比＋最小寬度雙門檻，greenbelt_ratio）
         #   開發許可 ≥2ha ＝緩衝綠帶（總編§40，等寬內縮 ≥10m，buffer-greenbelt）
+        # ⚠ §17 保育區(30%)可把本主題的§40(10m)緩衝綠帶納入計算、不是外加；
+        #   本主題只畫§40 那塊，§17 保育區缺口另見 config/檢核清單 的
+        #   conservation_zone 型 inquiry 項（含缺口算法）。
+        #   一律全部畫緩衝綠帶、不做隔離設施細分（評估簡化原則，見 .claude/rules/）。
         site.renderer().setSymbol(QgsFillSymbol.createSimple({
             "color": "255,255,255,0", "outline_color": "200,0,0,255",
             "outline_width": "0.9"}))
@@ -535,8 +620,20 @@ def main():
         bb = ext_geom.boundingBox()
         print(f"環域 {a.buffer:.0f} m 已建；環面積 {ring.area():,.0f} m²")
 
-    project.addMapLayer(site, False); keep.append(site)
-    layers.append(site); legend.append(site)
+    if a.theme == "權屬":
+        # ⚠ QGIS setLayers：**清單第一個畫在最上層**。要的疊序（上→下）＝
+        #   申請範圍紅框 → 基地地籍(標地號) → 周邊地籍(淡化)，否則基地會被鄰地蓋住。
+        project.addMapLayer(red, False); keep.append(red)
+        layers.append(red); legend.append(red)
+        project.addMapLayer(site, False); keep.append(site)
+        layers.append(site); legend.append(site)
+        if nb is not None:
+            project.addMapLayer(nb, False); keep.append(nb)
+            layers.append(nb); legend.append(nb)   # 基地全私、鄰地有公時，
+            #   公有色塊只在鄰地圖層出現，故鄰地一定要進圖例，否則圖上有橘色卻無說明
+    else:
+        project.addMapLayer(site, False); keep.append(site)
+        layers.append(site); legend.append(site)
     bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
 
     # ★底圖照「版面引擎算出的最終圖框」抓，不是 bbox（bbox 較窄，成品左右會露白邊；

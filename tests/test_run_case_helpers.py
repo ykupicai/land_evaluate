@@ -5,7 +5,25 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from run_case import execute_steps, find_from_index, from_prereq_errors, plan_steps
+from run_case import (assessment_followups, execute_steps, find_from_index,
+                      from_prereq_errors, plan_steps)
+
+
+def test_assessment_followups_empty_case_lists_common_stages(tmp_path):
+    pending = assessment_followups(tmp_path)
+    assert "環境敏感套疊（ngis_sensitive.py）" in pending
+    assert "國土功能分區逐筆核對（nluz_landzone.py）" in pending
+    assert "禁止事由檢核（check_zones.py）" in pending
+    assert "逐案場統計（persite_stats.py）" in pending
+    assert "案件狀態紀錄（STATE.md）" in pending
+    assert "評估簡報與人工 QA" in pending
+
+
+def test_assessment_followups_accepts_current_and_historical_artifacts(tmp_path):
+    for name in ("環境敏感套疊.csv", "國土功能分區.csv", "禁止事由檢核.txt",
+                 "逐案場統計.json", "STATE.md", "成果簡報.pptx"):
+        (tmp_path / name).write_bytes(b"x")
+    assert assessment_followups(tmp_path) == []
 
 
 def test_shp_first_run_stops_at_overview():

@@ -19,7 +19,8 @@
 | 2b. 新舊地號查詢 | `scripts/query_landno.py` | 否（純 HTTP `requests`） | 否 |
 | 2c. 案場定義 | `scripts/build_sites_sitemap.py` | 否 | 否 |
 | 2d. 臨路評估 | `scripts/road_access.py`（**產線內建**） | 否 | 否（QGIS 內建 Python） |
-| 0a. 免登入取地籍＋權屬（基地＋鄰地） | `scripts/cadastre_fetch.py`、`scripts/public_land.py` | **是**（免帳號免驗證碼） | 否 |
+| 0a. 免登入取地籍＋權屬（基地＋鄰地自動發現） | `scripts/cadastre_fetch.py`、`scripts/cadastre_neighbors.py`、`scripts/public_land.py` | **是**（免帳號免驗證碼） | 否 |
+| 0a'. 區位圖道路外擴基準 | `scripts/road_network.py` | 是（國道/省道查OSM） | 否 |
 | 3. 出圖（六主題） | `scripts/make_maps.py` | 否 | 否（QGIS 內建 Python） |
 | 3b. 區位圖 | `scripts/make_locality_map.py` | 否 | 否 |
 | 3c. 環境敏感套疊圖 | `scripts/make_env_map.py` | 否 | 否 |
@@ -155,18 +156,24 @@ python -X utf8 scripts\run_case.py --shp <基地.shp> --mode single --layout max
 ### 階段0a：免登入取地籍（★新案先跑這步，再決定何時佔用平台登入）
 
 走 skill `cadastre-check`（農業部地籍圖資＋內政部 getLandInfo），**免帳號、免驗證碼、
-無 10.5 秒節流**。基地與鄰地各跑一次：
+無 10.5 秒節流**。基地先跑一次，鄰地改為自動發現（★2026-08-06起，不必手動列地號）：
 
 ```powershell
 python -X utf8 scripts\cadastre_fetch.py fetch --county 嘉義縣 --town 布袋鎮 --section 考試潭段鹿寮小段 --landnos 306 --out "outputs\<案子>\cadastre" --name 基地
 ```
 
 ```powershell
-python -X utf8 scripts\cadastre_fetch.py fetch --county 嘉義縣 --town 布袋鎮 --section 考試潭段鹿寮小段 --landnos 305 278 298 391 323 306-1 --out "outputs\<案子>\cadastre" --name 鄰地
+python -X utf8 scripts\cadastre_neighbors.py --joined "outputs\<案子>\cadastre\基地.shp" --out "outputs\<案子>\cadastre" --buffer 50
 ```
 
 產 `基地.shp`／`鄰地.shp`（EPSG:3826、UTF-8，欄位含 地號／使分／使類／登面積／圖面積／
 版次／**公私別／所有權／管理者**），可直接餵 `greenbelt_ratio --neighbours`、`check_zones --joined`。
+`run_case.py --fetch` 已自動接掛這兩步，一般不必手動個別執行。
+
+`cadastre_neighbors.py` 內建**覆蓋率自我檢查＋自動探測補正**：本機縣市快照可能漏收
+「已從舊地號分割出的新地號」（尤其交通用地／公路用地，地籍圖重測系統不涵蓋「逕為
+分割」）——抓到落差會自動找候選宗地母號、批次探測子號、只留落在缺口範圍內者併入
+回填，全程免人工介入；跑完印「缺口已補齊、覆蓋率檢查通過」才算乾淨。
 
 **布袋306 實測**：幾何與 TCDGIS 官方 shp **完全相同**（IoU 100.00%、面積差 0.00 ㎡）；
 使分／使類 7/7 一致；登記面積＝平台標示面積；**權屬 7/7 一致**
@@ -376,11 +383,17 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 ### 階段3b：區位圖（簡報第2頁用）
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_locality_map.py --joined <面積join.shp> --case <案子名> --sites "outputs\<案子>\臨路評估\sites.shp" --margin 1200
+python -X utf8 scripts\road_network.py --joined <cadastre\基地.shp> --out "outputs\<案子>"
+& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_locality_map.py --joined <面積join.shp> --case <案子名> --sites "outputs\<案子>\臨路評估\sites.shp"
 ```
 
 圖層順序：**透明電子地圖 EMAP2 置最上層** → 宗基地（標 `site_id`）→ 基地地籍 → 都市計畫分區（45%）→ 不透明 EMAP 置最底。
 `--site-outline` 基地框線粗度預設 0.5mm；`--no-urban` 可不疊都市計畫分區；`--urban-alpha` 調分區透明度。
+
+**2026-08-06 起外擴基準改為「碰到第一條國道/省道/市道/縣道/鄉道/市區快速道路為止」**
+（不再是固定距離）：先跑 `road_network.py` 產 `<案>/區位圖_道路基準.json`，
+`make_locality_map.py` 省略 `--margin` 時會自動讀取；`run_case.py --fetch` 已自動接掛
+這步，通常不必手動跑。仍可用 `--margin <公尺>` 覆蓋回固定距離。
 
 ### 階段3c：環境敏感套疊圖
 

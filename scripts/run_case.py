@@ -15,31 +15,17 @@ import sys
 import time
 from pathlib import Path
 
-import yaml
+from config_loader import load_paths, luimap_colortable_path, qgis_python_bat
 
 REPO = Path(__file__).resolve().parent.parent
 
 
-def _paths() -> dict:
-    """外部路徑集中於 config/paths.yaml（與 make_maps 同源）；缺檔回退內建預設。"""
-    d = {"qgis_prefix": r"C:\Program Files\QGIS 3.40.12\apps\qgis-ltr",
-         "luimap_colortable": ""}   # 空=用 config/luimap_colortable.csv(已 vendor)
-    p = REPO / "config" / "paths.yaml"
-    if p.exists():
-        try:
-            d.update({k: v for k, v in (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).items() if v})
-        except Exception:  # noqa: BLE001
-            pass
-    return d
-
-
-_P = _paths()
+_P = load_paths(REPO)
 # QGIS 執行檔由 qgis_prefix(...\apps\qgis-ltr) 推導出 ...\bin\python-qgis-ltr.bat
-QGIS_BAT = Path(_P["qgis_prefix"]).parent.parent / "bin" / "python-qgis-ltr.bat"
+QGIS_BAT = qgis_python_bat(_P)
 # 臨路評估 2026-07-26 起改為產線內建(scripts/road_access.py)，不再呼叫外部 fishpv。
 # LUIMAP 色碼表已 vendor 進 config/；paths.yaml 的 luimap_colortable 仍可覆寫。
-COLORTABLE = (Path(_P["luimap_colortable"]) if _P["luimap_colortable"]
-              else REPO / "config" / "luimap_colortable.csv")
+COLORTABLE = luimap_colortable_path(REPO, _P)
 FROM_STEPS = ("meta", "match", "roadaccess", "overview", "extract", "maps")
 # 舊步驟名別名(--from fishpv 仍可用)
 FROM_ALIASES = {"fishpv": "roadaccess"}
@@ -143,6 +129,35 @@ def fetch_roster(list_path: Path, case_dir: Path) -> Path:
         sys.exit(f"[run_case] 🚧 ⓪a 閘門：shp {n} 筆 ≠ 清冊 {total} 筆——"
                  "查無／失敗的地號請先釐清（新舊地號？未登記 9xxx？）再續跑")
     print(f"[run_case] ⓪a 完成：{final}（{n} 筆，含使分/使類/登記面積/權屬推論）")
+
+    # ⓪a 附帶：周邊地籍自動發現＋即時屬性回填（2026-08-06 使用者定案）——評估範圍
+    # 外擴 50m 內與地籍有交集者一併回傳，作為後續分區/使用地編定的基準（取代舊快照
+    # /WMTS）。非硬性閘門：失敗只警告不中止（鄰地是加值，基地本身已成功取得）。
+    neigh = out_dir / "鄰地.shp"
+    if not neigh.exists():
+        r = subprocess.run([sys.executable, "-X", "utf8",
+                            str(REPO / "scripts" / "cadastre_neighbors.py"),
+                            "--joined", str(final), "--out", str(out_dir),
+                            "--buffer", "50"], cwd=REPO)
+        if r.returncode != 0:
+            print("[run_case] ⚠ 周邊地籍自動發現失敗（不影響基地本身），"
+                 "可事後手動補跑 scripts/cadastre_neighbors.py")
+    else:
+        print(f"[run_case] 周邊地籍已有 {neigh}，跳過重抓")
+
+    # ⓪a 附帶：區位圖道路外擴基準（2026-08-06 使用者定案）——供 make_locality_map.py
+    # 讀取，非硬性閘門。
+    road_json = case_dir / "區位圖_道路基準.json"
+    if not road_json.exists():
+        r = subprocess.run([sys.executable, "-X", "utf8",
+                            str(REPO / "scripts" / "road_network.py"),
+                            "--joined", str(final), "--out", str(case_dir)],
+                           cwd=REPO)
+        if r.returncode != 0:
+            print("[run_case] ⚠ 區位圖道路基準查詢失敗（不影響基地本身），"
+                 "make_locality_map.py 會退回固定 1500m 舊制")
+    else:
+        print(f"[run_case] 區位圖道路基準已有 {road_json}，跳過重抓")
     return final
 
 
@@ -360,6 +375,29 @@ def from_prereq_errors(from_step: str, mode_shp: bool, case_dir: Path,
     return errs
 
 
+def assessment_followups(case_dir: Path) -> list[str]:
+    """依案件既有產物列出基礎製圖後仍待完成的評估階段。
+
+    這裡只檢查跨案共通成果，不替代各案型 YAML、人工查證或簡報 QA。接受歷史案件
+    曾使用的替代檔名，避免把已完成案件誤報為缺件。純檔案存在性檢查，不寫入案件。
+    """
+    checks = [
+        ("環境敏感套疊（ngis_sensitive.py）",
+         ("環敏NGIS.json", "環敏NGIS.csv", "環境敏感套疊.csv")),
+        ("國土功能分區逐筆核對（nluz_landzone.py）",
+         ("國土功能分區_逐筆核對.csv", "國土功能分區.csv")),
+        ("禁止事由檢核（check_zones.py）",
+         ("禁止事由檢核.json", "禁止事由檢核.txt")),
+        ("逐案場統計（persite_stats.py）", ("逐案場統計.json",)),
+        ("案件狀態紀錄（STATE.md）", ("STATE.md",)),
+    ]
+    pending = [label for label, names in checks
+               if not any((case_dir / name).exists() for name in names)]
+    if not any(p.suffix.lower() == ".pptx" for p in case_dir.glob("*.pptx")):
+        pending.append("評估簡報與人工 QA")
+    return pending
+
+
 def main():
     args = sys.argv[1:]
     shp = lst = fetch = case = chosen = from_step = None
@@ -555,7 +593,15 @@ def main():
 
     executed = execute_steps(steps, run_step, art)
     if not (executed and executed[-1] in ("parse", "STOP_MODE", "STOP_CHECK")):
-        print("\n[run_case] 完成")
+        print("\n[run_case] 基礎圖資與製圖階段完成")
+        pending = assessment_followups(case_dir)
+        if pending:
+            print("[run_case] 整案評估尚待：")
+            for item in pending:
+                print(f"  - {item}")
+            print("[run_case] 上述項目及各案型人工查證完成後，才可將案件標記為結案。")
+        else:
+            print("[run_case] 共通成果均已存在；仍請依案型完成內容核對與人工 QA。")
 
 
 if __name__ == "__main__":

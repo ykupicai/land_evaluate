@@ -68,3 +68,16 @@ def test_attribute_missing_field_flags_not_silent():
     log, results = [], []
     run_item(item, _site(), box(0, 0, 100, 100), 1e4, None, "臺南市", log, results)
     assert results[0]["判定"] == "欄位缺失須確認"
+
+
+def test_note_type_prints_remark_not_missing_layer():
+    """note 型（社福設施_臺南市.yaml 實錯，2026-08-06 後壁案重跑發現）：純敘述提醒，
+    不該落到通用 overlay 分支印成「找不到圖層檔案」——那看起來像資料缺失，
+    實際上該條款根本沒有可套疊的圖資，是型別沒被引擎認得。"""
+    item = {"id": "n", "名稱": "3年內設立期限", "條號": "§z", "類型": "note",
+            "級別": "△", "備註": "許可後3年內須設立，逾期廢止。"}
+    log, results = [], []
+    run_item(item, _site(), box(0, 0, 100, 100), 1e4, None, "臺南市", log, results)
+    assert results[0]["判定"] == "△"
+    assert "找不到圖層檔案" not in "\n".join(log)
+    assert "許可後3年內須設立" in "\n".join(log)

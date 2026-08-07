@@ -27,20 +27,36 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URBAN = os.path.join(REPO, "都市計畫", "全台都市計畫土地使用分區.shp")
 
 
+# ★ 公有的用詞：**兩條取得路徑不一樣，必須都認得**（2026-08-07 做權屬圖時發現）
+#   ① TCDGIS 匯出（joined/）  ：「公」／「私」
+#   ⓪a cadastre_fetch（cadastre/，**現行主路徑**）：值直接來自 MOI_API_039 的
+#      OwnerType，實測有「國有」「直轄市有」「縣市有」，私有側則是「私(推論)」。
+#   只判「公」開頭會讓 ⓪a 路徑的公有地**全部歸為無法判定**、公有筆數漏算——
+#   逐案場統計.json 是簡報數字的唯一來源，這種漏算會直接寫進交付文件。
+#   （既有案子未受害：安南港西段當年走 TCDGIS 路徑故正確；走 ⓪a 的案子基地
+#   恰好都無公有地。但只要之後有含國有地的基地走 ⓪a 就會爆，故先修。）
+_PUBLIC_TOKENS = ("公", "國有", "中華民國", "省有", "直轄市有",
+                  "縣市有", "縣有", "市有", "鄉鎮市有", "鄉有", "鎮有")
+
+
 def classify_ownership(v) -> str | None:
     """公私別欄值 → '公'／'私'／None（無法判定）。
 
     ⚠ 不可用 `== "公"` 精確比對（2026-08-04 龍崎案實錯：⓪a cadastre_fetch 寫的值是
     「私(推論)」、TCDGIS 匯出可能是「公/國有」，精確比對讓公有與私有筆數**同時歸 0**，
-    而 逐案場統計.json 是簡報數字的唯一來源）。判字首：「公」開頭＝公有、「私」開頭＝私有，
-    其餘（空白、None、「未登記」……）回 None、不計入任一類——空白不等於私有，
-    見 CLAUDE.md「本機地籍快照的所有權欄不可作為權屬依據」。
+    而 逐案場統計.json 是簡報數字的唯一來源）。
+    判定：字首命中 `_PUBLIC_TOKENS`（含 ⓪a 路徑的「國有」「直轄市有」等）＝公有、
+    「私」開頭＝私有，其餘（空白、None、「未登記」……）回 None、不計入任一類——
+    空白不等於私有，見 CLAUDE.md「本機地籍快照的所有權欄不可作為權屬依據」。
+
+    ★ 這是全產線唯一的權屬判定，出圖端（make_extra_maps 權屬主題）也 import 這支，
+      不要各自再寫一份（兩份必然分岔）。
     """
     s = str(v or "").strip()
-    if s.startswith("公"):
-        return "公"
     if s.startswith("私"):
         return "私"
+    if any(s.startswith(t) for t in _PUBLIC_TOKENS):
+        return "公"
     return None
 
 
@@ -53,7 +69,9 @@ def main():
                     help="road_access 成果.xlsx；省略時預設 <案>/臨路評估/成果.xlsx")
     ap.add_argument("--overlay", action="append", default=[],
                     help='名稱=路徑[::分級欄]，可多次')
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--out", default=None,
+                    help="案件資料夾（不是逐案場統計.json的完整路徑；"
+                         "輸出檔名固定寫作 <out>/逐案場統計.json）")
     a = ap.parse_args()
 
     case_dir = a.out or os.path.dirname(os.path.dirname(os.path.abspath(a.joined)))

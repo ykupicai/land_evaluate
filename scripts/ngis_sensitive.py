@@ -44,6 +44,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SKILL = Path(os.path.expanduser("~")) / ".claude" / "skills" / "ngis-sensitive" / "scripts"
 
+# ★ NGIS 已知涵蓋落差清單（2026-08-06 建，七股土資場案實錯）——這幾類 NGIS 曾經
+#   回 0 命中、但本機圖資／eland／同案前例證實確有涉及。不是查詢錯誤，是 NGIS
+#   單一圖層本身涵蓋不到；每案務必額外交叉核對，不能只憑 NGIS 0 命中就下「無涉及」。
+#   新增案例時把「哪個圖層漏了」補進這裡，讓後案不必再重踩一次。
+KNOWN_GAPS = [
+    ("氣象法禁限建範圍", "七股土資場案（2026-08-06）：NGIS 回 0，本機圖層＋同案前例"
+     "證實涉及氣象雷達站限建範圍 5,176 ㎡（7.6%）。交叉核對：本機 環境敏感相關/ 對應"
+     "圖層，或該地號同案歷史前例。"),
+]
+
 
 def _load_skill():
     if not SKILL.is_dir():
@@ -154,6 +164,9 @@ def main():
     print(f"→ {case_dir / '環敏NGIS.csv'}")
     print(f"→ {case_dir / '環敏NGIS.json'}")
     print("⚠ 交付口徑：初步評估、非正式套繪；描述性欄位（縣市名等）上游有亂碼壞值，勿直接引用。")
+    print("⚠ NGIS 已知涵蓋落差（0 命中 ≠ 真的無涉及，務必交叉核對，不是查詢錯誤）：")
+    for name, note in KNOWN_GAPS:
+        print(f"    ・{name}：{note}")
 
 
 if __name__ == "__main__":

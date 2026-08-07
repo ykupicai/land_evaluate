@@ -149,6 +149,54 @@ def elems_to_gdf(js) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(rows, geometry="geometry", crs=4326)
 
 
+# 單一類別的窄選擇器（給 nearest_category 用，只查該類別、不查全部10種，較省 API 負擔）
+CATEGORY_SELECTORS = {
+    "營區": ['["landuse"="military"]',
+            '["military"~"^(base|barracks|training_area|danger_area|naval_base|airfield)$"]'],
+}
+
+
+def nearest_category(geom, category: str, dist: float, log: list) -> dict:
+    """geom 為 EPSG:3826 幾何；查 OSM 單一類別（目前僅「營區」），回最近距離與清單。
+
+    ★ 判定刻意不給「未觸及」——OSM 查無不能當作官方確認無涉及（尤其營區屬機密，
+    OSM 標繪完整度更難保證），一律回「須函詢」，只把 OSM 結果當參考距離附註。
+    見 osm_sensitive_poi.py 開頭 docstring 的定位說明。
+    """
+    sels = CATEGORY_SELECTORS.get(category)
+    if not sels:
+        raise ValueError(f"nearest_category 未支援類別：{category}")
+    crs = "EPSG:3826"
+    bb = gpd.GeoSeries([geom.buffer(dist + 50)], crs=crs).to_crs(4326).total_bounds
+    bbox = (bb[1], bb[0], bb[3], bb[2])
+    rec = {"類別": category, "來源": "OpenStreetMap（Overpass API，群眾協作資料）"}
+    try:
+        js = overpass(build_query(bbox, sels))
+    except SystemExit as e:  # noqa: BLE001 — overpass() 用 SystemExit 傳遞失敗
+        log.append(f"    ⚠ OSM {category} 查詢失敗：{e} → 純函詢，不附 OSM 參考距離")
+        rec["判定"] = "須函詢（OSM查詢失敗）"
+        return rec
+    g = elems_to_gdf(js)
+    if len(g):
+        g = g.to_crs(crs)
+        g["dist_m"] = g.geometry.distance(geom)
+        g = g.sort_values("dist_m")
+    within = g[g["dist_m"] <= dist] if len(g) else g
+    rec["門檻內筆數"] = int(len(within))
+    rec["最近_m"] = float(g.iloc[0]["dist_m"]) if len(g) else None
+    rec["最近名稱"] = (g.iloc[0]["name"] or "(未命名)") if len(g) else None
+    rec["判定"] = "須函詢"   # 恆為須函詢，OSM 結果只附參考距離，見上方 docstring
+    if len(within):
+        log.append(f"    ⚠ OSM {category}：{dist:,.0f}m 內 {len(within)} 筆"
+                   f"（最近 {rec['最近名稱']} {rec['最近_m']:,.1f}m）——僅供參考，"
+                   f"OSM 非官方確認，法定認定仍須函詢")
+    else:
+        near_s = f"（最近 {rec['最近名稱']} {rec['最近_m']:,.0f}m）" if rec["最近_m"] is not None else "（查詢範圍內無紀錄）"
+        log.append(f"    ・OSM {category}：{dist:,.0f}m 內查無{near_s}——"
+                   f"OSM 查無不代表官方確認無，機密設施尤然，仍須函詢")
+    return rec
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joined", required=True)

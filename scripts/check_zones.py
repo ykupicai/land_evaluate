@@ -20,6 +20,9 @@ YAML 項目類型：
   settlement   十戶以上村莊或聚落（門牌坐標開放資料聚類實算，見 settlement_check.py）
   api_distance 國土測繪中心環域 API（醫療／文教／鄰避設施，見 nlsc_facility.py）
   inquiry      圖資查不到、必須函詢（明列機關，輸出到「須函詢」清單——不臆測）
+  note         純敘述提醒（無圖資可套疊，判斷已寫在備註裡，如時程約束、程序要件）
+  osm_distance OSM Overpass 單類別距離查詢（目前僅「營區」）。判定恆為須函詢，
+               OSM 結果只附參考距離，不可取代官方確認（見 osm_sensitive_poi.py）
 
 引擎內建的教訓（皆本專案實錯）：
   ・逐圖層印**檔案日期**，逾「陳舊警告_年」（預設 3 年）即警告
@@ -43,6 +46,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # settlement_check / nlsc_facility
 CFG_DIR = os.path.join(REPO, "config", "檢核清單")
 TWD97_BOUNDS = (60_000, 2_400_000, 420_000, 2_900_000)  # 台灣本島 TM2 粗略範圍
+
+# ★ 法令檢核規則庫已知缺口（2026-08-06 建）：v9 草稿本身載明還缺這幾類，若案子
+#   剛好用到，規則庫查不到不代表真的沒有規定——只是還沒建表，須另行查證原始法規。
+#   補進規則庫後從這裡刪除該項。
+RULEBASE_KNOWN_GAPS = [
+    "水土保持法§12（僅個別案子如龍崎案在專屬 YAML 裡手動補過，尚未併入共通規則庫）",
+    "農業設施容許使用審查辦法",
+    "高雄市都市計畫土地使用分區管制規則§18附表一",
+    "縣市自訂可擴充層（各縣市地方自治條例，僅臺南市土資場已建）",
+]
 
 
 def _county_variants(name: str) -> list[str]:
@@ -113,12 +126,49 @@ def _per_site(sites, geom_fn) -> list[str]:
     return out
 
 
+# ★ 「反向」門檻方向的關鍵字提示（2026-08-06 建）——只是提示，不是判定，因為龍崎案
+#   曾經 YAML 已寫 反向:true 但引擎忽略、又曾在別處忘了寫。條號/備註含這些字樣時，
+#   跟目前的 反向 設定對照一下，兜不起來就在 log 印一行提醒人工核對。
+_CEILING_HINTS = ("以上應", "以上者", "以上實施", "累積")   # 逾門檻才觸發 → 該是 反向:true
+_FLOOR_HINTS = ("不得少於", "下限", "至少", "不得低於")     # 達門檻才符合 → 該是 反向:false/省略
+
+
+def _reverse_hint(item, rev, log):
+    text = f"{item.get('條號', '')} {item.get('備註', '')}"
+    ceiling = any(k in text for k in _CEILING_HINTS)
+    floor = any(k in text for k in _FLOOR_HINTS)
+    if ceiling and not rev:
+        log.append("    ⚠ 條號/備註含「逾門檻觸發」字樣但 反向 未設為 true，"
+                    "請核對此項是否該用 反向:true（例：環評40公頃以上）")
+    elif floor and rev:
+        log.append("    ⚠ 條號/備註含「下限/不得少於」字樣但 反向 設為 true，"
+                    "請核對此項門檻方向是否設反了")
+
+
 def run_item(item, site_gdf, su, tot, sites, county, log, results):
     typ = item["類型"]
     name = item.get("名稱", item.get("id", "?"))
     ref = item.get("條號", "")
     mark = item.get("級別", "△")
     rec = {"名稱": name, "條號": ref, "類型": typ, "級別": mark}
+
+    # ★ 翻轉條件（2026-08-06 建，安定六塊寮段案教訓）：機械判定容易停在條文表面，
+    #   有已知但書/例外款的項目在 YAML 加這個欄位，不管判定結果是什麼都提醒查核，
+    #   避免像 sfa_zone 那樣「條文原則╳，但有行政院核定計畫時該改判△」被漏讀。
+    if item.get("翻轉條件"):
+        log.append(f"  ⚠ {name}（{ref}）有已知翻轉條件，開案先確認是否成立："
+                   f"{item['翻轉條件']}")
+
+    # ★ 2026-08-06 修：note 型（純敘述提醒，無圖資可套疊，判斷已寫在備註裡）先前
+    #   不是文件列的 7 種類型之一，YAML 卻有 4 項在用（社福設施_臺南市.yaml），
+    #   之前會落到最後 overlay/distance 的通用分支、印成「找不到圖層檔案」——
+    #   看起來像資料缺失，實際上是條款本身就沒有可套疊的圖資，是引擎沒認得這個型別。
+    #   後壁南海段社福案重跑時發現（2026-08-06）。
+    if typ == "note":
+        log.append(f"  ・{name}（{ref}）：{str(item.get('備註', '')).strip()}")
+        rec["判定"] = mark
+        results.append(rec)
+        return
 
     if typ == "inquiry":
         log.append(f"  ？ {name}（{ref}）：圖資查不到 → 須函詢 {item.get('機關', '主管機關')}"
@@ -141,6 +191,15 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
                 log.append(f"  ✗ {name}（{ref}）：{len(hit)} 筆 {fld} 含「{val}」"
                            f"（地號 {sorted(hit['地號'].astype(str))}）→ {mark}")
                 rec["判定"] = mark
+                # ★ 逐案場拆分（2026-08-06 建）：多案場批次跑時，overlay 型早就有
+                #   逐案場面積，attribute 型之前只知道「整批有沒有」、不知道是哪個
+                #   案場，多案場案子要另外人工比對。用地號跟 sites 空間relate回去。
+                persite_hit = _per_site(sites, lambda sid, g: sid
+                                        if hit.geometry.intersects(g).any() else None)
+                persite_hit = [s for s in persite_hit if s]
+                if persite_hit:
+                    log.append(f"      涉及案場：{persite_hit}")
+                    rec["逐案場"] = persite_hit
             else:
                 log.append(f"  ✓ {name}（{ref}）：無 {fld} 含「{val}」")
                 rec["判定"] = "未觸及"
@@ -168,6 +227,12 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
         rec["判定"] = mark if v == "觸及" else ("未觸及" if v == "未觸及" else "須人工確認")
         rec["聚落"] = r
         log.append(f"    → {name}：{rec['判定']}")
+        # ★ 逐案場拆分（2026-08-06 建）：settlement_check.check() 本來就算了
+        #   逐案場（見 r["逐案場"]），只是原本沒印到 log/txt，只藏在 json 裡，
+        #   多案場批次跑時人工要另外翻 json 才知道是哪個案場觸及。改成順手印出。
+        for sid, sr in r.get("逐案場", {}).items():
+            if sr.get("判定") == "觸及":
+                log.append(f"      案場 {sid}：觸及")
         results.append(rec)
         return
 
@@ -187,6 +252,33 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
             rec["判定"] = "未觸及"
         rec["設施"] = r
         log.append(f"    → {name}：{rec['判定']}")
+        # ★ 逐案場拆分（2026-08-06 建）：只在整案已觸及時才逐案場查，避免對每個
+        #   案場都打一次國土測繪中心 API（多案場批次案無謂增加外部呼叫次數）。
+        if hit and sites is not None:
+            persite_hit = []
+            for _, s in sites.iterrows():
+                rs = nf.nearest(s.geometry, eps_list, dist, log)
+                if any(v["判定"] == "觸及" for v in rs.values()):
+                    persite_hit.append(s["site_id"])
+            if persite_hit:
+                log.append(f"      涉及案場：{persite_hit}")
+                rec["逐案場"] = persite_hit
+        results.append(rec)
+        return
+
+    if typ == "osm_distance":
+        # OSM Overpass 單類別距離查詢（2026-08-06 建）——目前僅「營區」：機密設施無
+        # 公開權威圖資，NLSC 環域 API 也不涵蓋（見 api_distance），OSM 群眾協作資料
+        # 可當參考距離，但**判定恆為須函詢**，不因 OSM 查無就判未觸及（見
+        # osm_sensitive_poi.nearest_category docstring）。
+        import osm_sensitive_poi as osp
+        dist = float(item.get("距離_m", 200))
+        category = item.get("OSM類別", "營區")
+        log.append(f"  ・{name}（{ref}）：門檻 {dist:,.0f}m（OSM 參考距離，非官方確認）")
+        r = osp.nearest_category(su, category, dist, log)
+        rec["判定"] = "須函詢"
+        rec["OSM參考"] = r
+        log.append(f"    → {name}：須函詢（OSM 僅供參考，見上）")
         results.append(rec)
         return
 
@@ -207,6 +299,7 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
         #     各種面積上限。沒有這個開關時只能寫成前者，輸出會印成「✓ 符合」，
         #     與「逾門檻＝應辦環評」的真意完全相反（本案實踩，YAML 已寫 反向 但引擎忽略）。
         rev = bool(item.get("反向"))
+        _reverse_hint(item, rev, log)
         ok = (ha < th) if rev else (ha >= th)
         how = f"逾 {th} 公頃即觸發" if rev else f"門檻 {th} 公頃"
         res = ("未逾門檻" if ok else f"**逾門檻**→{mark}") if rev else \
@@ -322,16 +415,42 @@ def main():
     if enclave_note:
         log.append(enclave_note)
     log.append(f"檢核清單：{a.checklist}\n")
+    loaded_cfgs = {}
     for cl in a.checklist:
         p = os.path.join(CFG_DIR, cl + ".yaml")
         if not os.path.exists(p):
             raise SystemExit(f"找不到檢核清單：{p}")
         cfg = yaml.safe_load(io.open(p, encoding="utf-8"))
+        loaded_cfgs[cl] = cfg
         log.append(f"== {cfg.get('用途', cl)} ==（{cl}.yaml"
                    f"{('，' + cfg['法源版本']) if cfg.get('法源版本') else ''}）")
+        # ★ 法源版本陳舊警告（2026-08-06 建，仿圖資的「陳舊警告_年」機制）：
+        #   圖資有版本過舊提醒，法條文字本身（門檻數字/條號）修法後卻沒有——
+        #   全靠「查了新法規？」這句人工觸發。YAML 加 法源查核日期 才能提醒。
+        chk_date = cfg.get("法源查核日期")
+        if chk_date:
+            try:
+                d = datetime.date.fromisoformat(str(chk_date))
+                age_y = (datetime.date.today() - d).days / 365.25
+                warn_y = float(cfg.get("法源陳舊警告_年", 2))
+                if age_y > warn_y:
+                    log.append(f"    ⚠ 法源查核日期 {d} 已逾 {warn_y:.0f} 年，"
+                               f"建議核對母法/要點是否已修正")
+            except ValueError:
+                log.append(f"    ⚠ 法源查核日期格式錯誤：{chk_date}（應為 YYYY-MM-DD）")
+        else:
+            log.append("    ？ 本清單未標 法源查核日期，無法判斷法源是否過舊")
         for item in cfg.get("檢核項目", []):
             run_item(item, site, su, tot, sites, county, log, results)
         log.append("")
+
+    # ★ 搭配清單提醒（2026-08-06 建，社福案漏帶 _共通_農業用地變更 的假設情境）：
+    #   只提醒不擋——某些情境確實只想跑局部清單。
+    for cl, cfg in loaded_cfgs.items():
+        for need in cfg.get("搭配清單", []) or []:
+            if need not in a.checklist:
+                log.append(f"⚠ {cl}.yaml 建議搭配 {need} 一起跑，本次未帶入"
+                           f"（若為刻意省略可忽略）")
 
     # 總結
     bad = [r for r in results if r.get("判定") in ("╳",)]
@@ -344,9 +463,15 @@ def main():
     if bad:
         log.append("  ★ 有 ╳ 級障礙——依評估順序規則 A1，先解決或確認翻轉條件，"
                    "再投入其他細項檢核")
+    log.append("")
+    log.append("  法令檢核規則庫已知缺口（若本案用途/縣市剛好落在這幾類，規則庫查不到"
+               "不代表沒有規定，須另行查證）：")
+    for gap in RULEBASE_KNOWN_GAPS:
+        log.append(f"    ・{gap}")
 
     txt = "\n".join(log)
     print(txt)
+    os.makedirs(out_dir, exist_ok=True)
     io.open(os.path.join(out_dir, "禁止事由檢核.txt"), "w",
             encoding="utf-8").write(txt)
     io.open(os.path.join(out_dir, "禁止事由檢核.json"), "w",
