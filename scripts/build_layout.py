@@ -24,15 +24,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import overlay_placement as op
 
+# 圖例鎖右下、離圖框邊界的內縮距（使用者定案 2026-08-19：5mm；有別於其他疊圖的 3mm）
+LEGEND_INSET_MM = 5.0
+
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsGeometry,
     QgsLayerTree,
+    QgsLayoutItem,
     QgsLayoutItemLabel,
     QgsLayoutItemLegend,
     QgsLayoutItemMap,
     QgsLayoutItemPicture,
     QgsLayoutItemScaleBar,
+    QgsLayoutPoint,
     QgsLayoutSize,
     QgsLegendRenderer,
     QgsLegendStyle,
@@ -83,16 +88,16 @@ def _font_label(layout, text, x, y, w, h, size, bold=False, color=None,
 
 
 def corner_rect_mm(corner: str, wmm: float, hmm: float,
-                   inset: float = op.OVERLAY_INSET) -> tuple:
-    """疊圖框貼地圖某頁角 → 版面 mm 矩形 (x, y, w, h)。"""
+                   inset: float = op.OVERLAY_INSET2) -> tuple:
+    """疊圖框貼地圖某頁角 → 版面 mm 矩形 (x, y, w, h)。maxmap v2 用近滿版 MAP2_* 框。"""
     if "R" in corner:
-        x = op.MAP_X + op.MAP_W - inset - wmm
+        x = op.MAP2_X + op.MAP2_W - inset - wmm
     else:
-        x = op.MAP_X + inset
+        x = op.MAP2_X + inset
     if "B" in corner:
-        y = op.MAP_Y + op.MAP_H - inset - hmm
+        y = op.MAP2_Y + op.MAP2_H - inset - hmm
     else:
-        y = op.MAP_Y + inset
+        y = op.MAP2_Y + inset
     return (x, y, wmm, hmm)
 
 
@@ -105,21 +110,23 @@ def parcel_note(section: str, first_landno: str, total: int, extra_sections: int
 # ---------------------------------------------------------------------------
 # 疊圖群組
 # ---------------------------------------------------------------------------
-def _add_scale_north(layout, m, corner, scale):
-    """右下(或避讓後角落)：半透明白底框 ＋ 指北針 ＋ 比例尺文字 ＋ 比例尺。"""
-    name, w, h = op.OVERLAY_SCALE_NORTH
-    x, y, w, h = corner_rect_mm(corner, w, h)
-    # 底框（先加，位於底層）
-    _font_label(layout, "", x, y, w, h, 1, bg=True)
+def _add_scale_north(layout, m, scale, opaque=False):
+    """左上（YAML 定案，固定）：半透明白底框 ＋ 指北針 ＋ 比例尺文字 ＋ 比例尺。
+    opaque=True 時底框改高不透明（避讓失敗、框壓到基地時提升可讀性）。"""
+    name, w, h = op.NORTH_SCALE_BOX
+    x, y, w, h = corner_rect_mm("TL", w, h)
+    bx = _font_label(layout, "", x, y, w, h, 1, bg=True)
+    if opaque:
+        bx.setBackgroundColor(QColor(255, 255, 255, 245))
     # 指北針（框內左上）
     na = QgsLayoutItemPicture(layout)
     na.setPicturePath(NORTH_SVG)
-    na.attemptSetSceneRect(QRectF(x + 3, y + 3, 9, 13))
+    na.attemptSetSceneRect(QRectF(x + 2, y + 2, 8, 11))
     na.setLinkedMap(m)
     layout.addLayoutItem(na)
     # 比例尺文字（指北針右側）
     _font_label(layout, f"比例尺　1 / {scale:,}".replace(",", " "),
-                x + 15, y + 3, w - 17, 6, 10, bold=True)
+                x + 13, y + 2, w - 15, 6, 9, bold=True)
     # 比例尺（框內下半）
     sb = QgsLayoutItemScaleBar(layout)
     sb.setStyle("Single Box")
@@ -133,17 +140,17 @@ def _add_scale_north(layout, m, corner, scale):
         sb.setTextFormat(fmt)
     except Exception:
         pass
-    sb.attemptSetSceneRect(QRectF(x + 3, y + 12, w - 6, 12))
+    sb.attemptSetSceneRect(QRectF(x + 2, y + 10, w - 4, 10))
     layout.addLayoutItem(sb)
 
 
-def _add_loc_parcel(layout, corner, location, parcel_note_text):
-    """左下(或避讓後角落)：半透明白底框 ＋ 位置 ＋ 涵蓋地號(收合)。"""
-    name, w, h = op.OVERLAY_LOC_PARCEL
-    x, y, w, h = corner_rect_mm(corner, w, h)
+def _add_loc_parcel(layout, location, parcel_note_text):
+    """左下（YAML 定案，固定，選用）：半透明白底框 ＋ 位置 ＋ 涵蓋地號(收合)。"""
+    name, w, h = op.LOC_PARCEL_BOX
+    x, y, w, h = corner_rect_mm("BL", w, h)
     _font_label(layout, "", x, y, w, h, 1, bg=True)
     _font_label(layout, f"位置：{location}", x + 3, y + 2, w - 6, 6, 9, bold=True)
-    _font_label(layout, f"涵蓋地號：{parcel_note_text}", x + 3, y + 10, w - 6, 8, 9)
+    _font_label(layout, f"涵蓋地號：{parcel_note_text}", x + 3, y + 9, w - 6, 6, 9)
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +174,7 @@ def build_sheet_layout(project, name, layers, legend_layers,
         inter = base_geom.intersection(rect)
         return 0.0 if inter.isEmpty() else inter.area()
 
-    placement = op.place_overlays(intersect_fn, bbox)
+    placement = op.place_fixed(intersect_fn, bbox)
     scale, extent = placement.scale, placement.extent
     L, R, B, T = extent
 
@@ -185,17 +192,18 @@ def build_sheet_layout(project, name, layers, legend_layers,
     m.setBackgroundEnabled(True)
     m.setBackgroundColor(QColor(255, 255, 255))
     m.setFrameEnabled(True)
-    m.attemptSetSceneRect(QRectF(op.MAP_X, op.MAP_Y, op.MAP_W, op.MAP_H))
+    m.attemptSetSceneRect(QRectF(op.MAP2_X, op.MAP2_Y, op.MAP2_W, op.MAP2_H))
     m.setExtent(QgsRectangle(L, B, R, T))
     m.setScale(float(scale))
     layout.addLayoutItem(m)
 
-    # 3) 圖面加註橫幅（如：都市土地無使用地編定），置地圖上緣置中，避開角落疊圖
+    # 3) 圖面加註橫幅（如：都市土地無使用地編定），置地圖上緣置中，避開左上疊圖框
     if map_overlay:
-        _font_label(layout, map_overlay, op.MAP_X + 10, op.MAP_Y + 4, op.MAP_W - 20, 10,
-                    13, bold=True, color=(200, 0, 0), bg=True, halign=Qt.AlignHCenter)
+        _font_label(layout, map_overlay, op.MAP2_X + 70, op.MAP2_Y + 4,
+                    op.MAP2_W - 140, 10, 13, bold=True, color=(200, 0, 0), bg=True,
+                    halign=Qt.AlignHCenter)
 
-    # 4) 右欄圖例（依地圖範圍動態過濾；長標籤依「／」換行）
+    # 4) 圖例：右下方框（YAML 定案，取代右欄）；依地圖範圍動態過濾、長標籤依「／」換行
     leg = QgsLayoutItemLegend(layout)
     leg.setLinkedMap(m)
     leg.setAutoUpdateModel(False)
@@ -241,22 +249,42 @@ def build_sheet_layout(project, name, layers, legend_layers,
                 leg.setStyleFont(style, f)
             except Exception:
                 pass
-    leg.attemptSetSceneRect(QRectF(op.LEGEND_X, op.LEGEND_Y, op.LEGEND_W, op.LEGEND_H))
+    # 右下白框（半透明；框壓到基地時提高不透明度）＋細灰框；**fit-to-content**：
+    # 依圖例內容縮放(adjustBoxSize)，再依實際尺寸把右下角貼齊地圖右下角(留 inset)。
+    leg.setBackgroundEnabled(True)
+    leg.setBackgroundColor(QColor(255, 255, 255, 245 if "BR" in placement.assign else 210))
+    try:
+        leg.setFrameEnabled(True)
+        leg.setFrameStrokeColor(QColor(128, 128, 128))
+    except Exception:
+        pass
+    try:
+        leg.setResizeToContents(True)
+    except Exception:
+        pass
+    # 先給右下暫置錨點，加入版面後縮到內容大小，再依實際尺寸重新貼齊右下角。
+    lx, ly, lw0, lh0 = corner_rect_mm("BR", op.LEGEND_BOX[1], op.LEGEND_BOX[2])
+    leg.attemptSetSceneRect(QRectF(lx, ly, lw0, lh0))
     layout.addLayoutItem(leg)
+    try:
+        leg.adjustBoxSize()
+        # 圖例框「右下角」直接釘在離圖框右下 5mm（使用者定案 2026-08-19，參考圖）。
+        # 用 LowerRight 參考點＋attemptMove，不依賴 sizeWithUnits 反推左上角——先前
+        # 反推做法會因縮框後尺寸取值不準，讓圖例浮在圖框中間偏內側（右/下各留約 20mm）。
+        leg.setReferencePoint(QgsLayoutItem.LowerRight)
+        leg.attemptMove(QgsLayoutPoint(
+            op.MAP2_X + op.MAP2_W - LEGEND_INSET_MM,
+            op.MAP2_Y + op.MAP2_H - LEGEND_INSET_MM,
+            QgsUnitTypes.LayoutMillimeters))
+    except Exception:
+        pass
 
-    # 5) 角落疊圖（或無法避讓時退回右欄底部）
-    if placement.outside:
-        # 病態案：基地幾乎填滿圖框，四角皆會遮基地 → 資訊改置右欄圖例下方，不強遮地圖
-        _font_label(layout, f"比例尺　1 / {scale:,}".replace(",", " "),
-                    op.LEGEND_X, op.LEGEND_Y + op.LEGEND_H - 24, op.LEGEND_W, 6, 9, bold=True)
-        if show_loc_parcel:
-            _font_label(layout, f"位置：{location}\n涵蓋地號：{parcel_note_text}",
-                        op.LEGEND_X, op.LEGEND_Y + op.LEGEND_H - 16, op.LEGEND_W, 16, 8)
-    else:
-        a = placement.assign
-        _add_scale_north(layout, m, a[op.OVERLAY_SCALE_NORTH[0]], scale)
-        if show_loc_parcel:
-            _add_loc_parcel(layout, a[op.OVERLAY_LOC_PARCEL[0]], location, parcel_note_text)
+    # 5) 固定疊圖（YAML 定案）：左上指北針/比例尺、左下位置/涵蓋地號（選用）。
+    #    place_fixed 已以退比例尺盡量避讓；placement.assign 內的角落＝仍壓到基地者，
+    #    提高該框底色不透明度（不移位，使用者定案「固定位置」）。
+    _add_scale_north(layout, m, scale, opaque=("TL" in placement.assign))
+    if show_loc_parcel:
+        _add_loc_parcel(layout, location, parcel_note_text)
 
     project.layoutManager().addLayout(layout)
     return layout, placement

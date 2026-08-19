@@ -42,7 +42,8 @@ from PIL import Image, ImageDraw
 
 __all__ = [
     "Inches", "Pt", "Emu", "PP_ALIGN", "RGBColor",
-    "FONT", "BLACK", "RED", "GREY", "HDR", "BLUE", "W", "H",
+    "FONT", "FONT_HEAVY", "FONT_SEMI", "BLACK", "RED", "TOPIC", "ACCENT",
+    "CAUTION", "GREY", "HDR", "BORDER", "BLUE", "W", "H",
     "PIC_L", "PIC_T", "PIC_W", "COL_L", "COL_W", "TBL_W", "TBL_SZ",
     "LEGEND", "SUM_L", "SUM_W", "SUM_T", "SUM_COLW", "SUM_SZ", "SUM_HDR",
     "SUM_COLW_1SITE", "SUM_HDR_1SITE",
@@ -50,18 +51,26 @@ __all__ = [
     "table", "pic", "sum_page", "save",
 ]
 
-FONT = "微軟正黑體"
+# ── 樣式 Token（訓練專案「簡報版面設計規範.yaml」定為權威，2026-08-19）──────────
+# 字型：思源宋體家族（襯線），取代舊 v1 的微軟正黑體。
+FONT = "思源宋體"                    # 內文/表格預設（沿用變數名 FONT 以相容各案 build_deck）
+FONT_HEAVY = "思源宋體 Heavy"        # 頁首主標、封面案名
+FONT_SEMI = "思源宋體 SemiBold"      # 頁首副標
 BLACK = RGBColor(0, 0, 0)
-RED = RGBColor(0xC0, 0, 0)
+RED = RGBColor(0xC0, 0, 0)            # 缺圖警告等
+TOPIC = RGBColor(0xA6, 0x51, 0x49)   # 頁首副標（磚紅，YAML section_topic_label.default）
+ACCENT = RGBColor(0x4A, 0x8C, 0x7A)  # 頁首色條（灰綠，case_accent；逐案可於 build_deck 覆寫）
+CAUTION = RGBColor(0xE9, 0x45, 0x41) # 提醒紅字（YAML caution_text）
 GREY = RGBColor(0x80, 0x80, 0x80)
-HDR = RGBColor(0xE7, 0xE7, 0xE7)
-BLUE = RGBColor(0x1F, 0x4E, 0x79)
+HDR = RGBColor(0xE7, 0xE6, 0xE6)     # 表頭淺灰（YAML table_header_fill）
+BORDER = "808080"                     # 表格框線色（YAML table_border，約 0.75pt）
+BLUE = RGBColor(0x1F, 0x38, 0x64)    # 封面雙線（YAML cover_footer_line）
 W, H = Inches(13.333), Inches(7.5)
 
-# 內頁版式（2026-07-29 使用者手改定案：大圖＋窄左欄，左欄與圖垂直居中）
-PIC_L, PIC_T, PIC_W = Inches(4.93), Inches(1.28), Inches(8.20)
-COL_L, COL_W = Inches(0.55), Inches(4.24)
-TBL_W = Inches(3.97)
+# 內頁版式（YAML content_split_page 定為權威：左欄較寬靠左、右圖更寬更靠左、頂到頁首下）
+PIC_L, PIC_T, PIC_W = Inches(4.30), Inches(1.00), Inches(8.90)
+COL_L, COL_W = Inches(0.12), Inches(4.00)
+TBL_W = Inches(3.90)
 TBL_SZ = 10
 
 LEGEND = "○ 具可行性　　△ 需經後續作業／審議認定　　╳ 不具可行性　　－ 非此法規之項目"
@@ -154,22 +163,19 @@ def init(case_dir: str, out_name: str, img_subdir: str = "圖檔_maxmap",
     _here = case_dir
     _img = os.path.join(case_dir, img_subdir)
     _out = os.path.join(case_dir, out_name)
-    _grid = _grid_png(case_dir)
+    _grid = None  # YAML 定案：純白底，不再用虛線網格 PNG
     _prs = Presentation()
     _prs.slide_width, _prs.slide_height = W, H
     _blank = _prs.slide_layouts[6]
 
 
 def _bg(slide):
-    slide.shapes.add_picture(_grid, 0, 0, width=W, height=H)
-    fr = slide.shapes.add_shape(1, Inches(0.14), Inches(0.14), W - Inches(0.28),
-                                H - Inches(0.28))
-    fr.fill.background(); fr.line.color.rgb = BLACK; fr.line.width = Pt(1.25)
-    fr.shadow.inherit = False
+    # YAML 定案：底色純白、無整頁外框、無網格底。頁首下方的黑分隔線由 header() 繪製。
+    return
 
 
 def new():
-    """新增一頁（虛線網格底＋黑外框）。"""
+    """新增一頁（純白底，YAML 定案）。"""
     s = _prs.slides.add_slide(_blank)
     _bg(s)
     return s
@@ -194,7 +200,7 @@ def tb(slide, l, t, w, h, txt, size=14, bold=False, color=BLACK, align=PP_ALIGN.
     return box
 
 
-def set_bullet(p, char="・", hang=0.22):
+def set_bullet(p, char="■", hang=0.22):
     """PowerPoint 項目符號功能（規則13）。buFont/buChar 須排在 a:defRPr 之前。"""
     pPr = p._p.get_or_add_pPr()
     pPr.set("marL", str(Emu(Inches(hang))))
@@ -216,34 +222,80 @@ def bullets(slide, l, t, w, items, size=12, h=None):
     return box
 
 
-def header(slide, main, sub, page):
-    tb(slide, Inches(0.55), Inches(0.42), Inches(5.2), Inches(0.5), main, 24, True, BLACK)
+def _retype(box, name):
+    """把 box 內所有 run 的字型改為 name（tb() 預設用 FONT，頁首/封面需改 Heavy/SemiBold）。"""
+    for p in box.text_frame.paragraphs:
+        for r in p.runs:
+            r.font.name = name
+    return box
+
+
+def header(slide, main, sub, page, chapter=None):
+    """頁首（YAML header_bar 定案）：[章節數字]＋灰綠色條＋思源宋體 Heavy 主標(44pt)
+    ＋磚紅 SemiBold 副標(28pt)＋黑分隔線(0.75pt)＋右上頁碼。
+
+    chapter：僅「一級主題轉換」的章首頁才給（壹/貳/參…）；同章子頁不重複顯示章節字，
+    只換副標（YAML writing_conventions 末條）。留白時只畫色條＋主標，維持識別。"""
+    if chapter:
+        cb = tb(slide, Inches(0.0), Inches(0.056), Inches(1.014), Inches(0.841),
+                chapter, 44, True, BLACK, PP_ALIGN.CENTER)
+        cb.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        _retype(cb, FONT_HEAVY)
+    # 灰綠色條
+    bar = slide.shapes.add_shape(1, Inches(0.915), Inches(0.108), Inches(0.139),
+                                 Inches(0.736))
+    bar.fill.solid(); bar.fill.fore_color.rgb = ACCENT
+    bar.line.fill.background(); bar.shadow.inherit = False
+    # 主標（Heavy 44pt，垂直置中於頁首帶）
+    mt = tb(slide, Inches(1.13), Inches(0.056), Inches(6.2), Inches(0.841), main, 44,
+            True, BLACK)
+    mt.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    _retype(mt, FONT_HEAVY)
+    # 副標（SemiBold 28pt 磚紅，緊接主標右側）
     if sub:
-        tb(slide, Inches(0.55) + Inches(0.42 * len(main)), Inches(0.52), Inches(5.0),
-           Inches(0.4), sub, 16, True, RED)
-    ln = slide.shapes.add_shape(1, Inches(0.55), Inches(1.02), W - Inches(1.1), Pt(1.2))
+        sub_l = Inches(min(1.13 + 0.62 * len(main) + 0.18, 8.6))
+        st = tb(slide, sub_l, Inches(0.294), Inches(13.0) - sub_l, Inches(0.572), sub,
+                28, True, TOPIC)
+        st.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        _retype(st, FONT_SEMI)
+    # 分隔線（黑 0.75pt，YAML L0.121 W12.891 T0.866）
+    ln = slide.shapes.add_shape(1, Inches(0.121), Inches(0.866), W - Inches(0.442),
+                                Pt(0.75))
     ln.fill.solid(); ln.fill.fore_color.rgb = BLACK; ln.line.fill.background()
     ln.shadow.inherit = False
-    tb(slide, W - Inches(1.0), Inches(0.45), Inches(0.5), Inches(0.3), str(page), 12,
-       False, GREY, PP_ALIGN.RIGHT)
+    # 頁碼（右上，Heavy）
+    pn = tb(slide, W - Inches(1.1), Inches(0.295), Inches(0.9), Inches(0.4), str(page),
+            16, False, BLACK, PP_ALIGN.RIGHT)
+    _retype(pn, FONT_HEAVY)
 
 
 def cover(line1, line2, line3, date_str,
-          sizes=(32, 30, 34)):
-    """封面：三行置中案名＋雙藍線＋日期（v1 定案樣式）。回傳 slide。"""
+          sizes=(32, 30, 34),
+          company=("衍古開發顧問有限公司", "Y.KU Planning Intl. Co.")):
+    """封面（YAML cover 定案）：三行置中案名（思源宋體 Heavy）＋公司識別＋雙藍線(1F3864,
+    2.5+1.0pt)＋日期。company=None 可關閉公司識別。回傳 slide。"""
     s = new()
-    tb(s, Inches(1.2), Inches(2.35), W - Inches(2.4), Inches(0.7), line1, sizes[0], True,
-       BLACK, PP_ALIGN.CENTER)
-    tb(s, Inches(1.2), Inches(3.12), W - Inches(2.4), Inches(0.7), line2, sizes[1], True,
-       BLACK, PP_ALIGN.CENTER)
-    tb(s, Inches(1.2), Inches(3.95), W - Inches(2.4), Inches(0.8), line3, sizes[2], True,
-       BLACK, PP_ALIGN.CENTER)
-    for y, wd in [(6.30, 2.5), (6.40, 1.0)]:
-        ln = s.shapes.add_shape(1, Inches(1.6), Inches(y), W - Inches(3.2), Pt(wd))
+    for txt, sz, top in [(line1, sizes[0], 2.20), (line2, sizes[1], 2.98),
+                         (line3, sizes[2], 3.82)]:
+        _retype(tb(s, Inches(0.0), Inches(top), W, Inches(0.75), txt, sz, True, BLACK,
+                   PP_ALIGN.CENTER), FONT_HEAVY)
+    # 公司識別（雙線上方置中）
+    if company:
+        cc = tb(s, Inches(0.0), Inches(6.00), W, Inches(0.86), list(company), 16, True,
+                BLACK, PP_ALIGN.CENTER)
+        ps = cc.text_frame.paragraphs
+        for r in ps[0].runs:
+            r.font.name = FONT_HEAVY
+        for p in ps[1:]:
+            for r in p.runs:
+                r.font.name = "Times New Roman"; r.font.bold = False; r.font.size = Pt(12)
+    # 封面雙藍線（YAML footer_lines：左0.38 寬~12.6）
+    for y, wd in [(6.94, 2.5), (6.99, 1.0)]:
+        ln = s.shapes.add_shape(1, Inches(0.38), Inches(y), W - Inches(0.76), Pt(wd))
         ln.fill.solid(); ln.fill.fore_color.rgb = BLUE; ln.line.fill.background()
         ln.shadow.inherit = False
-    tb(s, Inches(1.2), Inches(6.62), W - Inches(2.4), Inches(0.4), date_str, 14,
-       False, BLACK, PP_ALIGN.CENTER)
+    tb(s, Inches(0.0), Inches(7.02), W, Inches(0.4), date_str, 16, False, BLACK,
+       PP_ALIGN.CENTER)
     return s
 
 
@@ -288,7 +340,7 @@ def table(slide, l, t, w, rows, col_w=None, size=11, header_row=True, ncol=None,
             for tag in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
                 el = tcPr.makeelement(qn(tag), {"w": "9525", "cap": "flat"})
                 fill = el.makeelement(qn("a:solidFill"), {})
-                clr = fill.makeelement(qn("a:srgbClr"), {"val": "BFBFBF"})
+                clr = fill.makeelement(qn("a:srgbClr"), {"val": BORDER})
                 fill.append(clr); el.append(fill); tcPr.append(el)
     return gf
 
@@ -305,17 +357,18 @@ def pic(slide, name, l, t, w):
     slide.shapes.add_picture(p, l, t, width=w, height=Emu(int(w * ratio)))
 
 
-def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None):
+def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None, chapter=None):
     """綜合說明總表頁（預設 7 欄 S001/S002 拆欄、12pt、圖例置標題右側）。
     doubt_row：執行疑義列索引——合併法規～情形數欄、分項走項目符號。
     colw：自訂欄寬（欄數由 rows[0] 長度決定）。單一案場案件用 SUM_COLW_1SITE
     ＋ SUM_HDR_1SITE（6 欄：情形欄加寬、多一欄「翻轉條件／須辦事項」），
     因為把 S002 欄留空只會浪費 2.9 吋版面。
     doubt_to：疑義列合併終點欄索引，預設 欄數-3（7 欄制留兩個判定欄）。"""
-    s = new(); header(s, "綜合說明", sub, page)
-    # 圖例框寬須 ≤ 版面右緣：4.47+8.60=13.07 < 13.33（原 9.00 會溢出 0.14"，
-    # 目視雖未切字但形狀跑出畫布，2026-07-31 修正）
-    tb(s, Inches(4.47), Inches(0.67), Inches(8.60), Inches(0.3), LEGEND, 11, False, GREY)
+    s = new(); header(s, "綜合說明", sub, page, chapter)
+    # 圖例置分隔線(0.866)下方一列、靠右（YAML 頁首改大後，原置頁首右側會與 28pt 副標
+    # 重疊，2026-08-19 改）。底緣 ~1.16" < 表格起點 SUM_T 1.20"，不壓表。
+    tb(s, SUM_L, Inches(0.92), SUM_W, Inches(0.24), LEGEND, 11, False, GREY,
+       PP_ALIGN.RIGHT)
     ncol = len(rows[0])
     gf = table(s, SUM_L, top or SUM_T, SUM_W, rows,
                col_w=colw or SUM_COLW, size=SUM_SZ, ncol=ncol)

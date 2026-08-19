@@ -29,6 +29,18 @@ OVERLAY_SCALE_NORTH = ("scale_north", 66.0, 26.0)   # 指北針＋比例尺文�
 OVERLAY_LOC_PARCEL = ("loc_parcel", 95.0, 20.0)     # 位置＋涵蓋地號（收合成一行）
 OVERLAY_INSET = 2.0                                  # 疊圖框距地圖內邊的留白（mm）
 
+# ── 訓練專案「地圖出圖版面規範.yaml」定案版面（maxmap v2，2026-08-19）─────────────
+# 附圖版面：地圖近滿版、指北針/比例尺固定「左上」、圖例固定「右下」方框（取代右欄）。
+# 舊常數（MAP_X.. / LEGEND_X.. / OVERLAY_* / place_overlays）全數保留，供單元測試與
+# 舊 compact 相容；build_layout 改用下列 MAP2_* + place_fixed()。
+MAP2_X, MAP2_Y, MAP2_W, MAP2_H = 5.0, 5.0, 287.0, 200.0   # 近滿版地圖框（右緣292/下緣205）
+OVERLAY_INSET2 = 3.0                                       # in-map 疊圖框距地圖內邊留白
+NORTH_SCALE_BOX = ("north_scale", 62.0, 22.0)   # 左上：指北針＋比例尺文字＋比例尺
+LEGEND_BOX = ("legend", 56.0, 58.0)             # 右下：圖例白框（高為上限，內容較短時留白）
+LOC_PARCEL_BOX = ("loc_parcel", 95.0, 16.0)     # 左下：位置＋涵蓋地號（選用）
+# 固定角落對照（YAML 定案；place_fixed 用來算各框的地面矩形以判避讓）
+FIXED_CORNER = {"north_scale": "TL", "legend": "BR", "loc_parcel": "BL"}
+
 # 比例尺階梯：就近取整，超出最大值則進位到千位（與參考案 make_maps.py 一致）。
 SCALE_LEVELS = [500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000]
 
@@ -54,34 +66,44 @@ def next_scale(scale: int) -> int:
     return int(math.ceil((scale + 1) / 1000.0) * 1000)
 
 
-def compute_scale_extent(bbox: tuple, expand: float = 1.12) -> tuple[int, tuple]:
+def compute_scale_extent(bbox: tuple, expand: float = 1.12,
+                         map_w: float = None, map_h: float = None) -> tuple[int, tuple]:
     """基地 bbox → (比例尺, extent)。bbox=(minx,miny,maxx,maxy)。
-    先把 bbox 外擴 `expand`，取符合圖框長寬比的最小比例尺階梯，再以 bbox 中心置中。"""
+    先把 bbox 外擴 `expand`，取符合圖框長寬比的最小比例尺階梯，再以 bbox 中心置中。
+    map_w/map_h 未給時用舊 MAP_W/MAP_H（相容）；maxmap v2 由 place_fixed 帶入 MAP2_*。"""
+    mw = map_w or MAP_W
+    mh = map_h or MAP_H
     minx, miny, maxx, maxy = bbox
     w = max(maxx - minx, 30.0) * expand
     h = max(maxy - miny, 30.0) * expand
-    need = max(w / (MAP_W / 1000.0), h / (MAP_H / 1000.0))
+    need = max(w / (mw / 1000.0), h / (mh / 1000.0))
     scale = next((s for s in SCALE_LEVELS if s >= need), None)
     if scale is None:
         scale = int(math.ceil(need / 1000.0) * 1000)
-    return scale, extent_for(bbox, scale)
+    return scale, extent_for(bbox, scale, mw, mh)
 
 
-def extent_for(bbox: tuple, scale: int) -> tuple:
+def extent_for(bbox: tuple, scale: int, map_w: float = None,
+               map_h: float = None) -> tuple:
     """給定比例尺，回傳以 bbox 中心置中、符合圖框大小的 extent=(L,R,B,T)。"""
+    mw = map_w or MAP_W
+    mh = map_h or MAP_H
     minx, miny, maxx, maxy = bbox
-    half_w = MAP_W / 1000.0 * scale / 2.0
-    half_h = MAP_H / 1000.0 * scale / 2.0
+    half_w = mw / 1000.0 * scale / 2.0
+    half_h = mh / 1000.0 * scale / 2.0
     cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
     return (cx - half_w, cx + half_w, cy - half_h, cy + half_h)
 
 
 def corner_rect_ground(corner: str, wmm: float, hmm: float, extent: tuple,
-                       inset: float = OVERLAY_INSET) -> tuple:
+                       inset: float = OVERLAY_INSET, map_w: float = None,
+                       map_h: float = None) -> tuple:
     """疊圖框(mm，貼某頁角) → 地面矩形 (x1,y1,x2,y2)。"""
+    mw = map_w or MAP_W
+    mh = map_h or MAP_H
     L, R, B, T = extent
-    fx = (R - L) / MAP_W   # 地面公尺 / mm
-    fy = (T - B) / MAP_H
+    fx = (R - L) / mw   # 地面公尺 / mm
+    fy = (T - B) / mh
     if "R" in corner:
         x2 = R - inset * fx
         x1 = x2 - wmm * fx
@@ -140,3 +162,37 @@ def place_overlays(intersect_area_fn, bbox: tuple, overlays=None,
         zoomed = True
     # 四角始終壓基地（基地幾乎填滿圖框）：交呼叫端外置到右欄，不強行遮蓋。
     return Placement({}, scale, extent, zoomed, outside=True)
+
+
+def place_fixed(intersect_area_fn, bbox: tuple, boxes=None,
+                max_zoomout: int = 6, tol: float = 1e-6, expand: float = 1.12,
+                map_w: float = None, map_h: float = None) -> Placement:
+    """maxmap v2 固定版面（YAML 定案）：疊圖框位置固定（左上/右下/左下），不改角落。
+    保留避讓「儀下」：若基地落入任一固定框對應的地面矩形，退一級比例尺（基地縮小、
+    範圍變大→框內留白變多）重試，最多 `max_zoomout` 次；仍相交則接受並回報
+    outside=True（交呼叫端知悉，但仍照固定位置畫，不外移——使用者定案「固定位置」）。
+
+    boxes：[(corner, wmm, hmm), ...]，corner ∈ TL/TR/BL/BR。預設＝左上指北針比例尺框
+    ＋右下圖例框。assign 回傳 {corner: True} 表示該框最終仍壓到基地（供呼叫端提高底框
+    不透明度或記 05 清單備註）。"""
+    mw = map_w or MAP2_W
+    mh = map_h or MAP2_H
+    if boxes is None:
+        boxes = [(FIXED_CORNER["north_scale"], NORTH_SCALE_BOX[1], NORTH_SCALE_BOX[2]),
+                 (FIXED_CORNER["legend"], LEGEND_BOX[1], LEGEND_BOX[2])]
+    scale, extent = compute_scale_extent(bbox, expand=expand, map_w=mw, map_h=mh)
+    zoomed = False
+    collided = {}
+    for _ in range(max_zoomout + 1):
+        collided = {}
+        for corner, wmm, hmm in boxes:
+            x1, y1, x2, y2 = corner_rect_ground(corner, wmm, hmm, extent,
+                                                inset=OVERLAY_INSET2, map_w=mw, map_h=mh)
+            if intersect_area_fn(x1, y1, x2, y2) > tol:
+                collided[corner] = True
+        if not collided:
+            return Placement({}, scale, extent, zoomed, outside=False)
+        scale = next_scale(scale)
+        extent = extent_for(bbox, scale, mw, mh)
+        zoomed = True
+    return Placement(collided, scale, extent, zoomed, outside=bool(collided))
