@@ -13,7 +13,7 @@
       <category symbol="8" value="風景區" label="風景區" render="true" type="string" />
       <category symbol="9" value="國家公園區" label="國家公園區" render="true" type="string" />
       <category symbol="10" value="海域區" label="海域區" render="true" type="string" />
-      <category symbol="11" value="都市土地（使用分區另查）" label="都市土地（詳都市計畫分區圖例）" render="false" type="string" />
+      <category symbol="11" value="都市土地（使用分區另查）" label="都市土地（詳下方都市計畫分區圖例）" render="false" type="string" />
       <category symbol="12" value="" label="其他" render="false" type="string" />
     </categories>
     <symbols>
@@ -341,8 +341,8 @@
       </symbol>
       <symbol type="fill" alpha="1" force_rhr="0" clip_to_extent="1" name="12">
         <layer class="SimpleFill" enabled="1" locked="0" pass="0">
-          <prop v="225,225,225,255" k="color" />
-          <prop v="solid" k="style" />
+          <prop v="255,255,255,255" k="color" />
+          <prop v="no" k="style" />
           <prop v="35,35,35,0" k="outline_color" />
           <prop v="solid" k="outline_style" />
           <prop v="0.2" k="outline_width" />

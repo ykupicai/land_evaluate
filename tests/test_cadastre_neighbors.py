@@ -74,3 +74,27 @@ def test_section_name():
     assert cn._section_name("五魁", None) == "五魁段"
     assert cn._section_name("考試潭", "鹿寮") == "考試潭段鹿寮小段"
     assert cn._section_name("中山", float("nan")) == "中山段"
+
+
+def test_fetch_all_survives_one_failed_group(tmp_path, monkeypatch):
+    """單段查詢失敗不得阻斷其他成功段的合併輸出（2026-08-19 湖口祥湖段案）。
+
+    坑：fetch_all 迴圈裡 cmd_fetch 對 0 成功筆數會 raise SystemExit；若失敗段
+    （常見＝未登錄地段 9999-xxx，線上無此段名）排最後，未包 try 會讓迴圈後的
+    concat/寫檔整段沒跑到——前面成功段只留 _鄰地_<段>.shp、最終 鄰地.shp 沒產出。
+    """
+    good = (CO, TOWN, "祥湖段")
+    bad = (CO, TOWN, "未登錄地段")   # 排最後，重現原始崩潰順序
+    groups = {good: ["41", "42"], bad: ["9999-558"]}
+
+    def fake_cmd_fetch(a):
+        if a.section == "未登錄地段":
+            raise SystemExit("✖ 無任何成功筆數，未產出 shp")
+        gpd.GeoDataFrame(
+            {"地號": a.landnos, "geometry": [box(0, 0, 1, 1), box(1, 0, 2, 1)]},
+            crs=3826).to_file(str(Path(a.out) / f"{a.name}.shp"), engine="pyogrio")
+
+    monkeypatch.setattr(cn, "cmd_fetch", fake_cmd_fetch)
+    out_shp, merged = cn.fetch_all(groups, str(tmp_path))
+    assert Path(out_shp).exists(), "失敗段不得阻斷合併，鄰地.shp 必須產出"
+    assert len(merged) == 2 and set(merged["地號"]) == {"41", "42"}

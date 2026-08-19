@@ -167,7 +167,17 @@ def fetch_all(groups: dict, out_dir: str, name: str = "鄰地") -> tuple[str, "g
             county=county, town=town, section=section, landnos=landnos,
             version=None, no_owner=False, out=out_dir, name=tag)
         print(f"\n=== 發現 {county}{town}{section}：{len(landnos)} 筆鄰地，即時回填屬性 ===")
-        cmd_fetch(a)
+        # ★ 單段查詢失敗不得阻斷整體合併（2026-08-19 湖口祥湖段案實踩）：cmd_fetch 對
+        #   0 成功筆數會 raise SystemExit；若失敗段（常見＝「未登錄地段」9999-xxx，線上
+        #   無此段名）排在最後一組，未包 try 會讓迴圈後的 concat/寫檔整段沒跑到——
+        #   前面成功段只留分段 _鄰地_<段>.shp，最終 鄰地.shp 卻沒產出。改為逐段容錯。
+        try:
+            cmd_fetch(a)
+        except SystemExit as e:
+            print(f"  ⚠ {county}{town}{section} 查詢無成功筆數，略過此段、不阻斷合併（{e}）")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ {county}{town}{section} 查詢失敗，略過此段、不阻斷合併"
+                  f"（{type(e).__name__}: {e}）")
         shp = os.path.join(out_dir, f"{tag}.shp")
         if os.path.exists(shp):
             parts.append(gpd.read_file(shp, engine="pyogrio"))

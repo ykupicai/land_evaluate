@@ -95,6 +95,48 @@ def simple_fill_symbol(rgb: tuple[int, int, int]) -> ET.Element:
     return sym
 
 
+def special_purpose_symbol() -> ET.Element:
+    """特定目的事業用地：紅色底 ＋ 綠色 45° 斜線（2026-08-19 使用者定案）。
+
+    兩層 fill：下層 SimpleFill 紅（227,26,28），上層 LinePatternFill 綠斜線
+    （51,160,44、45°、間距 2.2mm、線寬 0.4mm）。斜線屬填色紋理，make_maps 的
+    strip_outlines 只剝 SimpleFill 外框、不動紋理，故圖上與圖例都會顯示；且是填色
+    非邊框，不會被鄰宗填色蓋掉、也不與基地地籍框混淆。"""
+    return ET.fromstring(
+        '<symbol type="fill" alpha="1" force_rhr="0" clip_to_extent="1">'
+        '<layer class="SimpleFill" enabled="1" locked="0" pass="0">'
+        '<prop v="227,26,28,255" k="color"/>'
+        '<prop v="solid" k="style"/>'
+        '<prop v="35,35,35,0" k="outline_color"/>'
+        '<prop v="solid" k="outline_style"/>'
+        '<prop v="0.2" k="outline_width"/>'
+        '<prop v="MM" k="outline_width_unit"/>'
+        '<prop v="bevel" k="joinstyle"/>'
+        '<prop v="0,0" k="offset"/>'
+        '<prop v="MM" k="offset_unit"/>'
+        '</layer>'
+        '<layer class="LinePatternFill" enabled="1" locked="0" pass="0">'
+        '<prop v="45" k="angle"/>'
+        '<prop v="51,160,44,255" k="color"/>'
+        '<prop v="2.2" k="distance"/>'
+        '<prop v="MM" k="distance_unit"/>'
+        '<prop v="0.4" k="line_width"/>'
+        '<prop v="MM" k="line_width_unit"/>'
+        '<prop v="0" k="offset"/>'
+        '<prop v="MM" k="offset_unit"/>'
+        '<symbol type="line" name="@tpe@1" alpha="1" force_rhr="0" clip_to_extent="1">'
+        '<layer class="SimpleLine" enabled="1" locked="0" pass="0">'
+        '<prop v="square" k="capstyle"/>'
+        '<prop v="bevel" k="joinstyle"/>'
+        '<prop v="51,160,44,255" k="line_color"/>'
+        '<prop v="solid" k="line_style"/>'
+        '<prop v="0.4" k="line_width"/>'
+        '<prop v="MM" k="line_width_unit"/>'
+        '<prop v="0" k="offset"/>'
+        '</layer></symbol>'
+        '</layer></symbol>')
+
+
 def no_fill_symbol() -> ET.Element:
     """不上色（都市土地）：只留隱形外框，讓下方 都市計畫.qml 官方色透出。"""
     return ET.fromstring(
@@ -166,6 +208,9 @@ def main() -> None:
         if row:
             db_symbols[name] = ET.fromstring(row[0])
     con.close()
+
+    # 特定目的事業用地改用自訂符號：紅底＋綠斜線（2026-08-19 使用者定案，覆蓋樣式庫）
+    db_symbols["特定目的事業用地"] = special_purpose_symbol()
 
     missing: list[str] = []
     STYLES_DIR.mkdir(exist_ok=True)

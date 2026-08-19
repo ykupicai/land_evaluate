@@ -22,7 +22,7 @@
       <category symbol="17" value="墳墓用地" label="墳墓用地" render="true" type="string" />
       <category symbol="18" value="特定目的事業用地" label="特定目的事業用地" render="true" type="string" />
       <category symbol="19" value="暫未編定" label="暫未編定" render="true" type="string" />
-      <category symbol="20" value="都市土地（使用分區另查）" label="都市土地（詳都市計畫分區圖例）" render="false" type="string" />
+      <category symbol="20" value="都市土地（使用分區另查）" label="都市土地（無使用地編定）" render="false" type="string" />
       <category symbol="21" value="" label="其他" render="false" type="string" />
     </categories>
     <symbols>
@@ -599,26 +599,38 @@
           </data_defined_properties>
         </layer>
       </symbol>
-      <symbol type="fill" name="18" force_rhr="0" alpha="1" clip_to_extent="1">
-        <layer locked="0" class="SimpleFill" pass="0" enabled="1">
-          <prop v="3x:0,0,0,0,0,0" k="border_width_map_unit_scale" />
+      <symbol type="fill" alpha="1" force_rhr="0" clip_to_extent="1" name="18">
+        <layer class="SimpleFill" enabled="1" locked="0" pass="0">
           <prop v="227,26,28,255" k="color" />
+          <prop v="solid" k="style" />
+          <prop v="35,35,35,0" k="outline_color" />
+          <prop v="solid" k="outline_style" />
+          <prop v="0.2" k="outline_width" />
+          <prop v="MM" k="outline_width_unit" />
           <prop v="bevel" k="joinstyle" />
           <prop v="0,0" k="offset" />
-          <prop v="3x:0,0,0,0,0,0" k="offset_map_unit_scale" />
           <prop v="MM" k="offset_unit" />
-          <prop v="51,160,44,255" k="outline_color" />
-          <prop v="solid" k="outline_style" />
-          <prop v="1.26" k="outline_width" />
-          <prop v="MM" k="outline_width_unit" />
-          <prop v="solid" k="style" />
-          <data_defined_properties>
-            <Option type="Map">
-              <Option type="QString" name="name" value="" />
-              <Option name="properties" />
-              <Option type="QString" name="type" value="collection" />
-            </Option>
-          </data_defined_properties>
+        </layer>
+        <layer class="LinePatternFill" enabled="1" locked="0" pass="0">
+          <prop v="45" k="angle" />
+          <prop v="51,160,44,255" k="color" />
+          <prop v="2.2" k="distance" />
+          <prop v="MM" k="distance_unit" />
+          <prop v="0.4" k="line_width" />
+          <prop v="MM" k="line_width_unit" />
+          <prop v="0" k="offset" />
+          <prop v="MM" k="offset_unit" />
+          <symbol type="line" name="@tpe@1" alpha="1" force_rhr="0" clip_to_extent="1">
+            <layer class="SimpleLine" enabled="1" locked="0" pass="0">
+              <prop v="square" k="capstyle" />
+              <prop v="bevel" k="joinstyle" />
+              <prop v="51,160,44,255" k="line_color" />
+              <prop v="solid" k="line_style" />
+              <prop v="0.4" k="line_width" />
+              <prop v="MM" k="line_width_unit" />
+              <prop v="0" k="offset" />
+            </layer>
+          </symbol>
         </layer>
       </symbol>
       <symbol alpha="1" name="19" force_rhr="0" type="fill" clip_to_extent="1">
@@ -658,8 +670,8 @@
       </symbol>
       <symbol type="fill" alpha="1" force_rhr="0" clip_to_extent="1" name="21">
         <layer class="SimpleFill" enabled="1" locked="0" pass="0">
-          <prop v="225,225,225,255" k="color" />
-          <prop v="solid" k="style" />
+          <prop v="255,255,255,255" k="color" />
+          <prop v="no" k="style" />
           <prop v="35,35,35,0" k="outline_color" />
           <prop v="solid" k="outline_style" />
           <prop v="0.2" k="outline_width" />
