@@ -177,6 +177,13 @@ def main():
 
     # 敏感圖層
     geom_area = geom.area()
+    # ★覆蓋率 ≥99% 的圖層「多層疊加時」才改畫外框不填色（2026-08-20 修正使用者
+    # 2026-07-29 定案的延伸）：原意是避免好幾個全覆蓋圖層疊加壓成一片糊，「100%涵蓋」
+    # 由表格文字交代即可。但**只有單一命中項**時，外框虛線多半落在圖框外（100%涵蓋、
+    # 邊界離基地很遠），畫面近乎全空、完全看不出基地與範圍的關係——這正是外框規則
+    # 原本要防的「疊很多層看不清楚」的反面情況。判斷改為：僅當 ≥2 個命中項各自都
+    # ≥99% 覆蓋（真的會疊加壓糊）才退為外框；單一全覆蓋命中一律給透明填色。
+    n_full = sum(1 for _, ar in hits if ar >= 0.99 * geom_area)
     env_layers, legend_layers, notes, stats = [], [], [], []
     for color_idx, (name, area) in enumerate(hits):
         shp, rule = resolve_layer(name, county, case_dir=out_dir)
@@ -186,10 +193,7 @@ def main():
             continue
         subs = rule.get("_subs", {})
         title = rule["title"].format(**subs) if "{" in rule["title"] else rule["title"]
-        # ★覆蓋率 ≥99% 的圖層改畫「外框不填色」（使用者定案 2026-07-29 的延伸）：
-        # 全覆蓋圖層的填色不帶任何資訊，只會把正射底圖與其他套疊層壓成一片。
-        # 「100% 涵蓋」這件事由表格與文字交代即可。
-        outline_only = area >= 0.99 * geom_area
+        outline_only = area >= 0.99 * geom_area and n_full >= 2
         lyr = load_env_layer(shp, rule, title, alpha=a.alpha,
                              outline_only=outline_only, color_idx=color_idx)
         if outline_only:
