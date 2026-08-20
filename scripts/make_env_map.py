@@ -229,15 +229,18 @@ def main():
     # 正射底圖
     # ★底圖要照「版面引擎算出的最終圖框範圍」抓，不是基地 bbox（2026-08-04 龍崎案實錯：
     # 用 bbox+15% 抓，圖框因 A4 比例與整數比例尺退階而更寬，成品左右各露一條白邊）。
-    # place_overlays 是純幾何、無副作用，可以先算一次拿 extent，再交給 build_sheet_layout
-    # 重算一次（同輸入必得同結果），與 make_maps 用 c["extent"] 的作法一致。
+    # ★★2026-08-20 再修：build_sheet_layout 內用 place_fixed（maxmap v2，地圖寬
+    # MAP2_W=287mm），這裡原本用 place_overlays（舊 compact，地圖寬 MAP_W=240mm），
+    # 兩者 extent 不同→正射底圖鋪不滿較寬的 maxmap 框、四周露白。改用同一支
+    # place_fixed＋MAP2 尺寸，底圖範圍才與圖框一致。純幾何、無副作用。
     import overlay_placement as op          # noqa: PLC0415 — 與 build_layout 同一顆幾何引擎
 
     def _inter(x1, y1, x2, y2):
         r = geom.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
         return 0.0 if r.isEmpty() else r.area()
 
-    frame_ext = op.place_overlays(_inter, bbox).extent      # (L, R, B, T)
+    frame_ext = op.place_fixed(_inter, bbox,
+                               map_w=op.MAP2_W, map_h=op.MAP2_H).extent   # (L, R, B, T)
     fl, fr, fb, ft = frame_ext
     bm_bbox = (fl, fb, fr, ft)                              # build_basemap 吃 (xmin,ymin,xmax,ymax)
     bm_dir = Path(a.basemap_dir) if a.basemap_dir else (out_dir / "底圖")

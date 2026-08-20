@@ -637,15 +637,20 @@ def main():
     bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
 
     # ★底圖照「版面引擎算出的最終圖框」抓，不是 bbox（bbox 較窄，成品左右會露白邊；
-    # 2026-08-04 坡度圖實錯，同一個 bug 也修過 make_env_map）。place_overlays 純幾何、
-    # 無副作用，可先算一次拿 extent，build_sheet_layout 再算一次必得同結果。
+    # 2026-08-04 坡度圖實錯，同一個 bug 也修過 make_env_map）。
+    # ★★2026-08-20 再修：build_sheet_layout 內是用 place_fixed（maxmap v2，地圖寬
+    # MAP2_W=287mm）算最終 extent，但這裡原本用 place_overlays（舊 compact，地圖寬
+    # MAP_W=240mm），兩者算出的 extent 不同——較窄的底圖鋪不滿較寬的 maxmap 框，
+    # 正射底圖四周露白（關廟深坑子段權屬圖實見）。改用同一支 place_fixed＋MAP2 尺寸，
+    # 底圖範圍才會與實際圖框一致、鋪滿。純幾何無副作用。
     import overlay_placement as op          # noqa: PLC0415 — 與 build_layout 同一顆引擎
 
     def _inter(x1, y1, x2, y2):
         r = ext_geom.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
         return 0.0 if r.isEmpty() else r.area()
 
-    _fl, _fr, _fb, _ft = op.place_overlays(_inter, bbox).extent
+    _fl, _fr, _fb, _ft = op.place_fixed(_inter, bbox,
+                                        map_w=op.MAP2_W, map_h=op.MAP2_H).extent
     bm_bbox = (_fl, _fb, _fr, _ft)
     bm = Path(a.basemap_dir) if a.basemap_dir else (out_dir / "底圖")
     bm.mkdir(parents=True, exist_ok=True)

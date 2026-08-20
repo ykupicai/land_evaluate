@@ -1616,8 +1616,13 @@ def main() -> None:
             l_red.setLabeling(label_settings())
             l_red.setLabelsEnabled(True)
 
-            # maxmap：以最大化圖框(240×191)重算比例尺/範圍，並算基地 dissolve 幾何供角落
+            # maxmap：以最大化圖框重算比例尺/範圍，並算基地 dissolve 幾何供角落
             # 避讓；覆蓋 c["scale"]/c["extent"]，讓後續 WMTS/LUIMAP 底圖與版面同用此範圍。
+            # ★2026-08-20 修正：原用 place_overlays（舊 compact 版面，地圖寬 MAP_W=240mm），
+            # 但 build_sheet_layout 內實際用 place_fixed（maxmap v2，地圖寬 MAP2_W=287mm）。
+            # 兩者 extent 不同 → 依此較窄 extent 抓的 WMTS/LUIMAP/正射底圖鋪不滿較寬的
+            # maxmap 框，主題4正射／主題5國土利用／主題6臨路的底圖四周露白。改用同一支
+            # place_fixed＋MAP2 尺寸，c["extent"] 才與實際圖框一致、底圖鋪滿。
             mm_ctx = None
             if layout_mode == "maxmap":
                 bb = l_red.extent()
@@ -1629,7 +1634,8 @@ def main() -> None:
                     it = _g.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
                     return 0.0 if it.isEmpty() else it.area()
 
-                mm_pl = op.place_overlays(_intersect, bbox)
+                mm_pl = op.place_fixed(_intersect, bbox,
+                                       map_w=op.MAP2_W, map_h=op.MAP2_H)
                 c["scale"] = mm_pl.scale
                 c["extent"] = QgsRectangle(mm_pl.extent[0], mm_pl.extent[2],
                                            mm_pl.extent[1], mm_pl.extent[3])

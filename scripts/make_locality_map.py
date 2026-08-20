@@ -33,6 +33,7 @@ from qgis.core import (  # noqa: E402
 from qgis.PyQt.QtGui import QColor, QFont  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
+import overlay_placement as op  # noqa: E402
 from nlsc_wmts import build_basemap  # noqa: E402
 
 CRS = "EPSG:3826"
@@ -125,6 +126,16 @@ def main():
     bb.grow(margin)
     bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
     print(f"位置：{loc}　地段：{section}　外擴 {margin:.0f} m{road_note}")
+
+    # ★2026-08-20 修正：bb.grow(margin) 只是外擴基地 bbox，長寬比不等於 A4 橫式
+    # 地圖框（287:200，見 build_sheet_layout 內 place_fixed）；後面 build_sheet_layout
+    # 會用 place_fixed 把 extent 重算成正確橫式比例（通常更寬），但底圖圖磚若只依
+    # 這裡的原始 bbox 去抓，會抓不到加寬後兩側的範圍，成品圖兩側留白。改用同一套
+    # compute_scale_extent 預先算出最終框的範圍，底圖依這個範圍抓，才會滿版。
+    _, _fetch_extent = op.compute_scale_extent(bbox, expand=1.12,
+                                               map_w=op.MAP2_W, map_h=op.MAP2_H)
+    _fL, _fR, _fB, _fT = _fetch_extent
+    fetch_bbox = (_fL, _fB, _fR, _fT)
 
     layers = [site]
     legend = [site]
@@ -240,7 +251,7 @@ def main():
     bm.mkdir(parents=True, exist_ok=True)
     cache = str((out_dir / "底圖") / "_tilecache")
     try:
-        tif = build_basemap(bbox, str(bm / "locality_EMAP.tif"), layer="EMAP",
+        tif = build_basemap(fetch_bbox, str(bm / "locality_EMAP.tif"), layer="EMAP",
                             cache_dir=cache, buffer_ratio=0.02)
         if tif:
             rl = QgsRasterLayer(tif, "通用電子地圖(NLSC EMAP)")
@@ -250,7 +261,7 @@ def main():
     except Exception as exc:  # noqa: BLE001 — 底圖失敗仍出圖
         print(f"  ⚠ 底圖(EMAP)失敗：{type(exc).__name__}: {exc}")
     try:
-        tif2 = build_basemap(bbox, str(bm / "locality_EMAP2.tif"), layer="EMAP2",
+        tif2 = build_basemap(fetch_bbox, str(bm / "locality_EMAP2.tif"), layer="EMAP2",
                              cache_dir=cache, buffer_ratio=0.02, keep_alpha=True)
         if tif2:
             rl2 = QgsRasterLayer(tif2, "通用電子地圖透明版(NLSC EMAP2)")

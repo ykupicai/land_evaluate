@@ -253,9 +253,19 @@ def header(slide, main, sub, page, chapter=None):
     _retype(mt, FONT_HEAVY)
     # 副標（SemiBold 28pt 磚紅，緊接主標右側）
     if sub:
-        sub_l = Inches(min(1.13 + 0.62 * len(main) + 0.18, 8.6))
+        sub_l_in = min(1.13 + 0.62 * len(main) + 0.18, 8.6)
+        avail_in = 13.0 - sub_l_in
+        # ★2026-08-21 修正：副標長度不一，固定 28pt 常超出可用寬度、往下溢出撞到
+        # 分隔線（word_wrap 換行但box高度只留一行）。全形中文字約 1 em 寬
+        # （size_pt/72 吋），估需要寬度、超出時等比縮小字級到夠放一行為止
+        # （下限 16pt，避免小到不可讀；仍超出則保留 16pt 讓它換行，不強行硬擠）。
+        sub_size = 28
+        need_in = len(sub) * (sub_size / 72.0)
+        if need_in > avail_in > 0:
+            sub_size = max(16, int(sub_size * avail_in / need_in))
+        sub_l = Inches(sub_l_in)
         st = tb(slide, sub_l, Inches(0.294), Inches(13.0) - sub_l, Inches(0.572), sub,
-                28, True, TOPIC)
+                sub_size, True, TOPIC)
         st.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
         _retype(st, FONT_SEMI)
     # 分隔線（黑 0.75pt，YAML L0.121 W12.891 T0.866）
