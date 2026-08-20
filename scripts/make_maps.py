@@ -181,6 +181,10 @@ URBAN_QML = "都市計畫.qml"
 URBAN_LEGEND_YAML = "config/urban_plan_legend.yaml"
 URBAN_LAYER_NAME = "都市計畫土地使用分區"
 URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分區（依使用者圖說）
+# --urban-shp=<path>：改用該縣市圖台抓回的都市計畫 shp（scripts/urbanplan_fetch.py 產，
+# 含 Color1；現行版、精度足以正確切道路截角）取代本機全台 2019 舊 shp。臺南/高雄等有
+# 登錄圖台的縣市案子建議帶此旗標；標註欄自動偵測（zone→ZONE_USE→ZONE→NAME）。
+URBAN_SHP_OVERRIDE = None
 
 # 國土利用調查（LUIMAP）：官方色碼表 + 臨路評估的 features.geojson 分類結果。
 # 色碼表 2026-07-26 起 vendor 於 config/luimap_colortable.csv（不再取自 fishpv 專案）；
@@ -1013,14 +1017,15 @@ def load_urban_color_names(yaml_path: Path) -> dict[str, list[str]]:
 
 def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
                             color_to_names: dict[str, list[str]],
-                            keep_alive: list) -> QgsVectorLayer | None:
+                            keep_alive: list,
+                            zone_field: str = URBAN_ZONE_FIELD) -> QgsVectorLayer | None:
     """建圖例專用小圖層：案場出圖範圍內實際出現的都市計畫 Color1 → 分區名清單。
     不掛進地圖圖層清單（不渲染），只放進 legend_layers 供圖例面板顯示；
     每類別放 1 個位於 extent 中心的假幾何，確保 setLegendFilterByMapEnabled 不會濾掉它。"""
     if not urban_lyr.isValid():
         return None
     i_color = urban_lyr.fields().indexOf(URBAN_COLOR_FIELD)
-    i_zone = urban_lyr.fields().indexOf(URBAN_ZONE_FIELD)
+    i_zone = urban_lyr.fields().indexOf(zone_field)
     if i_color < 0:
         return None
     req = QgsFeatureRequest().setFilterRect(extent)
@@ -1362,6 +1367,7 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
 
 def main() -> None:
     global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS
+    global URBAN_SHP_OVERRIDE
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
     only: set[str] | None = None
@@ -1403,6 +1409,10 @@ def main() -> None:
             BASEMAP_DIR = a.split("=", 1)[1]
         elif a == "--basemap-dir":
             BASEMAP_DIR = args[i + 1]; i += 1
+        elif a.startswith("--urban-shp="):
+            URBAN_SHP_OVERRIDE = a.split("=", 1)[1]
+        elif a == "--urban-shp":
+            URBAN_SHP_OVERRIDE = args[i + 1]; i += 1
         elif a == "--no-loc-parcel":
             SHOW_LOC_PARCEL = False   # 已是預設值;保留旗標供既有指令/手冊沿用
         elif a == "--loc-parcel":
@@ -1559,21 +1569,40 @@ def main() -> None:
         wmts_ok = True  # 逐案場嘗試，失敗於該案場 05 清單標記
 
         # 都市計畫土地使用分區（補都市土地 使分/使類=None 缺口；Color1 官方色 data-defined）
-        urban_shp_path = REPO_ROOT / URBAN_SHP
+        # --urban-shp：改用縣市圖台抓回的現行版 shp（urbanplan_fetch.py 產，含 Color1），
+        # 取代本機全台 2019 舊 shp；標註欄自動偵測（本機為 zone、圖台為 ZONE_USE/ZONE）。
+        if URBAN_SHP_OVERRIDE:
+            _op = Path(URBAN_SHP_OVERRIDE)
+            urban_shp_path = _op if _op.is_absolute() else (REPO_ROOT / _op)
+        else:
+            urban_shp_path = REPO_ROOT / URBAN_SHP
         urban_qml_path = str(styles_dir / URBAN_QML)
         urban_lyr_zoning = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
         urban_lyr_landtype = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
         urban_ok = urban_lyr_zoning.isValid() and urban_lyr_landtype.isValid()
+        urban_zone_field = URBAN_ZONE_FIELD
         if urban_ok:
+            # 標註欄自動偵測：本機 shp=zone；縣市圖台=ZONE_USE(用地全名，較 ZONE 簡稱可讀)
+            for cand in (URBAN_ZONE_FIELD, "ZONE_USE", "ZONE", "NAME", "使用分區"):
+                if urban_lyr_zoning.fields().indexOf(cand) >= 0:
+                    urban_zone_field = cand
+                    break
+            if URBAN_SHP_OVERRIDE:
+                print(f"  都市計畫圖層改用圖台 shp：{urban_shp_path}"
+                      f"（{urban_lyr_zoning.featureCount()} 筆，標註欄={urban_zone_field}）",
+                      flush=True)
+                if urban_lyr_zoning.fields().indexOf(URBAN_COLOR_FIELD) < 0:
+                    warnings.append(f"圖台 shp 無 {URBAN_COLOR_FIELD} 欄，都市計畫將無底色："
+                                    f"{urban_shp_path}")
             ensure_qix(urban_lyr_zoning, urban_shp_path)
             for lyr in (urban_lyr_zoning, urban_lyr_landtype):
                 _, ok = lyr.loadNamedStyle(urban_qml_path)
                 if not ok:
                     warnings.append(f"都市計畫 QML 套用失敗：{urban_qml_path}")
             urban_lyr_landtype.setOpacity(URBAN_LANDTYPE_OPACITY)
-            # 都市計畫每個 polygon 標其使用分區名（zone 欄）；PAL 自動避讓，僅標範圍內
+            # 都市計畫每個 polygon 標其使用分區名；PAL 自動避讓，僅標範圍內
             urban_lyr_zoning.setLabeling(
-                label_settings(URBAN_ZONE_FIELD, size=7.5, color=(40, 40, 40)))
+                label_settings(urban_zone_field, size=7.5, color=(40, 40, 40)))
             urban_lyr_zoning.setLabelsEnabled(True)
         else:
             warnings.append(f"都市計畫圖層載入失敗：{urban_shp_path}（使用分區/使用地編定圖將無都市底色）")
@@ -1680,7 +1709,8 @@ def main() -> None:
 
             is_urban = bool(c.get("has_urban_rows")) and urban_ok
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
-                                                        color_to_names, keep_alive)
+                                                        color_to_names, keep_alive,
+                                                        zone_field=urban_zone_field)
                                 if is_urban else None)
             if urban_legend_lyr is not None:
                 # 必須註冊進專案，圖例面板才能解析並顯示都市計畫分區節點
