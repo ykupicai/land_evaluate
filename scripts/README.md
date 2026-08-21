@@ -12,7 +12,7 @@
 
 | 腳本 | 用途 |
 |---|---|
-| `run_case.py` | 一鍵串起 清冊/shp → 六主題圖 + .qgz。子進程編排，有停點會印下一步指令。**`--fetch <清冊>` 走 ⓪a 免登入主路徑**（抓地籍→自動轉入 trust-shp 流程；失敗硬停通知使用者，不自行改走平台） |
+| `run_case.py` | 一鍵串起 清冊/shp → 六主題圖 + .qgz。子進程編排，有停點會印下一步指令。**`--fetch <清冊>` 走 ⓪a 免登入主路徑**（抓地籍→自動轉入 trust-shp 流程；失敗硬停通知使用者，不自行改走平台）。**`--latlon <Google Maps 網址/'lat,lon'> --case <案名>` 走 ⓪a′ 反查路徑**（座標→現行地段地號→基地.shp→同 trust-shp 流程；**單點單筆**，--case 必填；反查失敗硬停）→ 引擎 `latlon_to_parcel.py`、詳見 skill `landmark-to-parcel` |
 
 ## 階段0：先攔障礙（評估案第一步）
 
@@ -40,7 +40,7 @@
 | `query_landno.py` | 比不到的地號查內政部新舊地號 → 04_對照清單 |
 | `apply_landno.py` | 把 04 的對照結果回填清冊後重比 |
 | `shp_to_meta.py` | 直接給基地 shp 時免解析：dbf → 01_中繼檔 |
-| `latlon_to_parcel.py` | **反查**：Google Maps 網址／短網址／經緯度 → 現行地段地號（＋使分/使類/面積）。與正查方向相反。展開網址抓地標點(`!3d!4d`不是`@`中心)→WGS84→3826→農業部identify定縣市→本機快照出候選→**段名先驗**→農業部即時確認→需要時**收斂式子號探測**（分割案例，探到含點即停/連續15筆查無才止）。`--out` 寫 `基地.shp` 可直接餵 `make_maps --trust-shp` 出圖。⚠ 三個守門（座標抓對組/段名含小段/段名先驗排在探測前）看 skill `landmark-to-parcel`；死角＝跨母號分割/重測改號回 `FAIL_CROSS_MOTHER`（需線上空間反查，未接掛）。須 QGIS python。測試 `tests/test_latlon_to_parcel.py`（純函式）＋三真實案例 |
+| `latlon_to_parcel.py` | **反查**：Google Maps 網址／短網址／經緯度 → 現行地段地號（＋使分/使類/面積）。與正查方向相反。展開網址抓地標點(`!3d!4d`不是`@`中心)→WGS84→3826→農業部identify定縣市→本機快照出候選→**段名先驗**→農業部即時確認→需要時**收斂式子號探測**（分割案例，探到含點即停/連續15筆查無才止）。`--out` 寫 `基地.shp` 可直接餵 `make_maps --trust-shp` 出圖；**已接掛 `run_case.py --latlon <網址> --case <案名>`**（反查→基地→周邊地籍→出圖一鍵，單點單筆）。⚠ 三個守門（座標抓對組/段名含小段/段名先驗排在探測前）看 skill `landmark-to-parcel`；死角＝跨母號分割/重測改號回 `FAIL_CROSS_MOTHER`（需線上空間反查，未接掛）。須 QGIS python。測試 `tests/test_latlon_to_parcel.py`（純函式）＋三真實案例 |
 
 ## 案場定義與臨路
 
