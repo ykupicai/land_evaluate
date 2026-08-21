@@ -61,6 +61,14 @@ def test_county_filename_normalizes_tai():
     assert fn == "台南市"
 
 
+def test_county_name_variants_tai_inconsistency():
+    # 本機命名不一致：台南市用「台」、臺東縣用「臺」——兩式都要試（2026-08-21 臺東案）
+    v = L._county_name_variants("臺東縣")
+    assert "臺東縣" in v and "台東縣" in v          # 原名優先、也試台
+    v2 = L._county_name_variants("臺南市")
+    assert v2[0] == "臺南市" and "台南市" in v2
+
+
 # --- D：/maps/search/lat,+lon 與 ?q=/query= 座標（2026-08-21 芳寶段案漏解） ---
 
 def test_url_maps_search_coord():

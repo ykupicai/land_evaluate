@@ -113,12 +113,23 @@ def to_twd97(lon: float, lat: float) -> tuple[float, float]:
 _TW = {"臺": "台"}   # 檔名正規化：屬性回「臺南市」、本機檔名是「台南市.shp」
 
 
+def _county_name_variants(county: str) -> list[str]:
+    """縣市檔名候選：本機命名不一致——六都用「台」（台北/台中/台南市），但臺東縣
+    用「臺」；不能一律 臺→台（否則臺東縣 → 台東縣.shp 查無）。原名、臺→台、台→臺
+    三式都試。"""
+    out = []
+    for c in (county, county.replace("臺", "台"), county.replace("台", "臺")):
+        if c not in out:
+            out.append(c)
+    return out
+
+
 def county_shp_path(county: str) -> str | None:
-    fn = county
-    for a, b in _TW.items():
-        fn = fn.replace(a, b)
-    p = os.path.join(CAD_DIR, fn + ".shp")
-    return p if os.path.exists(p) else None
+    for fn in _county_name_variants(county):
+        p = os.path.join(CAD_DIR, fn + ".shp")
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def county_of_point(moa, x: float, y: float) -> str | None:
@@ -146,12 +157,17 @@ def county_by_bbox_scan(x: float, y: float, pt) -> str | None:
     import geopandas as gpd  # noqa: PLC0415
     from glob import glob  # noqa: PLC0415
     for shp in glob(os.path.join(CAD_DIR, "*.shp")):
+        base = os.path.splitext(os.path.basename(shp))[0]
+        # 只掃各縣市地籍 shp；排除 段藉.shp（段/小段索引，覆蓋全台、無「宗地母」欄，
+        # 會被誤選並在 local_candidate 炸 KeyError）與其他非縣市檔。
+        if not base.endswith(("縣", "市")):
+            continue
         try:
             g = gpd.read_file(shp, bbox=(x - 5, y - 5, x + 5, y + 5))
-        except Exception:
+        except Exception:  # noqa: BLE001
             continue
         if len(g) and g.contains(pt).any():
-            return os.path.splitext(os.path.basename(shp))[0]
+            return base
     return None
 
 
