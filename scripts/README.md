@@ -40,6 +40,7 @@
 | `query_landno.py` | 比不到的地號查內政部新舊地號 → 04_對照清單 |
 | `apply_landno.py` | 把 04 的對照結果回填清冊後重比 |
 | `shp_to_meta.py` | 直接給基地 shp 時免解析：dbf → 01_中繼檔 |
+| `latlon_to_parcel.py` | **反查**：Google Maps 網址／短網址／經緯度 → 現行地段地號（＋使分/使類/面積）。與正查方向相反。展開網址抓地標點(`!3d!4d`不是`@`中心)→WGS84→3826→農業部identify定縣市→本機快照出候選→**段名先驗**→農業部即時確認→需要時**收斂式子號探測**（分割案例，探到含點即停/連續15筆查無才止）。`--out` 寫 `基地.shp` 可直接餵 `make_maps --trust-shp` 出圖。⚠ 三個守門（座標抓對組/段名含小段/段名先驗排在探測前）看 skill `landmark-to-parcel`；死角＝跨母號分割/重測改號回 `FAIL_CROSS_MOTHER`（需線上空間反查，未接掛）。須 QGIS python。測試 `tests/test_latlon_to_parcel.py`（純函式）＋三真實案例 |
 
 ## 案場定義與臨路
 
