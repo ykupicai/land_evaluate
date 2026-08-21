@@ -12,7 +12,7 @@
 
 | 腳本 | 用途 |
 |---|---|
-| `run_case.py` | 一鍵串起 清冊/shp → 六主題圖 + .qgz。子進程編排，有停點會印下一步指令。**`--fetch <清冊>` 走 ⓪a 免登入主路徑**（抓地籍→自動轉入 trust-shp 流程；失敗硬停通知使用者，不自行改走平台）。**`--latlon <Google Maps 網址/'lat,lon'> --case <案名>` 走 ⓪a′ 反查路徑**（座標→現行地段地號→基地.shp→同 trust-shp 流程；**單點單筆**，--case 必填；反查失敗硬停）→ 引擎 `latlon_to_parcel.py`、詳見 skill `landmark-to-parcel` |
+| `run_case.py` | 一鍵串起 清冊/shp → 六主題圖 + .qgz。子進程編排，有停點會印下一步指令。**`--fetch <清冊>` 走 ⓪a 免登入主路徑**（抓地籍→自動轉入 trust-shp 流程；失敗硬停通知使用者，不自行改走平台）。**`--latlon <Google Maps 網址/'lat,lon'> --case <案名>` 走 ⓪a(反查)路徑**（座標→現行地段地號→基地.shp→同 trust-shp 流程；**單點單筆**，--case 必填；反查失敗硬停）→ 引擎 `latlon_to_parcel.py`、詳見 skill `landmark-to-parcel` |
 
 ## 階段0：先攔障礙（評估案第一步）
 

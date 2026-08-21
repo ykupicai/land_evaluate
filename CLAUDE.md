@@ -65,6 +65,10 @@
 現行端到端（非都市土地案；都市計畫個案變更走簡化版，見下方「都市計畫個案變更」節）：
 ```
 ⓪a 免登入取地籍(scripts/cadastre_fetch.py，主路徑) → run_case.py --fetch 可一鍵起跑
+⓪a(反查) 座標／Google Maps 網址 → 現行地段地號(scripts/latlon_to_parcel.py) →
+     run_case.py --latlon <網址> --case <案名> 一鍵起跑。是 ⓪a 的**另一種輸入**
+     (把「清冊」換成「一個座標/網址」)，非新步驟；**單點單筆**、反查失敗硬停
+     (跨母號分割/重測改號需線上空間反查、段名/縣市定位問題)。詳 skill landmark-to-parcel
 ⓪a' 周邊地籍自動發現(scripts/cadastre_neighbors.py，外擴50m找鄰地＋即時回填＋覆蓋率
      自我檢查／自動探測補正，取代舊快照或WMTS當分區圖基準；run_case.py --fetch 已自動接掛)
 ⓪b 環敏套疊(scripts/ngis_sensitive.py，★正式程序；NGIS 官方54圖層實際套疊、免登入 <1秒

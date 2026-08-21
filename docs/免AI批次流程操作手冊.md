@@ -59,6 +59,23 @@ python -X utf8 scripts\run_case.py --fetch 待評估資訊\<案>\00_清冊.csv -
 - 之後照常 `--mode single|persite` 出圖。⚠ 權屬欄是「私(推論)」等推論值，
   關鍵筆數仍以謄本或平台覆核（空白≠私有）。
 
+### 模式零b：⓪a(反查) 座標／Google Maps 網址直跑（★2026-08-21 接上；只有一個點）
+
+不知道地號、只有 Google Maps 地標或一組座標時，一句指令從網址反查到首跑停點：
+
+```powershell
+python -X utf8 scripts\run_case.py --latlon "https://maps.app.goo.gl/xxxx" --case <案名>
+python -X utf8 scripts\run_case.py --latlon "22.9243646,120.3469031" --case <案名>
+```
+
+- 先跑 `latlon_to_parcel`（反查：展開網址抓地標點→定縣市→本機候選→段名先驗→農業部
+  即時確認→分割時收斂探測）產 `cadastre/基地.shp`，**自動轉入模式一**（同 --fetch 之後）。
+- **單點單筆**、`--case` **必填**（網址不能當資料夾名）。之後照常 `--mode single` 出圖。
+- 🚧 反查失敗硬停：跨母號分割／重測改號（需線上空間反查，未接掛）、段名或縣市定位問題
+  ——停下來等你人工釐清，不會硬掰地號。
+- ⚠ 點距邊界 <5m 會印「近界、建議人工確認相鄰筆」（Google 地標點常有 5~15m 誤差）；
+  使分/使類空白＝都市土地或未登錄地，身分待查證。詳 skill `landmark-to-parcel`。
+
 ### 模式一：trust-shp（已有基地 shp，直接信任其幾何與屬性，不做地籍比對）
 
 ```powershell

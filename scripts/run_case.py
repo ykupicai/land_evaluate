@@ -10,7 +10,7 @@
   cadastre_fetch 產 `outputs/<案>/cadastre/基地.shp`，再自動轉入 --shp 流程。
   ⓪a 失敗＝**硬停通知使用者**——備選路徑需本人登入，不自行改走（skill 規定）。
 
-★ 2026-08-21 接上 ⓪a′ 反查路徑：`--latlon <Google Maps 網址/短網址/'lat,lon'>`
+★ 2026-08-21 接上 ⓪a(反查)路徑：`--latlon <Google Maps 網址/短網址/'lat,lon'>`
   ＋`--case <案名>`（網址無法當資料夾名，故 --case 必填）會先跑 latlon_to_parcel
   （點→現行地段地號）產 `cadastre/基地.shp`，再自動轉入 --shp 流程。**單點單筆**；
   反查失敗（跨母號分割/重測改號需線上空間反查、或段名/縣市定位問題）＝硬停。
@@ -174,7 +174,7 @@ def _neighbors_and_road(final: Path, case_dir: Path) -> Path:
 
 
 def fetch_latlon(spec: str, case_dir: Path) -> Path:
-    """⓪a′ 反查取地籍：Google Maps 網址／短網址／'lat,lon' → cadastre/基地.shp。
+    """⓪a(反查)取地籍：Google Maps 網址／短網址／'lat,lon' → cadastre/基地.shp。
 
     走 latlon_to_parcel（點→現行地段地號：展開網址抓地標點→定縣市→本機候選→
     段名先驗→農業部即時確認→分割時收斂探測），再與 fetch_roster 同尾段接
@@ -185,16 +185,16 @@ def fetch_latlon(spec: str, case_dir: Path) -> Path:
     out_dir = case_dir / "cadastre"
     final = out_dir / "基地.shp"
     if final.exists():
-        print(f"[run_case] ⓪a′ 已有 {final}，跳過反查（要重抓請先刪 cadastre/）")
+        print(f"[run_case] ⓪a(反查) 已有 {final}，跳過反查（要重抓請先刪 cadastre/）")
         return _neighbors_and_road(final, case_dir)
-    print(f"[run_case] ⓪a′ 反查取地籍：{spec}")
+    print(f"[run_case] ⓪a(反查)取地籍：{spec}")
     r = subprocess.run([sys.executable, "-X", "utf8",
                         str(REPO / "scripts" / "latlon_to_parcel.py"),
                         spec, "--out", str(out_dir), "--name", "基地"], cwd=REPO)
     if r.returncode != 0:
-        sys.exit("[run_case] ⓪a′ 反查取地籍失敗——見上方訊息。跨母號分割／重測改號"
+        sys.exit("[run_case] ⓪a(反查)取地籍失敗——見上方訊息。跨母號分割／重測改號"
                  "需線上空間反查（未接掛）；或段名／縣市定位問題，請人工釐清後再續跑。")
-    print(f"[run_case] ⓪a′ 完成：{final}")
+    print(f"[run_case] ⓪a(反查) 完成：{final}")
     return _neighbors_and_road(final, case_dir)
 
 
@@ -447,7 +447,7 @@ def main():
             shp = args[i + 1]; i += 2
         elif a == "--fetch":               # ⓪a 免登入主路徑：清冊 → cadastre/基地.shp → --shp 流程
             fetch = args[i + 1]; i += 2
-        elif a == "--latlon":              # ⓪a′ 反查：Google Maps 網址／'lat,lon' → cadastre/基地.shp → --shp 流程
+        elif a == "--latlon":              # ⓪a(反查)：Google Maps 網址／'lat,lon' → cadastre/基地.shp → --shp 流程
             latlon = args[i + 1]; i += 2
         elif a == "--list":
             lst = args[i + 1]; i += 2
@@ -472,7 +472,7 @@ def main():
             sys.exit(f"未知參數 {a}")
     if not (shp or lst or fetch or latlon):
         sys.exit("需 --shp <基地.shp>、--fetch <清冊(⓪a 免登入)>、"
-                 "--latlon <Google Maps 網址/'lat,lon'(⓪a′ 反查)> 或 --list <清冊(平台比對)>")
+                 "--latlon <Google Maps 網址/'lat,lon'(⓪a(反查))> 或 --list <清冊(平台比對)>")
     if sum(bool(x) for x in (shp, fetch, latlon, lst)) > 1:
         sys.exit("--shp／--fetch／--latlon／--list 擇一"
                  "（--fetch、--latlon 抓完會自動轉入 --shp 流程）")
@@ -491,7 +491,7 @@ def main():
         # ⓪a 前置：抓完即為 trust-shp 輸入，後續與 --shp 完全同流程
         shp = str(fetch_roster(Path(fetch), case_dir))
     if latlon:
-        # ⓪a′ 反查前置：座標/網址→基地.shp，後續與 --shp 完全同流程（單點單筆）
+        # ⓪a(反查)前置：座標/網址→基地.shp，後續與 --shp 完全同流程（單點單筆）
         shp = str(fetch_latlon(latlon, case_dir))
     mode_shp = shp is not None
     fp = case_dir / "臨路評估"
