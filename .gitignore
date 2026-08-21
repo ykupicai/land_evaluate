@@ -32,3 +32,11 @@ credential*
 
 # 環敏應免查範圍 PDF（每月從平台『匯出全部項目』重下，14.6MB 不進版控；解析後的 .json 才進）
 config/環敏應免查範圍_*.pdf
+
+# make_maps 的 save_styles() 每次出圖重新產生的「供 QGIS 手動微調」樣式檔——
+# 純生成物、出圖不讀它們（不影響成果 PNG），且 QGIS saveNamedStyle 每次埋不同 UUID
+# 造成每次出圖都洗出假 diff，故不進版控（2026-08-21）。
+# ⚠ 只 ignore 這三個生成檔；styles/ 其餘 qml（使用分區/使用地編定/都市計畫…）要讀取，須進版控。
+styles/國土功能分區.qml
+styles/基地紅框.qml
+styles/周邊地籍.qml
