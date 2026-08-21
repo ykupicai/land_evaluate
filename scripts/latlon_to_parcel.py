@@ -85,6 +85,15 @@ def extract_lonlat(text: str) -> tuple[float, float, str]:
         m = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", full)
         if m:
             return float(m.group(2)), float(m.group(1)), "地標點位(!3d!4d)"
+        # /maps/search/<lat>,+<lon>（座標搜尋，短網址常展開成此形；+/空白皆可）——
+        # 這是使用者實際查的點，非地圖中心，不標警告。
+        m = re.search(r"/(?:search|dir|place)/(-?\d+\.\d+)[,\s+]+(-?\d+\.\d+)", full)
+        if m:
+            return float(m.group(2)), float(m.group(1)), "座標搜尋(/search)"
+        # ?q=／query=／ll=／daddr=lat,lon（查詢參數帶座標）
+        m = re.search(r"[?&](?:q|query|ll|daddr|saddr|center)=(-?\d+\.\d+),\+?(-?\d+\.\d+)", full)
+        if m:
+            return float(m.group(2)), float(m.group(1)), "查詢參數座標(q=)"
         m = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", full)
         if m:
             return (float(m.group(2)), float(m.group(1)),
@@ -168,12 +177,111 @@ def local_candidate(shp: str, x: float, y: float, pt) -> dict | None:
     r = sel.iloc[0]
     mother, child = str(int(r["宗地母"])), str(int(r["宗地子"]))
     landno = f"{mother}-{child}" if child != "0" else mother
+    # 段碼／事所碼為主鍵（段名文字比對不可靠：異體字、「段」字後綴、重測改名，
+    # 一律以段碼為準，見 memory section-code-as-key）；no8＝母4+子4，供新舊地號 API。
+    sec4 = str(r.get("段碼", "")).split(".")[0].strip().zfill(4)
+    unit = str(r.get("事所碼", "")).strip()
+    no8 = mother.zfill(4) + child.zfill(4)
     return {
         "city": r["縣市"], "town": r["鄉鎮"], "seg": r["段"], "subseg": r["小段"],
         "secname": full_section_name(r["段"], r["小段"]),
         "mother": mother, "landno": landno,
+        "sec4": sec4, "unit": unit, "no8": no8,
         "snap_area": float(r.geometry.area), "snap_landtype": r["使類"],
     }
+
+
+# --------------------------------------------------------------------------
+# 5b. 命中判定與 fallback（近界容差 A、新舊地號 API B1）
+# --------------------------------------------------------------------------
+def hit_or_near(g, pt, tol: float = NEAR_EDGE_M):
+    """幾何含點、或點在外部但距邊界 ≤tol → 視為命中。回 (命中?, 邊界距離, 是否近界外側)。
+
+    ★座標反查（Google Maps 圖釘）必然有數公尺誤差，圖釘落在宗地界址外緣幾公尺是常態；
+    嚴格 contains 會把它踢掉、再誤判成分割／重測。2026-08-21 芳寶段755 實錯（圖釘離
+    界址 1.47m→誤判跨母號）。tol 用 NEAR_EDGE_M(5m)。"""
+    if g is None:
+        return False, None, False
+    if g.contains(pt):
+        return True, g.boundary.distance(pt), False
+    d = g.distance(pt)          # 點在外部 → 到多邊形的最短距離
+    return (d <= tol), d, (d <= tol)
+
+
+def landno_to_no8(landno: str) -> str:
+    """'755' / '755-1' → 8 碼（母4+子4）。"""
+    if "-" in landno:
+        mo, ch = landno.split("-", 1)
+    else:
+        mo, ch = landno, "0"
+    return mo.strip().zfill(4) + ch.strip().zfill(4)
+
+
+def newold_query(unit: str, sec4: str, no8: str, type_: str = "N",
+                 timeout: int = 40) -> tuple[str, str] | None:
+    """MOI 新舊地號查詢（MOI_API_011）：舊查新(N)／新查舊(O)。
+
+    回 (新段碼末4, 新8碼) 或 None（無異動紀錄／查詢失敗）。重測改號時用它把舊地號
+    橋接到現行地號（本機候選現行界址不含點、且非近界時的 fallback）。"""
+    if not unit or not sec4:
+        return None
+    url = "https://openapi.moi.gov.tw/WEBAPI/LandNewOldQuery/1.0/QueryLandNo"
+    body = [{"UNIT": unit, "SEC": sec4, "NO": no8, "TYPE": type_}]
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            j = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return None
+    resp = (j.get("RESPONSE") or [{}])[0]
+    ch = resp.get("LANDSNCHANGE")
+    if not ch:
+        return None
+    row = ch[0] if isinstance(ch, list) else ch
+    new_sec = str(row.get("SEC") or "").strip()
+    new_no = str(row.get("NO") or "").strip()
+    if len(new_sec) >= 4 and len(new_no) == 8:
+        return new_sec[-4:], new_no
+    return None
+
+
+def neighbor_sweep(shp, x, y, pt, city, town, moa, api, throttle,
+                   radius: float = 45.0, topn: int = 14):
+    """點附近快照宗地逐筆查農業部現行界址 → 回第一個含點／近界者，或 None。
+
+    最後手段：候選、子號探測、新舊地號都不中時，點多半落在相鄰宗地（快照界址比現行大／
+    位移）。用段碼取現行段名再查（不用段名文字）。"""
+    import geopandas as gpd  # noqa: PLC0415
+    from shapely.geometry import shape as _shape  # noqa: PLC0415
+    try:
+        g = gpd.read_file(shp, bbox=(x - radius, y - radius, x + radius, y + radius))
+    except Exception:  # noqa: BLE001
+        return None
+    if not len(g):
+        return None
+    g = g.assign(_d=g.geometry.distance(pt)).sort_values("_d")
+    calls = 0
+    for _, r in g.head(topn).iterrows():
+        sec4 = str(r.get("段碼", "")).split(".")[0].strip().zfill(4)
+        try:
+            name = moa.section_name_of(city, town, sec4)
+        except Exception:  # noqa: BLE001
+            name = None
+        if not name:
+            continue
+        mo, ch = str(int(r["宗地母"])), str(int(r["宗地子"]))
+        landno = f"{mo}-{ch}" if ch != "0" else mo
+        time.sleep(throttle)
+        rec = api.query(city, town, name, [landno])["records"][0]
+        calls += 1
+        gg = _shape(rec["geometry"]) if rec.get("ok") and rec.get("geometry") else None
+        ok, e, near = hit_or_near(gg, pt)
+        if ok:
+            return {"landno": landno, "secname": name, "g": gg, "rec": rec,
+                    "near": near, "api_calls": calls}
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -212,47 +320,94 @@ def reverse(text: str, throttle: float = PROBE_THROTTLE_S) -> dict:
     out.update({"county": cand["city"], "town": cand["town"],
                 "section": cand["secname"], "candidate": cand["landno"]})
 
-    # 段名先驗（守門，排在探測之前）
+    # C：段以段碼為主鍵——用段碼反查農業部現行段名，避開段名文字比對（異體字／「段」字
+    # 後綴／重測改名）。段碼在現行版查無＝整段重測改號，直接走新舊地號 fallback。
+    cur_secname = None
     try:
-        moa.resolve(cand["city"], cand["town"], cand["secname"])
-    except Exception as e:
-        out["status"] = "FAIL_SECTION_NAME"
-        out["message"] = (f"段名『{cand['secname']}』農業部查無 → 段名問題（非分割）："
-                          f"{e}")
-        return out
+        if cand["sec4"]:
+            cur_secname = moa.section_name_of(cand["city"], cand["town"], cand["sec4"])
+    except Exception:  # noqa: BLE001
+        cur_secname = None
+    secname = cur_secname or cand["secname"]
+    out["section"] = secname
+    if cur_secname and cur_secname != cand["secname"]:
+        out["warnings"].append(
+            f"段名以段碼{cand['sec4']}校正：快照『{cand['secname']}』→現行『{cur_secname}』")
+    section_renamed = bool(cand["sec4"]) and cur_secname is None
 
-    def geom_of(no):
-        rec = api.query(cand["city"], cand["town"], cand["secname"], [no])["records"][0]
+    def geom_of(sec, no):
+        rec = api.query(cand["city"], cand["town"], sec, [no])["records"][0]
         g = shape(rec["geometry"]) if rec["ok"] and rec.get("geometry") else None
         return g, rec
 
     api_calls = 0
-    g0, rec0 = geom_of(cand["landno"]); api_calls += 1
-    if g0 is not None and g0.contains(pt):
-        hit, g, rec = cand["landno"], g0, rec0
-        out["path"] = "候選即現行（免探測）"
-    else:
-        # 收斂探測同母號子號
-        out["path"] = ("候選查無→探測" if g0 is None
-                       else f"候選縮水不含點（{1 - g0.area / cand['snap_area']:.1%}）→探測")
-        miss, n, hit, g, rec = 0, 0, None, None, None
-        while miss < PROBE_MISS_STOP:
-            n += 1
-            time.sleep(throttle)
-            gg, rr = geom_of(f"{cand['mother']}-{n}"); api_calls += 1
-            if gg is None:
-                miss += 1
-                continue
-            miss = 0
-            if gg.contains(pt):
-                hit, g, rec = f"{cand['mother']}-{n}", gg, rr
-                break
-        if hit is None:
-            out["status"] = "FAIL_CROSS_MOTHER"
-            out["message"] = ("同母號子號探測未命中 → 疑跨母號分割／重測改號，"
-                              "需線上空間反查（本機候選與農業部正查皆無法解此點）")
-            out["api_calls"] = api_calls
-            return out
+    hit = g = rec = None
+    near_flag = False
+
+    # 1) 候選本身（A：含點或近界 ≤NEAR_EDGE_M 即命中）
+    if not section_renamed:
+        g0, rec0 = geom_of(secname, cand["landno"]); api_calls += 1
+        ok0, e0, n0 = hit_or_near(g0, pt)
+        if ok0:
+            hit, g, rec, near_flag = cand["landno"], g0, rec0, n0
+            out["path"] = "候選即現行" + (f"（近界外緣 {e0:.1f}m）" if n0 else "（免探測）")
+        else:
+            # 2) 收斂探測同母號子號（同樣採近界容差）
+            out["path"] = ("候選查無→探測子號" if g0 is None else "候選現行不含點→探測子號")
+            miss, n = 0, 0
+            while miss < PROBE_MISS_STOP:
+                n += 1
+                time.sleep(throttle)
+                gg, rr = geom_of(secname, f"{cand['mother']}-{n}"); api_calls += 1
+                if gg is None:
+                    miss += 1
+                    continue
+                miss = 0
+                okk, e2, nn = hit_or_near(gg, pt)
+                if okk:
+                    hit, g, rec, near_flag = f"{cand['mother']}-{n}", gg, rr, nn
+                    break
+
+    # 3) B1：新舊地號 API 橋接（重測改號／候選整段消失時）
+    if hit is None:
+        res = newold_query(cand["unit"], cand["sec4"], cand["no8"], "N")
+        if res:
+            new_sec4, new_no8 = res
+            new_name = None
+            try:
+                new_name = moa.section_name_of(cand["city"], cand["town"], new_sec4)
+            except Exception:  # noqa: BLE001
+                new_name = None
+            if new_name:
+                mo, ch = str(int(new_no8[:4])), str(int(new_no8[4:]))
+                new_landno = mo if ch == "0" else f"{mo}-{ch}"
+                gN, rN = geom_of(new_name, new_landno); api_calls += 1
+                okN, eN, nnN = hit_or_near(gN, pt)
+                if okN:
+                    hit, g, rec, near_flag, secname = new_landno, gN, rN, nnN, new_name
+                    out["section"] = new_name
+                    out["path"] = (f"新舊地號橋接（舊 {cand['secname']}{cand['landno']} → "
+                                   f"現行 {new_name}{new_landno}）")
+                    out["warnings"].append(
+                        f"經 MOI 新舊地號查詢橋接（重測改號），現行地號 {new_name}{new_landno}")
+
+    # 4) B2：鄰地掃描（點附近快照宗地逐筆驗農業部現行界址）
+    if hit is None:
+        sw = neighbor_sweep(shp, x, y, pt, cand["city"], cand["town"], moa, api, throttle)
+        if sw:
+            hit, g, rec, secname, near_flag = (sw["landno"], sw["g"], sw["rec"],
+                                               sw["secname"], sw["near"])
+            out["section"] = secname
+            out["path"] = "鄰地掃描命中（候選相鄰宗地）"
+            api_calls += sw["api_calls"]
+
+    # 全數未命中 → 需人工鑑界（E：正名，不再一律喊「跨母號分割」）
+    if hit is None:
+        out["status"] = "FAIL_NEEDS_SURVEY"
+        out["message"] = ("候選／子號探測／新舊地號查詢／鄰地掃描皆未命中現行含此點之宗地 → "
+                          "此點需人工地籍鑑界確認（可能重測改號無新舊對照、或圖釘偏移過大）")
+        out["api_calls"] = api_calls
+        return out
 
     # 成果
     p = rec.get("parcel") or {}
@@ -267,7 +422,11 @@ def reverse(text: str, throttle: float = PROBE_THROTTLE_S) -> dict:
     })
     if reg.get("zone") is None and reg.get("land_type") is None:
         out["warnings"].append("使分/使類空白：屬都市土地或未登錄地，身分待查證（不可逕寫都市土地）")
-    if edge < NEAR_EDGE_M:
+    if near_flag:
+        out["warnings"].append(
+            f"圖釘落在本宗地界址外緣 {edge:.1f}m（座標反查誤差內，已認定為本宗地）"
+            "→ 界址／相鄰筆以地籍鑑界為準")
+    elif edge < NEAR_EDGE_M:
         out["warnings"].append(f"點距邊界僅 {edge:.1f}m（近界）→ 建議人工確認相鄰筆")
     out["_geom"] = g   # 供 --out 寫 shp 用（不進 json）
     out["_landtype_none"] = (reg.get("zone") is None and reg.get("land_type") is None)

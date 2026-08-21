@@ -59,3 +59,67 @@ def test_county_filename_normalizes_tai():
     for a, b in L._TW.items():
         fn = fn.replace(a, b)
     assert fn == "台南市"
+
+
+# --- D：/maps/search/lat,+lon 與 ?q=/query= 座標（2026-08-21 芳寶段案漏解） ---
+
+def test_url_maps_search_coord():
+    # 短網址展開後常成 /maps/search/<lat>,+<lon>；分隔含「,+」要能解，且非地圖中心不標警告
+    url = "https://www.google.com/maps/search/23.893428,+120.326831?entry=tts&g_ep=xxx"
+    lon, lat, src = L.extract_lonlat(url)
+    assert (lon, lat) == (120.326831, 23.893428)
+    assert not src.startswith("⚠")
+    assert "search" in src or "搜尋" in src
+
+
+def test_url_query_param_coord():
+    url = "https://maps.google.com/?q=24.123456,120.654321&z=17"
+    lon, lat, src = L.extract_lonlat(url)
+    assert (lon, lat) == (120.654321, 24.123456)
+    assert not src.startswith("⚠")
+
+
+def test_url_3d4d_still_wins_over_search():
+    # 有地標點位(!3d!4d)時仍優先，不被 /search、@ 或 q= 蓋掉
+    url = ("https://www.google.com/maps/search/1.0,+2.0/@22.9285847,120.3357024,"
+           "2321m/data=!3m1!8m2!3d22.9243646!4d120.3469031?q=9.9,9.9")
+    lon, lat, src = L.extract_lonlat(url)
+    assert (lon, lat) == (120.3469031, 22.9243646)
+    assert "!3d!4d" in src
+
+
+# --- A：hit_or_near 近界容差（圖釘落界址外緣數公尺視為命中，本案 1.47m） ---
+
+def test_hit_or_near_contains():
+    from shapely.geometry import Polygon, Point
+    poly = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    ok, edge, near = L.hit_or_near(poly, Point(5, 5), tol=5.0)
+    assert ok and not near               # 內部：命中、非近界外側
+
+
+def test_hit_or_near_just_outside_within_tol():
+    from shapely.geometry import Polygon, Point
+    poly = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    ok, edge, near = L.hit_or_near(poly, Point(11.47, 5), tol=5.0)
+    assert ok and near                   # 外緣 1.47m ≤ 5m：命中且標近界
+    assert round(edge, 2) == 1.47
+
+
+def test_hit_or_near_too_far():
+    from shapely.geometry import Polygon, Point
+    poly = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    ok, edge, near = L.hit_or_near(poly, Point(20, 5), tol=5.0)
+    assert not ok and not near           # 外緣 10m > 5m：不命中
+
+
+def test_hit_or_near_none():
+    from shapely.geometry import Point
+    assert L.hit_or_near(None, Point(0, 0)) == (False, None, False)
+
+
+# --- landno_to_no8：母子號 → 8 碼（新舊地號 API 用） ---
+
+def test_landno_to_no8():
+    assert L.landno_to_no8("755") == "07550000"
+    assert L.landno_to_no8("755-1") == "07550001"
+    assert L.landno_to_no8("12-345") == "00120345"
