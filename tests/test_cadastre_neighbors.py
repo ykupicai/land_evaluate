@@ -76,6 +76,24 @@ def test_section_name():
     assert cn._section_name("中山", float("nan")) == "中山段"
 
 
+def test_frame_envelope_exceeds_buffer_for_elongated_base():
+    """鄰地涵蓋改由出圖框決定（2026-08-23 永康三民段385 案）：細長基地的 maxmap 出圖框
+    遠大於固定 50m buffer，故框篩選才能填滿框、不留白。鎖住「框寬 > buffer 寬」。"""
+    import overlay_placement as op
+    from shapely.geometry import Polygon
+    base = Polygon([(0, 0), (20, 230), (40, 0)])   # 約 230m 長、40m 寬的細長三角形
+
+    def _isect(x1, y1, x2, y2, _g=base):
+        it = _g.intersection(box(x1, y1, x2, y2))
+        return 0.0 if it.is_empty else it.area
+
+    pl = op.place_fixed(_isect, base.bounds, map_w=op.MAP2_W, map_h=op.MAP2_H)
+    fx1, fx2, fy1, fy2 = pl.extent
+    buf = base.buffer(50).bounds
+    assert (fx2 - fx1) > (buf[2] - buf[0]), "出圖框寬應大於 50m buffer 寬（否則框內留白）"
+    assert (fy2 - fy1) >= (buf[3] - buf[1]) * 0.9   # 高度方向亦不小於 buffer
+
+
 def test_fetch_all_survives_one_failed_group(tmp_path, monkeypatch):
     """單段查詢失敗不得阻斷其他成功段的合併輸出（2026-08-19 湖口祥湖段案）。
 

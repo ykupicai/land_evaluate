@@ -37,8 +37,11 @@ import warnings
 
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import shape
+from shapely.geometry import box as _sbox, shape
 from shapely.ops import unary_union
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import overlay_placement as op  # noqa: E402  出圖框計算（與 make_maps 同一支）
 
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -120,6 +123,21 @@ def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, ob
     su = site.geometry.union_all()
     ring = su.buffer(buffer_m)
 
+    # ★ 涵蓋範圍改由「maxmap 出圖框」決定（2026-08-23 永康三民段385 案定案）：固定 buffer
+    #   對細長／小基地會抓不滿框（框寬遠大於 buffer）→ 框內較遠宗地留白。出圖框僅由基地
+    #   幾何決定，可先算框、再用框篩地籍。用與 make_maps 相同的 place_fixed＋基地交集函式
+    #   算框（含角落避讓退比例尺），確保涵蓋 make_maps 實際框。buffer 仍作下限保證緊鄰收入。
+    region = ring
+    try:
+        def _isect(x1, y1, x2, y2, _g=su):
+            it = _g.intersection(_sbox(x1, y1, x2, y2))
+            return 0.0 if it.is_empty else it.area
+        pl = op.place_fixed(_isect, su.bounds, map_w=op.MAP2_W, map_h=op.MAP2_H)
+        fx1, fx2, fy1, fy2 = pl.extent      # extent=(x1,x2,y1,y2)
+        region = ring.union(_sbox(fx1, fy1, fx2, fy2))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 出圖框計算失敗，退回 buffer={buffer_m:.0f}m 涵蓋（{type(e).__name__}: {e}）")
+
     if not county:
         for c in ("縣市", "縣市名稱"):
             if c in site.columns:
@@ -130,8 +148,8 @@ def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, ob
         raise SystemExit(f"找不到 地籍圖資\\{county}.shp（周邊地籍發現需本機地籍快照做"
                          "空間識別；只用它認地號身分，不用它的屬性）")
 
-    sur_all = gpd.read_file(p, engine="pyogrio", bbox=ring.bounds)
-    sur_all = sur_all[sur_all.geometry.intersects(ring)]
+    sur_all = gpd.read_file(p, engine="pyogrio", bbox=region.bounds)
+    sur_all = sur_all[sur_all.geometry.intersects(region)]
     # 排除基地本身：與基地重疊面積達自身 50% 以上視為同一宗地（浮點誤差/版本差不可用
     # 地號字串比對，改用幾何重疊比例判斷，較穩健）
     sur_all = sur_all.copy()
@@ -344,7 +362,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joined", required=True, help="基地 shp（cadastre/基地.shp 或申請範圍）")
     ap.add_argument("--out", required=True, help="輸出資料夾")
-    ap.add_argument("--buffer", type=float, default=50.0, help="外擴公尺數，預設 50")
+    ap.add_argument("--buffer", type=float, default=50.0,
+                    help="緊鄰下限外擴公尺（預設 50）；實際涵蓋以 maxmap 出圖框為準"
+                         "（框大於此值時以框為準，確保框內不留白）")
     ap.add_argument("--county", default=None, help="縣市（未給則從基地 shp 屬性讀）")
     ap.add_argument("--name", default="鄰地")
     ap.add_argument("--no-auto-resolve", action="store_true",
@@ -354,8 +374,8 @@ def main():
 
     groups, su, local_check_union, sur = discover(a.joined, a.buffer, a.county)
     total = sum(len(v) for v in groups.values())
-    print(f"發現階段：{a.buffer:.0f}m 內共 {total} 筆鄰地，分 {len(groups)} 組"
-          f"（縣市/鄉鎮/段不同者不能同一次查詢）")
+    print(f"發現階段：出圖框涵蓋（buffer≥{a.buffer:.0f}m 下限）共 {total} 筆鄰地，"
+          f"分 {len(groups)} 組（縣市/鄉鎮/段不同者不能同一次查詢）")
     for k, v in groups.items():
         print(f"  {'/'.join(k)}：{len(v)} 筆　{v[:10]}{'...' if len(v) > 10 else ''}")
 
