@@ -44,6 +44,39 @@ class TestRegistryIntegrity:
         assert "新竹縣" not in sup  # unstable（token 動態注入）
 
 
+class TestQueryFallback:
+    """臺南主計層查無 → fallback 細部計畫層（2026-08-23 北安段現有巷道改道案）。"""
+
+    def test_tainan_has_fallback(self):
+        assert "query_fallback" in uf.COUNTY["臺南市"]
+
+    def test_falls_back_when_primary_empty(self, monkeypatch):
+        cfg = uf.COUNTY["臺南市"]
+        calls = []
+
+        def fake_layer(c, url, env, token):
+            calls.append(url)
+            return [] if url == cfg["query"] else [{"attributes": {"NAME": "住四"},
+                                                    "geometry": {"rings": []}}]
+        monkeypatch.setattr(uf, "_fetch_token", lambda c: None)
+        monkeypatch.setattr(uf, "_query_layer", fake_layer)
+        out = uf.query_zone("臺南市", (0, 0, 1, 1))
+        assert len(out["features"]) == 1                       # 用了細計 fallback
+        assert calls == [cfg["query"], cfg["query_fallback"]]  # 先主計、再細計
+
+    def test_no_fallback_when_primary_has_data(self, monkeypatch):
+        cfg = uf.COUNTY["臺南市"]
+        calls = []
+
+        def fake_layer(c, url, env, token):
+            calls.append(url)
+            return [{"attributes": {"NAME": "農"}, "geometry": {"rings": []}}]
+        monkeypatch.setattr(uf, "_fetch_token", lambda c: None)
+        monkeypatch.setattr(uf, "_query_layer", fake_layer)
+        uf.query_zone("臺南市", (0, 0, 1, 1))
+        assert calls == [cfg["query"]]                         # 主計有值就不 fallback
+
+
 class TestResolveCode:
     TOWNS = [{"code": "01", "name": "宜蘭市"}, {"code": "06", "name": "羅東鎮"}]
     SECTS = [{"code": "0495", "name": "宜興段"}, {"code": "0005", "name": "十六份段"}]

@@ -102,8 +102,14 @@ def _color_for(name, colors: dict):
 # fields：把圖台各自的欄名映射到本腳本正規化欄位（缺的給 None）。
 COUNTY = {
     "臺南市": {
+        # 主計層（MergePlanUseZoning_97/0）＝主要計畫＋主細合併逐宗地分區（仁德等）。
+        # ⚠ 細部計畫區（如北區北安段）不在主計層 → query_fallback 改查 Labe_LandUseZone/0
+        #   （背後 DetailPlanUseZoning_97，Fmm 圖台用；欄位同 NAME/LAYER/BUILDRATE/VOLUMERATE）。
+        #   2026-08-23 北安段現有巷道改道案打通；兩層擇一有值，主計 0 筆才 fallback 細計。
         "query": "https://up.tainan.gov.tw/server/rest/services/Upbm/"
                  "MergePlanUseZoning_97/MapServer/0/query",
+        "query_fallback": "https://up.tainan.gov.tw/server/rest/services/Upbm/"
+                          "Labe_LandUseZone/MapServer/0/query",
         "proxy": "https://up.tainan.gov.tw/AuthToken/proxy.ashx?",
         "proxy_encode": True,   # 此代理吃「URL 編碼後的完整目標」
         "referer": "https://up.tainan.gov.tw/UPBUD_sys/Areas/Map/map?type=upbm&ver=public",
@@ -591,6 +597,18 @@ def query_zone(county: str, bbox: tuple[float, float, float, float]) -> dict:
     xmin, ymin, xmax, ymax = bbox
     env = {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
            "spatialReference": {"wkid": EPSG}}
+    feats = _query_layer(cfg, cfg["query"], env, token)
+    # 主計層查無 → 改查細部計畫層（臺南 Labe_LandUseZone＝DetailPlanUseZoning_97）。
+    # 主要計畫與細部計畫是兩套逐宗地分區層，一塊地只在其一（北安段北區在細計、
+    # 仁德在主計）；主計 0 筆時 fallback 到細計（2026-08-23 北安段現有巷道改道案）。
+    if not feats and cfg.get("query_fallback"):
+        print("  主計層查無 → 改查細部計畫層 (query_fallback)…")
+        feats = _query_layer(cfg, cfg["query_fallback"], env, token)
+    return {"features": feats}   # esri json：features=[{attributes, geometry:{rings}}]
+
+
+def _query_layer(cfg: dict, url: str, env: dict, token: str | None) -> list:
+    """對單一圖層 URL 查詢（含分頁彙整），回 features list。"""
     feats: list = []
     offset = 0
     while True:
@@ -605,7 +623,7 @@ def query_zone(county: str, bbox: tuple[float, float, float, float]) -> dict:
             params["resultOffset"] = str(offset)
         if token:
             params["token"] = token
-        target = cfg["query"] + "?" + urllib.parse.urlencode(params)
+        target = url + "?" + urllib.parse.urlencode(params)
         txt = _http_get(_proxied(cfg, target), referer=cfg.get("referer"),
                         insecure=cfg.get("insecure", False))
         try:
@@ -614,7 +632,7 @@ def query_zone(county: str, bbox: tuple[float, float, float, float]) -> dict:
             raise SystemExit(f"圖台回應非 JSON（前 200 字）：{txt[:200]}")
         if j.get("error"):
             msg = json.dumps(j["error"], ensure_ascii=False)
-            if offset and "agination" in msg:   # 分頁不支援：用已取回的即可（site bbox 遠小於 maxRecordCount）
+            if offset and "agination" in msg:   # 分頁不支援：用已取回的即可
                 print(f"  （服務不支援分頁，已取 {len(feats)} 筆；site bbox 遠小於上限，通常已足）")
                 break
             raise SystemExit(f"圖台回錯誤：{msg[:200]}")
@@ -623,7 +641,7 @@ def query_zone(county: str, bbox: tuple[float, float, float, float]) -> dict:
         if not j.get("exceededTransferLimit") or not got:
             break
         offset += len(got)
-    return {"features": feats}   # esri json：features=[{attributes, geometry:{rings}}]
+    return feats
 
 
 def _landno_main(a) -> int:
