@@ -67,8 +67,10 @@
 ⓪a 免登入取地籍(scripts/cadastre_fetch.py，主路徑) → run_case.py --fetch 可一鍵起跑
 ⓪a(反查) 座標／Google Maps 網址 → 現行地段地號(scripts/latlon_to_parcel.py) →
      run_case.py --latlon <網址> --case <案名> 一鍵起跑。是 ⓪a 的**另一種輸入**
-     (把「清冊」換成「一個座標/網址」)，非新步驟；**單點單筆**、反查失敗硬停
-     (跨母號分割/重測改號需線上空間反查、段名/縣市定位問題)。詳 skill landmark-to-parcel
+     (把「清冊」換成「一個座標/網址」)，非新步驟；**單點單筆**。2026-08-21 修 A–E 後
+     已能處理：圖釘近界誤差(≤5m 容差)、重測改號(接 MOI 新舊地號 API)、鄰地掃描、
+     段碼為主鍵解析段名、臺/台縣市檔名、網址 /maps/search 與 ?q= 格式；真解不出才
+     `FAIL_NEEDS_SURVEY`(需人工鑑界)。詳 skill landmark-to-parcel 與下方「踩過的坑」。
 ⓪a' 周邊地籍自動發現(scripts/cadastre_neighbors.py，外擴50m找鄰地＋即時回填＋覆蓋率
      自我檢查／自動探測補正，取代舊快照或WMTS當分區圖基準；run_case.py --fetch 已自動接掛)
 ⓪b 環敏套疊(scripts/ngis_sensitive.py，★正式程序；NGIS 官方54圖層實際套疊、免登入 <1秒
@@ -113,8 +115,21 @@
    （善化住宅區）雖有但被錯寫成「善化専屬指導原則」——等於暗示沒有地方指導原則的
    都市計畫區就不必辦。已全數更正為全國性法定要求。
 ②c 臨路評估(road_access.py，同上；都市計畫道路用地常法定相鄰但現況未闢建，屬正常)
+Ⓤ 縣市都市計畫圖台(scripts/urbanplan_fetch.py，2026-08-20 打通、08-24 擴至 9 縣市，
+   選用但強烈建議)：接都發局**現行版**逐筆分區(幾何＋分區/用地/建蔽/容積/計畫案，
+   含官方色Color1)，精度足以正確切道路截角，遠勝本機2019粗版shp。兩種接法自動分流：
+   ‧ **bbox 空間查詢型**(吃基地外擴 bbox)：臺南、高雄、彰化、桃園、臺北、新北、花蓮
+     (7 穩定；桃園/臺北/新北/花蓮建蔽容積齊全)。新竹縣 token 不穩標 unstable、退本機。
+     `urbanplan_fetch.py --county <縣市> --joined <案>/cadastre/基地.shp --margin 300 --out <案>/都市計畫_縣市圖台`
+   ‧ **land-number 地號反查型**(吃段/地號，正好接 ⓪a 現成地段地號)：宜蘭縣、新竹市。
+     `urbanplan_fetch.py --county 宜蘭縣 --town <鄉鎮> --sect <段> --landnos <地號…> --out …`
+   探勘走不通已記註解避免重探：臺中(權限鎖死)、雲林(僅全國檢視器)、臺東(需登入)、NGIS(Turnstile)。
+   未登錄/查無一律退回本機 shp。詳 `.claude/rules/出圖上色與分區.md` 縣市狀態表、
+   回歸測試 tests/test_urbanplan_fetch.py。
 ③ 批次出圖 六主題(make_maps.py；使用分區/使用地編定兩張圖會自動疊都市計畫Color1，
-   見`.claude/rules/出圖上色與分區.md`；國土功能分區改顯示「城鄉發展地區」而非
+   見`.claude/rules/出圖上色與分區.md`；★有跑Ⓤ時加 `--urban-shp <案>/都市計畫_縣市圖台/
+   都市計畫_縣市圖台.shp` 換用圖台現行分區取代本機粗版，標註欄自動偵測；
+   國土功能分區改顯示「城鄉發展地區」而非
    「農業發展地區」，兩者不衝突，都市計畫地區的國土功能分區本就走前者)
 ④ 簡報：無Ⓒ隔離綠帶頁；頁面結構改「都市計畫土地使用分區／國土利用調查／臨路條件」
    （見 skill parcel-briefing-deck「都市計畫個案變更變體」節）
