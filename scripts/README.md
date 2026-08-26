@@ -83,9 +83,12 @@
 `overlay_placement.py`（角落疊圖避讓）、`nlsc_wmts.py`（WMTS 圖磚拼接）、
 `shp_trust_utils.py`（DBF 容錯／地號正規化／sitemap 分派／**欄名別名表 `F_*`**）、
 `zone_utils.py`（分區名正規化）、
+`map_sanity.py`（**出圖成果自我檢查**：出圖前擋 0 筆圖層、出圖後驗成品非空白，
+見下方第 4 點）、
 `parse_helpers.py`（解析工具）、`csv_to_xlsx.py`（獨立乾淨子進程寫 xlsx，繞開 openpyxl×GDAL 衝突）。
 
-**改出圖腳本前先知道的三件事**（皆 2026-08-04 修，都會靜默出錯）：
+**改出圖腳本前先知道的四件事**（1~3 皆 2026-08-04 修，都會靜默出錯；4 是 2026-08-25
+補上的防線）：
 
 1. **底圖要照「版面引擎算出的最終圖框」抓，不是基地 bbox**——圖框因 A4 比例與整數
    比例尺退階而更寬，用 bbox 抓成品會左右露白邊。作法：先呼叫一次
@@ -98,6 +101,15 @@
 3. **右欄圖例只有 45mm 寬**，`build_layout` 以 `setWrapString("／")` 換行 →
    **長標籤裡沒有「／」就會被直接切掉**。另光柵圖例會自動多一行「Band 1 (Gray)」，
    `build_layout` 已逐層挑掉該節點。
+4. **「exportToImage 成功」不等於「圖裡有東西」**——它只代表檔案寫出來了。上面 1~3
+   與縣市欄空白那類問題，全都會出成一張只有紅框的空白圖、05 清單照樣記「成功」
+   （龍崎案錯了整整一輪才發現）。`map_sanity.py` 補上兩道：出圖**前**
+   `check_theme_layers` 擋 0 筆的關鍵圖層（決定性，不會誤判）；出圖**後**
+   `check_blank_image` 驗成品不是整片單色（抓底圖被鎖／tif 壞掉）。兩者都記
+   「失敗」＋原因，既有的 `pipeline_check.py sheets` 閘門因此自動生效。
+   ⚠ 空白門檻（99.5%）**刻意訂得極保守——寧可漏抓，不可誤殺**：誤判會把整條產線
+   擋掉，比漏抓貴。已對 177 張既有交付成果圖實測 0 誤判；改門檻前先重跑該驗證與
+   `tests/test_map_sanity.py`。
 
 **新增基地 shp 來源時只改一處**：`shp_trust_utils` 的 `F_LANDNO/F_COUNTY/F_TOWN/
 F_SEG/F_ZONE/F_LTYPE`。② area_join 用 `20251201_*`、⓪a cadastre_fetch 用中文短欄名

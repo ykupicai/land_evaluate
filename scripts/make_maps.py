@@ -56,6 +56,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 
 from zone_utils import normalize_zone
+import map_sanity
 from nlsc_wmts import build_basemap
 from shp_trust_utils import (
     F_LANDNO,
@@ -1996,6 +1997,17 @@ def main() -> None:
                              None),
             }
 
+            # 出圖前先數關鍵圖層筆數，供 map_sanity 判斷「這張圖會不會是空的」。
+            # 龍崎案教訓：圖層 0 筆照樣出圖、05 清單照樣記「成功」。取不到筆數就不放進
+            # dict——check_theme_layers 只在「明確是 0」時才擋，資訊不足一律放行。
+            layer_counts: dict[str, int] = {}
+            for _l in (l_red, l_nz, l_nt, zones_lyr):
+                try:
+                    if _l is not None and _l.isValid():
+                        layer_counts[_l.name()] = _l.featureCount()
+                except Exception:  # noqa: BLE001 — 數不到就不擋，檢查本身不可成為失敗源
+                    pass
+
             for theme in themes:
                 layers, leg_layers, hide, note, overlay = theme_defs[theme]
                 fname = f"{cid}_{sanitize(c['name'])}_{theme}.png"
@@ -2020,6 +2032,12 @@ def main() -> None:
                         n_fail += 1
                     else:
                         n_skip += 1
+                    continue
+                bad = map_sanity.check_theme_layers(theme, layer_counts)
+                if bad:
+                    records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
+                                    "失敗", bad])
+                    n_fail += 1
                     continue
                 try:
                     title = f"{c['name']}　{THEME_TITLES[theme]}"
@@ -2056,9 +2074,16 @@ def main() -> None:
                         if att + 1 < attempts:
                             print(f"  [{cid}] {theme} 第{att + 1}次輸出失敗，重試…", flush=True)
                     if code == QgsLayoutExporter.Success:
-                        records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
-                                        pt, ts, "成功", caveat])
-                        n_done += 1
+                        # 檔案寫出來 ≠ 圖裡有東西：底圖被鎖或 tif 壞掉時照樣 Success。
+                        blank = map_sanity.check_blank_image(img_dir / fname)
+                        if blank:
+                            records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
+                                            pt, ts, "失敗", blank])
+                            n_fail += 1
+                        else:
+                            records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
+                                            pt, ts, "成功", caveat])
+                            n_done += 1
                     else:
                         records.append([cid, c["name"], theme, fname, f"1/{c['scale']}",
                                         pt, ts, "失敗",
