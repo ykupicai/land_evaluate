@@ -57,8 +57,12 @@ from openpyxl.styles import Alignment, Font
 
 from zone_utils import normalize_zone
 import map_sanity
+import urban_mix
+import ownership_style
+from cadastre_fetch import is_unregistered
 from nlsc_wmts import build_basemap
 from shp_trust_utils import (
+    F_PUBLIC,
     F_LANDNO,
     F_LTYPE,
     F_SEG,
@@ -186,6 +190,18 @@ URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分
 # 含 Color1；現行版、精度足以正確切道路截角）取代本機全台 2019 舊 shp。臺南/高雄等有
 # 登錄圖台的縣市案子建議帶此旗標；標註欄自動偵測（zone→ZONE_USE→ZONE→NAME）。
 URBAN_SHP_OVERRIDE = None
+# 主題限定的圖面調整（預設空＝維持原行為）：
+#   NO_LANDNO_THEMES     這些主題不標基地地號（清爽的分區圖常不要地號干擾）
+#   PARCEL_LINE_THEMES   這些主題的宗地界線改黑實線，取代預設的細灰線
+NO_LANDNO_THEMES: set = set()
+PARCEL_LINE_THEMES: set = set()
+#   BASE_LINE_THEMES     這些主題的基地框改黑（預設紅框）
+BASE_LINE_THEMES: set = set()
+#   NO_NEIGHBOR_THEMES   這些主題不畫周邊地籍界線（只留基地框，畫面最乾淨）
+NO_NEIGHBOR_THEMES: set = set()
+PARCEL_LINE_COLOR = "0,0,0,255"
+PARCEL_LINE_WIDTH = "0.25"
+BASE_LINE_WIDTH = "0.5"      # 基地線寬（＝預設紅框寬），改黑後仍比周邊粗一倍
 
 # 國土利用調查（LUIMAP）：官方色碼表 + 臨路評估的 features.geojson 分類結果。
 # 色碼表 2026-07-26 起 vendor 於 config/luimap_colortable.csv（不再取自 fishpv 專案）；
@@ -226,10 +242,12 @@ def _basemap(extent_3826, out_tif, **kw):
     return build_basemap(extent_3826, out_tif, **kw)
 
 # 主題（key=檔名用、title=圖名/圖說）
-THEMES = ["使用分區", "使用地編定", "國土功能分區", "正射套疊", "國土利用調查", "臨路判定"]
+THEMES = ["使用分區", "使用地編定", "權屬", "國土功能分區", "正射套疊", "國土利用調查",
+          "臨路判定"]
 THEME_TITLES = {
     "使用分區": "非都市土地使用分區及都市計畫土地使用分區圖",
     "使用地編定": "非都市土地使用地變更編定及都市計畫土地使用分區圖",
+    "權屬": "土地權屬（公私別）圖",
     "國土功能分區": "國土功能分區圖",
     "正射套疊": "正射影像及通用電子地圖套疊圖",
     "國土利用調查": "國土利用調查圖",
@@ -385,9 +403,10 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
     地圖範圍從縣市官方 shp 撈。回傳警告清單。gpkg schema 與 extract_layers 完全一致。"""
     warnings: list[str] = []
     base = mem_layer("基地", "field=案場ID:string&field=案場名稱:string&field=地號:string"
-                            "&field=使分:string&field=使類:string")
+                            "&field=使分:string&field=使類:string&field=公私別:string")
     neigh = mem_layer("周邊地籍", "field=案場ID:string&field=地號:string"
-                                 "&field=使分:string&field=使類:string&field=是否基地:string")
+                                 "&field=使分:string&field=使類:string&field=是否基地:string"
+                                 "&field=公私別:string")
     zones = mem_layer("功能分區", "field=縣市:string&field=zone:string")
 
     # 1. 基地層：shp 幾何(QGIS) + dbf 屬性(read_dbf，容忍截斷欄名/依 .cpg 編碼)，按位置配對
@@ -410,6 +429,7 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
             sites = ((UNMAPPED_ID, UNMAPPED_NAME),)
         zone = shp_get(r, F_ZONE)
         ltype = shp_get(r, F_LTYPE)
+        pub = shp_get(r, F_PUBLIC)      # 權屬主題用；⓪a/TCDGIS 值域不同，判定交 classify_ownership
         g = f.geometry()
         for cid, cname in sites:      # 一宗地可同屬多案場,各案場都收幾何
             if cid not in cases:
@@ -417,9 +437,10 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
             if g is None or g.isEmpty():
                 warnings.append(f"{cid} 地號{landno} 無幾何")
                 continue
-            add_feat(base, g, [cid, cname, landno, zone or URBAN_LABEL, ltype or URBAN_LABEL])
+            add_feat(base, g, [cid, cname, landno, zone or URBAN_LABEL,
+                               ltype or URBAN_LABEL, pub or ""])
             landnos[cid].add(landno)
-            own_feats[cid].append((g, landno, zone, ltype))
+            own_feats[cid].append((g, landno, zone, ltype, pub))
             bb = g.boundingBox()
             bboxes[cid] = bb if cid not in bboxes else (
                 bboxes[cid].combineExtentWith(bb) or bboxes[cid])
@@ -458,6 +479,7 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
     if neigh_fresh is not None:
         fld = neigh_fresh.fields()
         i_ln, i_zone, i_type = fld.indexOf("地號"), fld.indexOf("使分"), fld.indexOf("使類")
+        i_pub = fld.indexOf("公私別")     # ⓪a′ 鄰地.shp 帶權屬（線上查得，可信）
         for c in cases.values():
             if "extent" not in c:
                 continue
@@ -469,9 +491,9 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
             #   QML 上色的圖層（基地紅框層 l_red 只畫外框+標籤，不上色），鄰地.shp
             #   依設計排除了基地自身（cadastre_neighbors.py 的 _ov<0.5 過濾），若不
             #   在這裡補回，主題1/2 會在基地範圍內開天窗（2026-08-06 實測抓到）。
-            for g, ln, zone, typ in own_feats.get(c["id"], []):
+            for g, ln, zone, typ, pub in own_feats.get(c["id"], []):
                 add_feat(neigh, g, [c["id"], ln, zone or URBAN_LABEL,
-                                    typ or URBAN_LABEL, "Y"])
+                                    typ or URBAN_LABEL, "Y", pub or ""])
                 n += 1
             for f in neigh_fresh.getFeatures(QgsFeatureRequest().setFilterRect(rect)):
                 ln = attr_str(f[i_ln]) if i_ln >= 0 else ""
@@ -482,7 +504,8 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                     matched.add(normalize_landno(ln))
                 add_feat(neigh, f.geometry(), [
                     c["id"], ln, zone or URBAN_LABEL, typ or URBAN_LABEL,
-                    "Y" if is_base else ""])
+                    "Y" if is_base else "",
+                    attr_str(f[i_pub]) if i_pub >= 0 else ""])
                 n += 1
             miss = base_norm - matched
             if miss:
@@ -554,7 +577,8 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                     matched.add(normalize_landno(ln))
                 add_feat(neigh, f.geometry(), [
                     c["id"], ln, zone or URBAN_LABEL, typ or URBAN_LABEL,
-                    "Y" if is_base else ""])
+                    "Y" if is_base else "",
+                    ""])   # ★本機快照權屬欄不可採信（CLAUDE.md）→ 留空＝無法判定
                 n += 1
             # 基地宗地在周邊層完全找不到相符（疊字/格式問題）→ 點名警告，不靜默
             miss = base_norm - matched
@@ -748,9 +772,10 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
     """抽基地/周邊/功能分區 → gpkg。回傳警告清單。"""
     warnings: list[str] = []
     base = mem_layer("基地", "field=案場ID:string&field=案場名稱:string&field=地號:string"
-                            "&field=使分:string&field=使類:string")
+                            "&field=使分:string&field=使類:string&field=公私別:string")
     neigh = mem_layer("周邊地籍", "field=案場ID:string&field=地號:string"
-                                 "&field=使分:string&field=使類:string&field=是否基地:string")
+                                 "&field=使分:string&field=使類:string&field=是否基地:string"
+                                 "&field=公私別:string")
     zones = mem_layer("功能分區", "field=縣市:string&field=zone:string")
 
     by_county: dict[str, list[dict]] = defaultdict(list)
@@ -793,7 +818,9 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
                             f"（shp={f[i_mother]} 02={row['宗地母']}），仍照 FID 出圖")
                     g = f.geometry()
                     add_feat(base, g, [c["id"], c["name"], row["地號"],
-                                       row["使分"] or URBAN_LABEL, row["使類"] or URBAN_LABEL])
+                                       row["使分"] or URBAN_LABEL,
+                                       row["使類"] or URBAN_LABEL,
+                                       ""])   # 權屬：本機 shp 不可採信，留空＝無法判定
                     bbox = g.boundingBox() if bbox is None else bbox.combineExtentWith(g.boundingBox()) or bbox
             if bbox is None or bbox.isEmpty():
                 c["error"] = "全部地號取不到幾何"
@@ -817,6 +844,7 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
                     zone or URBAN_LABEL,
                     typ or URBAN_LABEL,
                     "Y" if f.id() in case_fids else "",
+                    "",   # ★本機快照權屬欄不可採信（CLAUDE.md）→ 留空＝無法判定
                 ])
                 n += 1
             print(f"  {c['id']} {c['name']}：{len(fids)} 宗地、1/{c['scale']}、周邊 {n} 筆", flush=True)
@@ -999,6 +1027,21 @@ def label_settings(field: str = "地號", size: float = 9.0, is_expression: bool
     fmt.setBuffer(buf)
     pal.setFormat(fmt)
     return QgsVectorLayerSimpleLabeling(pal)
+
+
+def polygon_label(lyr, field: str = "地號", size: float = 9.0) -> None:
+    """面圖層標註（權屬圖用）：**強制標註點落在該宗地內部**。
+
+    ★ 2026-08-07 安南案實見：PAL 預設用質心定位，而凹形／環抱型宗地的質心會落在
+      多邊形**之外**——安南 302-1 環抱基地一角，質心落進基地內，地號就標進紅框裡，
+      看起來像基地多了一筆地（實際幾何重疊 0.00 ㎡、只是緊鄰）。這種圖交出去會被
+      誤讀。`centroidInside=True` 讓標註點退回宗地內部。
+    """
+    lab = label_settings(field, size)
+    pal = lab.settings()
+    pal.centroidInside = True
+    lyr.setLabeling(QgsVectorLayerSimpleLabeling(pal))
+    lyr.setLabelsEnabled(True)
 
 
 # 周邊宗地標註：基地宗地交給紅框層標（避免重複）；PAL 自動避讓，擁擠處自動略label
@@ -1368,6 +1411,7 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
 
 def main() -> None:
     global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS
+    global NO_LANDNO_THEMES, PARCEL_LINE_THEMES, NO_NEIGHBOR_THEMES, BASE_LINE_THEMES
     global URBAN_SHP_OVERRIDE
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
@@ -1432,6 +1476,22 @@ def main() -> None:
             layout_mode = args[i + 1]; i += 1
         elif a.startswith("--road-margin="):
             road_margin_cli = float(a.split("=", 1)[1])
+        elif a.startswith("--base-line-themes="):
+            BASE_LINE_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
+        elif a == "--base-line-themes":
+            BASE_LINE_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
+        elif a.startswith("--no-neighbor-themes="):
+            NO_NEIGHBOR_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
+        elif a == "--no-neighbor-themes":
+            NO_NEIGHBOR_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
+        elif a.startswith("--no-landno-themes="):
+            NO_LANDNO_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
+        elif a == "--no-landno-themes":
+            NO_LANDNO_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
+        elif a.startswith("--parcel-line-themes="):
+            PARCEL_LINE_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
+        elif a == "--parcel-line-themes":
+            PARCEL_LINE_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
         elif a.startswith("--themes="):
             themes_filter = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
         elif a.startswith("--"):
@@ -1709,6 +1769,38 @@ def main() -> None:
             common_note = f"位置：{loc}\n涵蓋地號：\n{wrap_cjk(pt)}"
 
             is_urban = bool(c.get("has_urban_rows")) and urban_ok
+            # 基地的都市／非都市組成 → 決定要不要出使用地編定（2026-08-26 使用者定案）：
+            # ①全都市＝只出使用分區（都市土地無使類，兩張圖會一模一樣）②混合、③全非都市＝兩張都出。
+            # ★判定不可只看使分/使類空白（空白同時可能是都市土地或未登錄地，CLAUDE.md 已載），
+            #   故要求「空白＋落在都市計畫圖層內」才算都市；判定不足一律兩張都出（安全側）。
+            mix_kind = urban_mix.UNKNOWN
+            try:
+                _fn = [fl.name() for fl in l_red.fields()]
+                _iz = _fn.index("使分") if "使分" in _fn else -1
+                _it = _fn.index("使類") if "使類" in _fn else -1
+                _il = _fn.index("地號") if "地號" in _fn else -1
+                _rows = []
+                for bf in l_red.getFeatures():
+                    g0 = bf.geometry()
+                    hit = False
+                    if urban_ok and g0 is not None and not g0.isEmpty():
+                        for uf in urban_lyr_zoning.getFeatures(
+                                QgsFeatureRequest().setFilterRect(g0.boundingBox())):
+                            ug = uf.geometry()
+                            if ug is not None and not ug.isEmpty() and ug.intersects(g0):
+                                hit = True
+                                break
+                    _ln = str(bf[_il]) if _il >= 0 else ""
+                    _rows.append((bf[_iz] if _iz >= 0 else None,
+                                  bf[_it] if _it >= 0 else None, hit,
+                                  bool(_ln) and is_unregistered(_ln)))
+                mix_kind = urban_mix.classify(_rows)
+            except Exception as exc:  # noqa: BLE001 — 判定失敗＝兩張都出，不可少出圖
+                warnings.append(f"{cid} 都市/非都市組成判定失敗（兩張分區圖照常出）：{exc}")
+            skip_by_mix = urban_mix.themes_to_skip(mix_kind)
+            if skip_by_mix:
+                print(f"  [{cid}] {urban_mix.skip_reason(mix_kind)}"
+                      f" → 略過 {'、'.join(sorted(skip_by_mix))}", flush=True)
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
                                                         color_to_names, keep_alive,
                                                         zone_field=urban_zone_field)
@@ -1716,6 +1808,22 @@ def main() -> None:
             if urban_legend_lyr is not None:
                 # 必須註冊進專案，圖例面板才能解析並顯示都市計畫分區節點
                 project.addMapLayer(urban_legend_lyr, False)
+
+            # 權屬圖層：吃 gpkg 周邊地籍（含基地自身，是否基地=Y），依公私別分色。
+            # 分色實作走 ownership_style（與 make_extra_maps 同一份），判定走
+            # persite_stats.classify_ownership（全產線唯一判準）。
+            # ⚠ 走本機快照的周邊筆數其權屬欄為空 → 顯示「無法判定」而非誤標私有
+            #   （CLAUDE.md：本機快照 所有權/管理者 欄不可作為權屬依據）。
+            l_own = open_gpkg_layer(neigh_uri, "土地權屬", subset)
+            own_order = []
+            try:
+                own_order = ownership_style.style_by_owner(
+                    l_own, "土地權屬", label_fn=polygon_label, label_size=9,
+                    outline="70,70,70,255", outline_w="0.3",
+                    alpha=ownership_style.neighbour_alpha(0.55))
+                keep_alive.append(l_own)
+            except KeyError:
+                l_own = None      # 舊 gpkg 無公私別欄 → 主題迴圈記失敗並指路重抽
 
             zoning_layers = [l_red, *gray_opt, l_nz]
             zoning_legend = [l_nz, l_red]
@@ -1978,6 +2086,14 @@ def main() -> None:
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
                                None),
+                # 權屬：分色層在下、基地紅框在上（紅框標地號、分色層標周邊地號）。
+                # 圖框與其他主題同尺度（以基地為準），周邊只顯示落在框內的部分。
+                "權屬": ([l_own, l_red] if l_own is not None else [l_red],
+                         [l_own, l_red] if l_own is not None else [l_red],
+                         set(),
+                         common_note + "\n權屬：公有土地開放資料(MOI_API_039)＋地籍屬性"
+                         "\n（「未列＝私有」為反面推論，關鍵筆數請以謄本覆核）",
+                         None),
                 "國土功能分區": ([l_red, *gray_opt, zones_lyr], [zones_lyr, l_red], {"國土功能分區"},
                                  common_note + "\n功能分區：各縣市政府國土功能分區圖資\n（示意性質，實際以公告為準）",
                                  None),
@@ -2010,6 +2126,8 @@ def main() -> None:
 
             for theme in themes:
                 layers, leg_layers, hide, note, overlay = theme_defs[theme]
+                if theme in NO_NEIGHBOR_THEMES:      # 不畫周邊地籍界線，只留基地框
+                    layers = [x for x in layers if x is not l_gray]
                 fname = f"{cid}_{sanitize(c['name'])}_{theme}.png"
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
                 if theme == "正射套疊" and not case_wmts_ok:
@@ -2033,12 +2151,40 @@ def main() -> None:
                     else:
                         n_skip += 1
                     continue
+                if theme in skip_by_mix:
+                    # 清掉前次執行留下的同名舊圖：05 清單寫「略過」、資料夾卻躺著一張圖，
+                    # 正是本專案最貴的那類靜默不一致（會被當成本次成果誤用）。
+                    try:
+                        (img_dir / fname).unlink(missing_ok=True)
+                    except OSError as exc:
+                        warnings.append(f"{cid} {theme} 舊圖刪除失敗（請手動移除）：{exc}")
+                    records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
+                                    "略過", urban_mix.skip_reason(mix_kind)])
+                    n_skip += 1
+                    continue
+                if theme == "權屬" and l_own is None:
+                    records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
+                                    "失敗", "圖層.gpkg 無「公私別」欄（舊版抽取）"
+                                    "——請重跑一次且不要帶 --skip-extract 以重新抽取"])
+                    n_fail += 1
+                    continue
                 bad = map_sanity.check_theme_layers(theme, layer_counts)
                 if bad:
                     records.append([cid, c["name"], theme, fname, f"1/{c['scale']}", pt, ts,
                                     "失敗", bad])
                     n_fail += 1
                     continue
+                # 主題限定圖面調整：l_red／l_gray 是**案場共用**的同一份圖層物件，
+                # 逐張圖出圖前重設，否則前一主題的設定會殘留到下一張。
+                l_red.setLabelsEnabled(theme not in NO_LANDNO_THEMES)
+                # 基地框：一併改黑（「宗地界線」含基地），但保留較粗線寬以資識別申請範圍
+                l_red.renderer().setSymbol(
+                    outline_symbol(color=PARCEL_LINE_COLOR, width=BASE_LINE_WIDTH)
+                    if theme in BASE_LINE_THEMES else outline_symbol())
+                l_gray.renderer().setSymbol(
+                    outline_symbol(color=PARCEL_LINE_COLOR, width=PARCEL_LINE_WIDTH)
+                    if theme in PARCEL_LINE_THEMES
+                    else outline_symbol(color="130,130,130,255", width="0.18"))
                 try:
                     title = f"{c['name']}　{THEME_TITLES[theme]}"
                     if layout_mode == "maxmap":
@@ -2111,7 +2257,7 @@ def main() -> None:
         # 存取違例硬崩潰。xlsx 交由獨立乾淨進程 scripts/csv_to_xlsx.py 產生（見 main 末）。
         print(f"05 清單(CSV)已即時寫出：{out05_csv}", flush=True)
         print(f"\n=== 完成：成功 {n_done} 張、失敗 {n_fail} 張"
-              f"{f'、略過 {n_skip} 張（主題6未跑fishpv）' if n_skip else ''} ===", flush=True)
+              f"{f'、略過 {n_skip} 張（原因見 05 清單備註）' if n_skip else ''} ===", flush=True)
         if warnings:
             print("警告：", flush=True)
             for w in warnings:

@@ -95,6 +95,50 @@ def _load_api():
     return api
 
 
+_TOWN_CACHE: dict[tuple, str] = {}
+
+
+def _current_town(county: str, town: str) -> str:
+    """本機快照的鄉鎮名可能是**改制前舊名**，線上 API 只認現行名 → 整段查詢全滅。
+
+    2026-08-26 員林案實踩：快照（Ver 111年2月）記「員林鎮」，該鎮 2015 年已改制
+    「員林市」，農業部 API 回「彰化縣底下查無鄉鎮員林鎮」→ 鄰地一筆都抓不到、
+    最終 鄰地.shp 未產出。CLAUDE.md 早記過「快照 鄉鎮 欄有舊制行政區名（員林鎮）」，
+    但只有 parse_stage1／match_parcels 這條路徑做了寬鬆比對，⓪a′ 這條沒接上。
+    同型還有 頭份鎮→頭份市、六都升格的 板橋市→板橋區 等。
+
+    對法：拿農業部**現行**鄉鎮清單回推——先精確比對（含臺／台正規化），再去尾
+    （市/鎮/鄉/區）比對。去尾比對限定在**同一縣市內**才安全：後綴由行政層級決定，
+    同縣市不可能同時存在「員林鎮」與「員林市」，故不會誤配到別的鄉鎮。
+    ⚠ 這個寬鬆只給鄉鎮用，**不可比照套到段名**——段名去尾比對會把「民權段」配到
+    「民權一段」（那是別人的地，見 parcel-roster-verify 的鐵律）。
+
+    查不到或查詢失敗一律原名回傳，不阻斷流程。
+    """
+    key = (county, town)
+    if key in _TOWN_CACHE:
+        return _TOWN_CACHE[key]
+    out = town
+    try:
+        if not os.path.isdir(SKILL):
+            raise RuntimeError("skill 不在")
+        sys.path.insert(0, SKILL)
+        import moa  # noqa: PLC0415
+        names = moa.towns(moa._pick(moa.counties(), county) or county)
+        hit = moa._pick(names, town)
+        if not hit:
+            stem = moa._norm(town).rstrip("市鎮鄉區")
+            cands = [n for n in names if moa._norm(n).rstrip("市鎮鄉區") == stem and stem]
+            hit = cands[0] if len(cands) == 1 else None
+        if hit and hit != town:
+            print(f"  ℹ 鄉鎮改制更名：快照「{town}」→ 現行「{hit}」（依農業部現行清單）")
+        out = hit or town
+    except Exception:  # noqa: BLE001 — 對不到就用原名，正規化失敗不可阻斷鄰地發現
+        pass
+    _TOWN_CACHE[key] = out
+    return out
+
+
 def _county_file(county: str) -> str | None:
     for c in (county, county.replace("臺", "台"), county.replace("台", "臺")):
         p = os.path.join(CAD_DIR, c + ".shp")
@@ -153,6 +197,12 @@ def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, ob
     # 排除基地本身：與基地重疊面積達自身 50% 以上視為同一宗地（浮點誤差/版本差不可用
     # 地號字串比對，改用幾何重疊比例判斷，較穩健）
     sur_all = sur_all.copy()
+    # 快照鄉鎮名可能是改制前舊名 → 一次正規化成現行名，讓分組鍵、母號縮水偵測與線上
+    # 查詢三者用同一套名稱（只改這裡，下游全部沿用，見 _current_town）。
+    if "鄉鎮" in sur_all.columns:
+        sur_all["鄉鎮"] = [
+            _current_town(county or "", str(t or "").strip())
+            for t in sur_all["鄉鎮"]]
     sur_all["_ov"] = sur_all.geometry.intersection(su).area / sur_all.geometry.area.replace(0, 1)
     sur = sur_all[sur_all["_ov"] < 0.5]
 

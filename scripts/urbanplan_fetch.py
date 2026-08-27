@@ -607,6 +607,40 @@ def query_zone(county: str, bbox: tuple[float, float, float, float]) -> dict:
     return {"features": feats}   # esri json：features=[{attributes, geometry:{rings}}]
 
 
+_RENDERER_CACHE: dict[str, dict] = {}
+
+
+def renderer_colors(query_url: str) -> dict:
+    """讀圖台**自己的** uniqueValue renderer，回 {分類值: "R,G,B"}（另含 __field__ 鍵）。
+
+    2026-08-26 員林案發現：彰化圖台圖層自帶官方 renderer（112 類、鍵在 ZONEGROUP），
+    那是都發局的權威配色，比本機 config/urban_plan_legend.yaml 這份人工色表可靠且完整
+    ——該案 175 筆有 22 筆（園道／綠地／車站專用區等）在本機色表查無色、出圖無底色，
+    圖台 renderer 則全都有。
+
+    只認 uniqueValue renderer；其他型別或任何失敗一律回 {}（退回本機色表，不阻斷取圖）。
+    """
+    if query_url in _RENDERER_CACHE:
+        return _RENDERER_CACHE[query_url]
+    out: dict = {}
+    try:
+        layer_url = query_url.rsplit("/query", 1)[0]
+        j = json.loads(_http_get(f"{layer_url}?f=json"))   # _http_get 回 str，勿再 decode
+        r = (j.get("drawingInfo") or {}).get("renderer") or {}
+        if r.get("type") == "uniqueValue":
+            for info in r.get("uniqueValueInfos") or []:
+                c = (info.get("symbol") or {}).get("color")
+                v = info.get("value")
+                if v and isinstance(c, list) and len(c) >= 3:
+                    out[str(v).strip()] = "%d,%d,%d" % (c[0], c[1], c[2])
+            if out:
+                out["__field__"] = str(r.get("field1") or "").strip()
+    except Exception:  # noqa: BLE001 — 拿不到官方色就用本機色表，不可阻斷取圖
+        out = {}
+    _RENDERER_CACHE[query_url] = out
+    return out
+
+
 def _query_layer(cfg: dict, url: str, env: dict, token: str | None) -> list:
     """對單一圖層 URL 查詢（含分頁彙整），回 features list。"""
     feats: list = []
@@ -710,6 +744,11 @@ def main() -> int:
     cfg = COUNTY[a.county]
     fmap = cfg["fields"]
     zone_colors = _load_zone_colors()
+    # Color1 取色三順位：①圖台自帶 renderer 官方色 ②本機色表查 ZONE_USE ③退回查 ZONE
+    rc = renderer_colors(cfg.get("query", ""))
+    rc_field = rc.get("__field__") or None
+    if rc_field:
+        print(f"  ℹ 採用圖台官方 renderer 配色（{len(rc) - 1} 類，鍵：{rc_field}）")
     rows, geoms = [], []
     for f in feats:
         p = f.get("attributes", {})
@@ -723,7 +762,7 @@ def main() -> int:
             val = p.get(src) if src else None
             row[out_col] = (val.strip() if isinstance(val, str) else val)
         # Color1：先用 ZONE_USE（用地種類）反查官方色，退回 ZONE（分區簡稱）
-        row["Color1"] = _color_for(row.get("ZONE_USE"), zone_colors) \
+        row["Color1"] = (rc.get(str(p.get(rc_field) or "").strip()) if rc_field else None)             or _color_for(row.get("ZONE_USE"), zone_colors) \
             or _color_for(row.get("ZONE"), zone_colors)
         rows.append(row)
     return _write_output(a.out, rows, geoms, gj)

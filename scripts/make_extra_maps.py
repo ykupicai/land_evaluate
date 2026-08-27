@@ -75,15 +75,9 @@ EXPORT_DPI = 300
 # 舊版算出「未涉及、最近 6,453m」，新版才看出**基地 100% 在生產區內**（2026-07-29 實錯）。
 BREED_DEFAULT = (r"\\192.168.1.134\Public-TN\3. 圖資\gis圖資\產業相關"
                  r"\一級產業\養殖漁業生產區\養殖漁業生產區_114_SHP\養殖漁業生產區.shp")
-# 權屬配色（公有偏暖、私有偏冷，圖例一眼可分）
-# ⚠ key 是 classify_ownership() 正規化後的 '公'／'私'，**不是 shp 裡的原始字串**——
-#   原始值兩條路徑不同（⓪a：國有／直轄市有／私(推論)；TCDGIS：公／私），
-#   直接拿原始值當 key 會全部落到預設灰色、公私分不出來（2026-08-07 實錯）。
-OWNER_STYLE = {
-    "公": ((255, 140, 0), "公有"),
-    "私": ((80, 140, 255), "私有"),
-}
-OWNER_UNKNOWN = ((165, 165, 165), "無法判定（空白／未登記）")
+# 權屬配色與分色實作集中在 ownership_style（make_maps 權屬主題共用同一份，
+# 不可各自複製——兩份必然分岔）。此處僅 re-export 供既有引用者沿用。
+from ownership_style import OWNER_STYLE, OWNER_UNKNOWN, style_by_owner  # noqa: E402,F401
 
 
 def label_field(lyr, field, size=11, line=False):
@@ -193,37 +187,16 @@ def main():
         # ★ 分色依 persite_stats.classify_ownership 正規化後的值（全產線唯一判定），
         #   不是 shp 原始字串——原始值兩條路徑用詞不同（見 OWNER_STYLE 上方註解）。
         #   為此在圖層上新增暫存欄 `_權屬`，渲染與圖例都吃它。
-        from persite_stats import classify_ownership  # noqa: PLC0415
-
         def _style_by_owner(lyr, name, label_size=0, outline="60,60,60,255",
                             outline_w="0.4", alpha=a.alpha):
-            """就地把圖層依權屬分色；回傳出現過的類別（保序）。"""
-            i_pub = lyr.fields().indexFromName("公私別")
-            if i_pub < 0:
-                raise SystemExit(f"{name} 無「公私別」欄，無法做權屬分色圖")
-            lyr.startEditing()
-            if lyr.fields().indexFromName("_權屬") < 0:
-                lyr.addAttribute(QgsField("_權屬", QVariant.String))
-                lyr.updateFields()
-            i_new = lyr.fields().indexFromName("_權屬")
-            seen = []
-            for f in lyr.getFeatures():
-                k = classify_ownership(f[i_pub]) or "未判定"
-                lyr.changeAttributeValue(f.id(), i_new, k)
-                if k not in seen:
-                    seen.append(k)
-            lyr.commitChanges()
-            order = [k for k in ("公", "私", "未判定") if k in seen]
-            cats = []
-            for k in order:
-                rgb, lab = (OWNER_STYLE.get(k) if k != "未判定" else OWNER_UNKNOWN)
-                cats.append(QgsRendererCategory(k, QgsFillSymbol.createSimple({
-                    "color": "%d,%d,%d,%d" % (rgb + (int(alpha * 255),)),
-                    "outline_color": outline, "outline_width": outline_w}), lab))
-            lyr.setRenderer(QgsCategorizedSymbolRenderer("_權屬", cats))
-            if label_size:
-                label_field(lyr, "地號", label_size)
-            return order
+            """薄包裝：實作在 ownership_style.style_by_owner（與 make_maps 共用）。
+            此處只補上本腳本的標註設定與「缺欄即硬停」的流程決策。"""
+            try:
+                return style_by_owner(lyr, name, label_fn=label_field,
+                                      label_size=label_size, outline=outline,
+                                      outline_w=outline_w, alpha=alpha)
+            except KeyError as exc:
+                raise SystemExit(str(exc))
 
         # 周邊地籍（⓪a' 鄰地.shp）：同一套配色但淡化、不標地號，才看得出基地位置
         nb_path = a.neighbours or str(out_dir / "cadastre" / "鄰地.shp")

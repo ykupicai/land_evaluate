@@ -116,3 +116,33 @@ def test_fetch_all_survives_one_failed_group(tmp_path, monkeypatch):
     out_shp, merged = cn.fetch_all(groups, str(tmp_path))
     assert Path(out_shp).exists(), "失敗段不得阻斷合併，鄰地.shp 必須產出"
     assert len(merged) == 2 and set(merged["地號"]) == {"41", "42"}
+
+
+def test_current_town_maps_renamed_towns(monkeypatch):
+    """本機快照的鄉鎮名可能是改制前舊名，線上 API 只認現行名 → 整段查詢全滅
+    （2026-08-26 員林案：快照「員林鎮」，2015 已改制「員林市」，鄰地一筆都抓不到）。
+
+    鎖住三件事：①舊名要對回現行名 ②仍是原後綴者不可被亂改 ③對不到一律原名回傳。
+    去尾比對只在同一縣市內做——後綴由行政層級決定，同縣市不會同時有「員林鎮」與
+    「員林市」。⚠ 此寬鬆僅限鄉鎮，段名去尾會把「民權段」配到「民權一段」（別人的地）。
+    """
+    import types
+    fake = types.SimpleNamespace(
+        counties=lambda: ["彰化縣", "苗栗縣", "新北市"],
+        towns=lambda c: {"彰化縣": ["員林市", "和美鎮", "彰化市"],
+                         "苗栗縣": ["頭份市", "竹南鎮"],
+                         "新北市": ["板橋區", "三重區"]}[c],
+        _norm=lambda s: (s or "").replace("臺", "台").replace(" ", "").strip(),
+        _pick=lambda names, want: next(
+            (n for n in names if n.replace("臺", "台") == (want or "").replace("臺", "台")), None),
+    )
+    monkeypatch.setitem(sys.modules, "moa", fake)
+    monkeypatch.setattr(cn, "SKILL", str(Path(__file__).resolve().parent))  # 讓 isdir 成立
+    cn._TOWN_CACHE.clear()
+
+    assert cn._current_town("彰化縣", "員林鎮") == "員林市"   # 鎮→市 改制
+    assert cn._current_town("苗栗縣", "頭份鎮") == "頭份市"   # 同型
+    assert cn._current_town("新北市", "板橋市") == "板橋區"   # 六都升格 市→區
+    assert cn._current_town("彰化縣", "和美鎮") == "和美鎮"   # 仍是鎮，不可被亂改
+    assert cn._current_town("彰化縣", "員林市") == "員林市"   # 已是現行名，原樣
+    assert cn._current_town("彰化縣", "不存在鄉") == "不存在鄉"  # 對不到→原名，不阻斷
