@@ -378,7 +378,30 @@ def pic(slide, name, l, t, w):
     slide.shapes.add_picture(p, l, t, width=w, height=Emu(int(w * ratio)))
 
 
-def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None, chapter=None):
+def pics(slide, names, l, t, w, labels=None, gap=None, cap_h=None, cap_size=11):
+    """並排放 N 張圖（**多宗基地一頁對照**時用，2026-09-04 麻豆案新增）。
+
+    等分寬度、上緣對齊、各自可加小標。缺圖與 `pic()` 同樣登記到 `_missing_pics`、
+    `save()` 時硬停——一頁兩張圖時少一張更不容易用肉眼察覺，這道檢查更重要。
+
+    ⚠ 兩張並排後每張只有原本一半寬，**地號標註會變小**。用於「同一主題兩宗基地
+      對照」是合適的（讀者要比的是兩塊地的差異）；若該頁重點是逐筆地號判讀，
+      仍應一宗基地一頁。
+    """
+    gap = Inches(0.12) if gap is None else gap
+    cap_h = (Inches(0.28) if labels else Inches(0)) if cap_h is None else cap_h
+    n = max(1, len(names))
+    each = Emu(int((w - gap * (n - 1)) / n))
+    for i, name in enumerate(names):
+        x = Emu(int(l + i * (each + gap)))
+        if labels:
+            tb(slide, x, t, each, cap_h, labels[i], cap_size, True, BLACK,
+               PP_ALIGN.CENTER)
+        pic(slide, name, x, Emu(int(t + cap_h)), each)
+
+
+def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None,
+             chapter=None, size=None):
     """綜合說明總表頁（預設 7 欄 S001/S002 拆欄、12pt、圖例置標題右側）。
     doubt_row：執行疑義列索引——合併法規～情形數欄、分項走項目符號。
     colw：自訂欄寬（欄數由 rows[0] 長度決定）。單一案場案件用 SUM_COLW_1SITE
@@ -391,8 +414,10 @@ def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None
     tb(s, SUM_L, Inches(0.92), SUM_W, Inches(0.24), LEGEND, 11, False, GREY,
        PP_ALIGN.RIGHT)
     ncol = len(rows[0])
+    # size：列數多到 12pt 撐破版面時降一級（2026-09-04 兩基地合併版新增）。
+    # ⚠ 降字級只是最後手段，先想能不能精簡文字——總表塞不下常代表話講太長。
     gf = table(s, SUM_L, top or SUM_T, SUM_W, rows,
-               col_w=colw or SUM_COLW, size=SUM_SZ, ncol=ncol)
+               col_w=colw or SUM_COLW, size=size or SUM_SZ, ncol=ncol)
     if doubt_row is not None:
         t = gf.table
         t.cell(doubt_row, 1).merge(t.cell(doubt_row, doubt_to if doubt_to is not None else ncol - 3))
