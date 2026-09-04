@@ -35,7 +35,7 @@ import sys
 
 import geopandas as gpd
 from shapely import make_valid, union_all
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import Polygon
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from adjacent_landuse import _county_file  # noqa: E402 — 共用地籍檔解析
@@ -52,42 +52,6 @@ def parts_of(geom):
     if geom.is_empty:
         return []
     return list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
-
-
-def fill_holes(geom):
-    return MultiPolygon([Polygon(p.exterior) for p in parts_of(geom)])
-
-
-def _chamfer(poly, min_ang=25.0, cut=1.5, needle_ang=3.0):
-    """把內角過小的尖端截掉（直線截角，不產生圓弧）。
-
-    ⚠ 內角近 0 度的**退化針尖**不可截角：兩邊近乎共線反向，插入兩點會生出微小環，
-      make_valid 修補後局部拓樸被改變（實測面積反而增加、寬度檢核由 真不足 0 點
-      變成 11 點）。針尖一律**整個頂點移除**。"""
-    import math
-    cs = list(poly.exterior.coords)[:-1]
-    n = len(cs)
-    out = []
-    for i in range(n):
-        a, b, c = cs[(i - 1) % n], cs[i], cs[(i + 1) % n]
-        v1 = (a[0] - b[0], a[1] - b[1]); v2 = (c[0] - b[0], c[1] - b[1])
-        l1 = math.hypot(*v1); l2 = math.hypot(*v2)
-        if l1 == 0 or l2 == 0:
-            continue
-        cosv = (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)
-        ang = math.degrees(math.acos(max(-1.0, min(1.0, cosv))))
-        if ang < needle_ang:
-            continue                              # 退化針尖：移除該頂點
-        if ang >= min_ang:
-            out.append(b); continue
-        d = min(cut, l1 * 0.45, l2 * 0.45)
-        out.append((b[0] + v1[0] / l1 * d, b[1] + v1[1] / l1 * d))
-        out.append((b[0] + v2[0] / l2 * d, b[1] + v2[1] / l2 * d))
-    if len(out) < 3:
-        return poly
-    p2 = make_valid(Polygon(out))
-    ps = [x for x in parts_of(p2) if x.area > 0]
-    return max(ps, key=lambda x: x.area) if ps else poly
 
 
 def min_interior_angle(geom, exclude=None, tol=2.0):

@@ -23,12 +23,25 @@
 與 ring API 逐筆比對 126 筆 **IoU 全部 = 1.000000**；密集市區大框 1,684 筆 **0.3 秒**
 回完（舊路徑逐筆查要數小時，員林案當初正因此放棄即時回填）。
 
-★ 舊路徑保留為 fallback（legacy）
+★ 舊路徑保留為 fallback，但它救得了什麼、救不了什麼要講清楚
 ------------------------------------------------------------------
-農業部 coagis 會間歇性斷線（2026-08-19 湖口案實踩）。框查失敗時自動改走舊的
-「本機快照 → 逐筆回填 → 母號縮水探測」路徑，並在輸出明確標示資料來源；
-`--force-local` 可強制走舊路徑（重現舊成果或比對用）。
-⚠ fallback 的成果**屬性可能不完整**（那正是它被降級的原因），交付前須留意。
+框查失敗時自動改走舊的「本機快照 → 逐筆線上回填」，`--force-local` 可強制走。
+
+⚠⚠ **fallback 救不了 coagis 全站斷線**（2026-09-04 檢視時發現，先前的說法不夠精確）：
+
+    框查      https://coagis.colife.org.tw/.../CadastralMap_Tiled_<版次>/MapServer
+    逐筆回填  https://coagis.colife.org.tw/.../CadastralMap/SOE/MapServer/exts/CoaRESTSOE/...
+
+  **同一台主機、同一份 token、同一個設定檔**（都來自 map.moa.gov.tw 的 config）。
+  該站一斷（2026-08-19 湖口案實踩 WinError 10060），兩條路一起斷。
+  fallback 真正能救的是**另一種情況**：Tiled MapServer 這一個服務單獨不可用、
+  而 SOE 擴充仍活著——例如**版次改名或該服務下架**（版次寫在服務名稱裡、每兩個月
+  換一次，這是真實風險），此時逐筆回填仍可跑完。
+
+⚠ fallback 的候選清單受限於本機快照 Ver 111年2月，**快照沒有的地號查不到**，
+  成果會有留白（那正是它被降級的原因）；框內覆蓋率會如實報數，交付前務必看。
+★ 2026-09-04 起 fallback 不再做「缺口偵測＋子號探測補正」，已移入
+  `scripts/legacy/cadastre_snapshot_probe.py`（含七股／潮州的完整脈絡與回歸測試）。
 
 用法（系統 Python，不需 QGIS）：
   python -X utf8 scripts/cadastre_neighbors.py --joined <cadastre/基地.shp>       --out outputs/<案>/cadastre [--buffer 50] [--name 鄰地] [--force-local]
@@ -64,10 +77,10 @@ SKILL = os.path.join(os.path.expanduser("~"), ".claude", "skills",
                      "cadastre-check", "scripts")
 GAP_CHECK_M = 20.0     # 覆蓋率自我檢查的緊鄰帶寬度（小於 --buffer，聚焦「緊鄰」而非全部外擴範圍）
 GAP_MIN_AREA = 10.0    # 低於此面積視為浮點誤差/畸零縫隙雜訊，不警告
-PROBE_MAX_CHILD = 80   # 探測同宗地母號子號時的上限（已見案例最大用到45，留餘裕）
-SHRINK_RATIO = 0.9     # 即時回填面積 < 快照面積×此值 → 判為「母號縮水」（就地分割），須探子號
+# ↑ 兩者供 fallback 的 discover() 與 legacy/cadastre_snapshot_probe.py 共用
 sys.path.insert(0, HERE)
-from cadastre_fetch import cmd_fetch  # noqa: E402
+from cadastre_fetch import _load_api, cmd_fetch  # noqa: E402
+# _load_api 與 cadastre_fetch 共用一份（原本兩檔各有幾乎相同的一份）；現僅 legacy 的探測補正會用到。
 
 
 def _section_name(seg, sub) -> str:
@@ -101,14 +114,6 @@ def _safe_to_file(gdf, path: str, retries: int = 4, wait: float = 0.6) -> str:
         return alt
     except Exception as e:  # noqa: BLE001
         raise SystemExit(f"✖ {path} 與備援 {alt} 皆寫入失敗：{e}")
-
-
-def _load_api():
-    if not os.path.isdir(SKILL):
-        raise SystemExit(f"找不到 skill cadastre-check：{SKILL}")
-    sys.path.insert(0, SKILL)
-    import api  # noqa: PLC0415
-    return api
 
 
 _TOWN_CACHE: dict[tuple, str] = {}
@@ -161,14 +166,6 @@ def _county_file(county: str) -> str | None:
         if os.path.exists(p):
             return p
     return None
-
-
-def _load_cadlib():
-    if not os.path.isdir(SKILL):
-        raise SystemExit(f"找不到 skill cadastre-check：{SKILL}")
-    sys.path.insert(0, SKILL)
-    import cadlib  # noqa: PLC0415
-    return cadlib
 
 
 def map_frame(geom):
@@ -318,7 +315,7 @@ def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, ob
     ⚠ 本路徑的候選清單受限於快照（Ver 111年2月），快照沒有的地號不會被查到；
       只在框查失敗（農業部斷線）或 --force-local 時使用。
     """
-    cadlib = _load_cadlib()
+    cadlib = mpq._cadlib()   # 與框查共用同一支載入器
     region, _frames, su, site = compute_region(joined, buffer_m)
 
     if not county:
@@ -463,166 +460,28 @@ def fetch_all(groups: dict, out_dir: str, name: str = "鄰地") -> tuple[str, "g
     return out_shp, merged
 
 
-def check_coverage_gap(su, local_check_union, live_gdf):
-    """比對「本機快照緊鄰帶內候選宗地聯集」vs「即時回填後的實際聯集」，回缺口警告
-    或 None。
-
-    ★ 建立緣由（2026-08-06 七股案實踩）：66-42（交通用地、公路總局管理）緊鄰基地
-    （距離0m），discover() 卻完全沒發現它——一開始以為是本機快照整筆漏收，
-    但逐一比對後發現：本機快照其實**有**涵蓋那塊面積，只是掛在舊識別「66-23」
-    名下（本機快照 66-23 面積 13,318㎡，但即時回填後的 66-23 只剩 8,648㎡登記
-    面積）——**66-23 已被重測分割，一部分拆成新地號 66-42，本機快照沒跟上**。
-    這代表單純比「本機快照 vs 本機快照自己」（覆蓋率100%）抓不到這種問題，
-    必須比「本機快照候選聯集 vs 即時回填後實際聯集」，落差就是「本機快照以為
-    在地、實際卻不在 discover() 找到的地號範圍內」的部分——不管成因是本機整筆
-    漏收（如真的沒有任何舊識別）還是本機舊識別已被分割（如本案），都會在這裡現形。
-    """
-    if local_check_union is None or local_check_union.is_empty:
-        return None, None
-    live_union = unary_union(list(live_gdf.geometry) + [su])
-    gap = local_check_union.difference(live_union)
-    gap_area = gap.area if not gap.is_empty else 0.0
-    if gap_area <= GAP_MIN_AREA:
-        return None, None
-    warning = (
-        f"⚠ 基地 {GAP_CHECK_M:.0f}m 內有 {gap_area:,.1f} ㎡本機地籍快照候選宗地的範圍，"
-        f"即時回填後對不上任何實際地號（本機快照 Ver 111年2月，落差常見成因：①快照"
-        f"整筆漏收新增地號 ②快照的舊地號已被重測分割成新地號，快照沒跟上——如66-42"
-        f"即從66-23分割出來）。不可逕自當作真的沒有相鄰宗地，建議：肉眼比對正射影像"
-        f"有無明顯地界、或上 TCDGIS 覆核缺口範圍內的實際地號。")
-    return warning, gap
-
-
-def _gap_pieces(gap, min_area: float = GAP_MIN_AREA) -> list:
-    if gap is None or gap.is_empty:
-        return []
-    geoms = list(gap.geoms) if gap.geom_type == "MultiPolygon" else [gap]
-    return [g for g in geoms if g.area > min_area]
-
-
-def find_probe_targets(pieces: list, county_shp: str, existing_landnos: set) -> dict:
-    """對每個顯著缺口，找緊鄰的本機候選宗地母號，作為探測起點。
-
-    ★ 建立緣由（2026-08-06 七股案 67-11 教訓，兩階段）：
-    第一階段：check_coverage_gap 抓到落差後，上一版只印警告、要求人工「肉眼比對／
-    上TCDGIS」——67-11 那次我人工只認真查了落差最大的一塊，其餘幾塊小的當成
-    「resurvey 邊界誤差」略過，結果其中一塊正是真正漏收的地號 → 改成自動探測、
-    不靠人工肉眼挑。
-    第二階段（同日再度實踩，67-11 仍被漏掉）：**單一 `representative_point()`
-    不夠**——第一輪修復前的缺口是一整塊連在一起的大範圍（~9,839㎡，同時涵蓋
-    66 系與 67-11 所在區域），單一取樣點只落在 66 系那一側，67 母號完全沒被
-    當成候選、探測階段連問都沒問過。改成**用整塊缺口幾何找候選**（
-    `local.geometry.distance(piece)`，不是「候選到取樣點的距離」），同一塊缺口
-    緊鄰的所有本機候選都會被收進來，不會因為缺口形狀複雜、樣本點只代表局部
-    而漏掉另一側的候選母號。
-    回 {(縣市,鄉鎮,段): {母號4碼, ...}}。
-    """
-    targets: dict[tuple, set] = {}
-    if not pieces:
-        return targets
-    bounds = unary_union(pieces).buffer(5).bounds
-    local = gpd.read_file(county_shp, engine="pyogrio", bbox=bounds)
-    for piece in pieces:
-        near = local[local.geometry.distance(piece) < 3.0]
-        for _, r in near.iterrows():
-            section = _section_name(r["段"], r["小段"])
-            key = (str(r["縣市"]).strip(), str(r["鄉鎮"]).strip(), section)
-            targets.setdefault(key, set()).add(f"{int(r['宗地母']):04d}")
-    return targets
-
-
-def find_shrunk_mothers(sur, live_gdf, ratio: float = SHRINK_RATIO) -> dict:
-    """★母號縮水偵測（2026-08-10 潮州中山段20案定案）——比 find_probe_targets 的
-    「缺口幾何鄰近」更精準的探測目標來源。
-
-    成因：本機快照的某母號在 Ver 111年2月後**就地分割**成母號＋數個子號，快照仍是
-    分割前的大範圍（如五魁段13 快照10,486㎡→即時4,999㎡；七股66-23 13,318→8,648），
-    discover() 只認得舊母號、分割出的子號整批不在快照 → 漏。做法：把快照候選（sur）
-    與即時回填後（live_gdf）**逐母號比面積**，即時面積 < 快照×ratio 者判為縮水、回其
-    母號作探測起點。
-
-    為何優於「缺口鄰近所有母號」：後者會把緊鄰大缺口但**沒縮水**的母號全收進來（潮州
-    案 16 個），每個探 80 子號→極慢（實測逾時），且放大寫檔鎖窗口；本法精準鎖定真正
-    縮水的（潮州 2 個：9、13），快又不誤觸。回 {(縣市,鄉鎮,段): {母號4碼}}。
-    """
-    targets: dict[tuple, set] = {}
-    if sur is None or len(sur) == 0 or live_gdf is None or len(live_gdf) == 0:
-        return targets
-    # 快照逐母號面積（母號 = 宗地母，section 完整組字）
-    snap = {}
-    for _, r in sur.iterrows():
-        key = (str(r["縣市"]).strip(), str(r["鄉鎮"]).strip(),
-               _section_name(r["段"], r["小段"]), f"{int(r['宗地母']):04d}")
-        snap[key] = snap.get(key, 0.0) + r.geometry.area
-    # 即時回填逐母號面積（由 live_gdf 的 地號 解析母號；『段』已是完整「五魁段」字串）
-    live = {}
-    for _, r in live_gdf.iterrows():
-        ln = str(r.get("地號", "")).strip()
-        if not ln:
-            continue
-        mother = ln.split("-")[0]
-        try:
-            m4 = f"{int(mother):04d}"
-        except ValueError:
-            continue
-        key = (str(r.get("縣市", "")).strip(), str(r.get("鄉鎮", "")).strip(),
-               str(r.get("段", "")).strip(), m4)
-        live[key] = live.get(key, 0.0) + r.geometry.area
-    for key, snap_area in snap.items():
-        live_area = live.get(key, 0.0)
-        if snap_area > GAP_MIN_AREA and live_area < ratio * snap_area \
-                and (snap_area - live_area) > GAP_MIN_AREA:
-            county, town, section, m4 = key
-            targets.setdefault((county, town, section), set()).add(m4)
-    return targets
-
-
-def probe_siblings(targets: dict, existing_landnos: set, gap_union, log: list) -> dict:
-    """對 find_probe_targets 找到的每個宗地母號，批次探測子號 1~PROBE_MAX_CHILD
-    是否存在（單一宗地母號一次 api 呼叫查完全部候選子號，不是逐筆查，較省時）。
-    只留下「即時查詢成功」且「幾何真的落在缺口範圍內」兩者皆符合的，避免抓到
-    同母號但离缺口很遠、其實不相關的子號。回可併入 groups 的
-    {(縣市,鄉鎮,段): [landno,...]}。
-    """
-    api = _load_api()
-    found: dict[tuple, list] = {}
-    for (county, town, section), mothers in targets.items():
-        for mother in sorted(mothers):
-            candidates = [f"{int(mother)}-{c}" for c in range(1, PROBE_MAX_CHILD + 1)
-                         if f"{int(mother)}-{c}" not in existing_landnos]
-            if not candidates:
-                continue
-            log.append(f"    探測 {county}{town}{section} 母號{int(mother)}："
-                      f"子號1~{PROBE_MAX_CHILD}（排除已知 {len(existing_landnos)} 筆）")
-            try:
-                r = api.query(county, town, section, candidates)
-            except Exception as e:  # noqa: BLE001
-                log.append(f"      ⚠ 探測失敗：{e}")
-                continue
-            for rec in r["records"]:
-                if not rec["ok"] or not rec["geometry"]:
-                    continue
-                geom = shape(rec["geometry"])
-                if gap_union is not None and geom.distance(gap_union) > 1.0:
-                    continue   # 同母號但離這次缺口太遠，不相關，不強行納入
-                landno = rec["parcel"]["landno"]
-                log.append(f"      ✔ 探測到 {landno}（{geom.area:,.1f} ㎡，"
-                          f"落在缺口範圍內，本機快照未收錄）")
-                found.setdefault((county, town, section), []).append(landno)
-    return found
-
-
 def run_local(a):
-    """【fallback】舊路徑：本機快照認地號 → 逐筆回填 → 母號縮水探測補正。
+    """【fallback】舊路徑：本機快照認地號 → 逐筆線上回填。
 
-    只在框查失敗或 --force-local 時走。回 (merged_gdf, su, frame, info)。
+    只在框查失敗或 --force-local 時走。回 (merged_gdf, su, frames, info)。
+
+    ⚠ **這條路救不了 coagis 全站斷線**：框查與本路徑的逐筆查詢打的是**同一台主機**
+      （coagis.colife.org.tw）、同一份 token、同一個設定檔。它只在「Tiled MapServer
+      這一個服務單獨不可用、而 SOE 擴充仍活著」時有效——例如版次改名或該服務下架
+      （版次寫在服務名稱裡，每兩個月換一次，這是真實風險）。
+    ⚠ 本路徑的候選清單受限於本機快照 Ver 111年2月，**快照沒有的地號查不到**，
+      成果會有留白；框內覆蓋率會如實報出來，交付前務必看那個數字。
+    ★ 2026-09-04 起不再做「缺口偵測＋子號探測補正」（已移入
+      `scripts/legacy/cadastre_snapshot_probe.py`）：那套機械的前提是「候選清單受限於
+      快照、需要自動猜補」，走到 fallback 時本來就接受降級，而覆蓋率會把留白講清楚，
+      猜補只會讓人以為資料已經完整。
     """
     region, frames, su0, _site = compute_region(a.joined, a.buffer, a.sitemap)
-    assert region is not None
-    groups, su, local_check_union, sur = discover(a.joined, a.buffer, a.county)
+    assert region is not None and su0 is not None
+    groups, su, _local_check_union, _sur = discover(a.joined, a.buffer, a.county)
     total = sum(len(v) for v in groups.values())
-    print(f"發現階段（本機快照）：出圖框涵蓋（buffer≥{a.buffer:.0f}m 下限）共 {total} 筆，"
-          f"分 {len(groups)} 組（縣市/鄉鎮/段不同者不能同一次查詢）")
+    print(f"發現階段（本機快照 Ver 111年2月）：出圖框涵蓋（buffer≥{a.buffer:.0f}m 下限）"
+          f"共 {total} 筆，分 {len(groups)} 組（縣市/鄉鎮/段不同者不能同一次查詢）")
     for k, v in groups.items():
         print(f"  {'/'.join(k)}：{len(v)} 筆　{v[:10]}{'...' if len(v) > 10 else ''}")
 
@@ -630,60 +489,8 @@ def run_local(a):
         json.dump({"/".join(k): v for k, v in groups.items()}, f,
                   ensure_ascii=False, indent=1)
 
-    out_shp, merged = fetch_all(groups, a.out, a.name)
-    existing_landnos = {ln for v in groups.values() for ln in v}
-    # ★ 基地自身地號也要排除，否則探測子號時會把「基地自己」當成新發現的鄰地
-    # 探測回來（2026-08-06 實踩：67-6 本身也被探測命中，因為它不在 groups 裡
-    # ——discover() 本來就會排除基地自身，這裡要同樣排除，避免探測階段誤收）。
-    site_gdf = gpd.read_file(a.joined, engine="pyogrio")
-    if "地號" in site_gdf.columns:
-        existing_landnos |= {str(x) for x in site_gdf["地號"].dropna()}
-
-    gap_warning, gap = check_coverage_gap(su, local_check_union, merged)
-    # ★母號縮水偵測（潮州案定案）＝精準探測目標；與缺口偵測互補：縮水母號一定伴隨缺口，
-    #   但缺口鄰近的所有母號多半沒縮水（潮州 16 個母號僅 2 個真縮水）。以縮水母號為主要
-    #   目標，既快又準；缺口幾何仍作為 probe_siblings 的落點過濾與資訊性警告。
-    targets_shrunk = find_shrunk_mothers(sur, merged)
-    probe_log: list[str] = []
-    if (targets_shrunk or gap_warning) and not a.no_auto_resolve:
-        if gap_warning:
-            print(f"\n{gap_warning}")
-        p = _county_file((groups and next(iter(groups))[0]) or a.county or "")
-        # 主要目標＝縮水母號；缺口鄰近母號僅在縮水偵測為空時作後備（避免過度探測）
-        targets = dict(targets_shrunk)
-        if not targets:
-            pieces = _gap_pieces(gap)
-            targets = find_probe_targets(pieces, p, existing_landnos) if p else {}
-        shr = {f"{k[2]}{int(m)}" for k, ms in targets_shrunk.items() for m in ms}
-        print(f"→ 自動探測（母號縮水精準鎖定 {len(shr)} 個：{sorted(shr) or '無'}）"
-              "，補回就地分割出、快照未收錄的子號...")
-        recovered = probe_siblings(targets, existing_landnos, gap, probe_log)
-        for line in probe_log:
-            print(line)
-        if recovered:
-            n_new = sum(len(v) for v in recovered.values())
-            print(f"→ 探測到 {n_new} 筆本機快照未收錄的地號，併入回填")
-            out_shp, merged = fetch_all(recovered, a.out, a.name + "_補正")
-            # 併回主檔（★抗鎖：寫檔遇鎖重試/改備援，不可 crash 丟失補正成果——潮州案實踩）
-            base = gpd.read_file(os.path.join(a.out, f"{a.name}.shp"), engine="pyogrio")
-            merged_all = pd.concat([base, merged], ignore_index=True)
-            merged_all = gpd.GeoDataFrame(merged_all, crs=base.crs)
-            out_shp = _safe_to_file(merged_all, os.path.join(a.out, f"{a.name}.shp"))
-            merged = merged_all
-            for k, v in recovered.items():
-                groups.setdefault(k, [])
-                groups[k] = sorted(set(groups[k]) | set(v))
-            print(f"→ {out_shp}（自動補正後合計 {len(merged)} 筆鄰地）")
-            gap_warning, gap = check_coverage_gap(su, local_check_union, merged)
-            if gap_warning:
-                print(f"\n（自動補正後仍有殘餘）{gap_warning}")
-            else:
-                print("→ 自動補正後缺口已補齊，覆蓋率檢查通過")
-        else:
-            print("→ 探測未找到符合的子號——落差可能是水域/未登記空地/母號≥9000未登記土地"
-                 "等真實現象，非本機快照漏收，建議人工核對正射影像確認。")
-    info = {"資料來源": "本機快照候選＋逐筆線上回填（fallback）",
-            "快照缺口警告": gap_warning, "探測紀錄": probe_log}
+    _out_shp, merged = fetch_all(groups, a.out, a.name)
+    info = {"資料來源": "本機快照候選＋逐筆線上回填（fallback，受限於 Ver 111年2月 快照）"}
     return merged, su, frames, info
 
 
@@ -707,8 +514,6 @@ def main():
                          "**各案場自己的出圖框**納入涵蓋範圍——逐案場圖的框以該案場置中、"
                          "可能伸出合併基地框之外，只用合併框會讓案場圖邊緣留白"
                          "（2026-09-04 麻豆案實見 S001 僅 94.48%%）")
-    ap.add_argument("--no-auto-resolve", action="store_true",
-                    help="（僅 fallback 路徑）關閉缺口自動探測")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -724,8 +529,11 @@ def main():
             #   改走 fallback 讓案子跑得完，但**必須明講資料來源已降級**。
             print(f"\n⚠ 框查失敗（{type(e).__name__}: {e}）"
                   "\n  → 改走 fallback：本機快照候選＋逐筆線上回填。"
-                  "\n    ⚠ 此路徑受限於快照 Ver 111年2月，快照未收錄的地號"
-                  "查不到；服務恢復後建議重跑。")
+                  "\n    ⚠ 逐筆回填打的是**同一台主機**（coagis），該站全站斷線時"
+                  "本路徑同樣會失敗；"
+                  "\n       能救的是「Tiled 服務單獨不可用（如版次改名）」那種情況。"
+                  "\n    ⚠ 候選清單受限於快照 Ver 111年2月，快照未收錄的地號查不到、"
+                  "圖面會留白；請看下方框內覆蓋率，服務恢復後建議重跑。")
     if merged is None:
         merged, su, frames, info = run_local(a)
         src = info["資料來源"]

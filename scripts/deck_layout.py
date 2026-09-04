@@ -38,7 +38,7 @@ from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.oxml.ns import qn
-from PIL import Image, ImageDraw
+from PIL import Image
 
 __all__ = [
     "Inches", "Pt", "Emu", "PP_ALIGN", "RGBColor",
@@ -95,22 +95,6 @@ _out = None
 
 
 _missing_pics: list = []      # 缺圖登記簿：(頁碼, 檔名)；save() 會據此硬停
-
-
-def _grid_png(case_dir: str) -> str:
-    p = os.path.join(case_dir, "_grid_bg.png")
-    if os.path.exists(p):
-        return p
-    im = Image.new("RGB", (1333, 750), "white")
-    d = ImageDraw.Draw(im)
-    for x in range(0, 1333, 24):
-        for y in range(0, 750, 3):
-            d.point((x, y), fill=(228, 228, 228))
-    for y in range(0, 750, 24):
-        for x in range(0, 1333, 3):
-            d.point((x, y), fill=(228, 228, 228))
-    im.save(p)
-    return p
 
 
 def _dump_pptx(path: str) -> str:
@@ -173,16 +157,10 @@ def init(case_dir: str, out_name: str, img_subdir: str = "圖檔_maxmap",
     _blank = _prs.slide_layouts[6]
 
 
-def _bg(slide):
-    # YAML 定案：底色純白、無整頁外框、無網格底。頁首下方的黑分隔線由 header() 繪製。
-    return
-
-
 def new():
-    """新增一頁（純白底，YAML 定案）。"""
-    s = _prs.slides.add_slide(_blank)
-    _bg(s)
-    return s
+    """新增一頁。底色純白、無整頁外框、無網格底（YAML 定案）；
+    頁首下方的黑分隔線由 header() 繪製，故這裡不必畫任何底。"""
+    return _prs.slides.add_slide(_blank)
 
 
 def tb(slide, l, t, w, h, txt, size=14, bold=False, color=BLACK, align=PP_ALIGN.LEFT,
@@ -376,28 +354,6 @@ def pic(slide, name, l, t, w):
         return
     im = Image.open(p); ratio = im.height / im.width
     slide.shapes.add_picture(p, l, t, width=w, height=Emu(int(w * ratio)))
-
-
-def pics(slide, names, l, t, w, labels=None, gap=None, cap_h=None, cap_size=11):
-    """並排放 N 張圖（**多宗基地一頁對照**時用，2026-09-04 麻豆案新增）。
-
-    等分寬度、上緣對齊、各自可加小標。缺圖與 `pic()` 同樣登記到 `_missing_pics`、
-    `save()` 時硬停——一頁兩張圖時少一張更不容易用肉眼察覺，這道檢查更重要。
-
-    ⚠ 兩張並排後每張只有原本一半寬，**地號標註會變小**。用於「同一主題兩宗基地
-      對照」是合適的（讀者要比的是兩塊地的差異）；若該頁重點是逐筆地號判讀，
-      仍應一宗基地一頁。
-    """
-    gap = Inches(0.12) if gap is None else gap
-    cap_h = (Inches(0.28) if labels else Inches(0)) if cap_h is None else cap_h
-    n = max(1, len(names))
-    each = Emu(int((w - gap * (n - 1)) / n))
-    for i, name in enumerate(names):
-        x = Emu(int(l + i * (each + gap)))
-        if labels:
-            tb(slide, x, t, each, cap_h, labels[i], cap_size, True, BLACK,
-               PP_ALIGN.CENTER)
-        pic(slide, name, x, Emu(int(t + cap_h)), each)
 
 
 def sum_page(page, sub, rows, doubt_row=None, top=None, colw=None, doubt_to=None,

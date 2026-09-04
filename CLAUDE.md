@@ -76,8 +76,11 @@
 ⓪a' 周邊地籍(scripts/cadastre_neighbors.py，★2026-09-04 全面改寫成**出圖框直接向農業部
      框查**：出圖框(合併＋逐案場，`--sitemap` 才含後者)∪buffer環 → 一次取回範圍內全部宗地，
      **不經本機快照、不必事先知道地號**；以「框內覆蓋率應 100%」當硬指標。15 案回測逐框
-     全 100.00%。舊的「快照認地號→逐筆回填→母號縮水探測」保留為 fallback(斷線時自動走、
-     `--force-local` 強制)。run_case.py --fetch 已自動接掛)
+     全 100.00%。舊的「快照認地號→逐筆回填」保留為 fallback(框查失敗時自動走、
+     `--force-local` 強制)；★**fallback 救不了 coagis 全站斷線**——兩條路同一台主機、
+     同一份 token，真正能救的是「Tiled 服務單獨不可用(版次改名/下架)」。缺口偵測與
+     子號探測補正已移入 scripts/legacy/cadastre_snapshot_probe.py。
+     run_case.py --fetch 已自動接掛)
 ⓪b 環敏套疊(scripts/ngis_sensitive.py，★正式程序；NGIS 官方54圖層實際套疊、免登入 <1秒
      → 環敏NGIS.csv/.json。備選①離線PDF應免查 env_prescreen 備選②平台eland/TCDGIS)
 ⓪ 清冊健檢(parcel-roster-verify，需本人登入)
@@ -326,7 +329,7 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
    `shp/`子夾放向量資料、`空照及其他/`子夾放底圖tif不含`_tilecache`）、
    `03_評估成果`（簡報pptx+QA pdf+圖檔_maxmap扁平化+檢核json/txt）。
 3. **產線工作檔不入案**（使用者裁示，兩案precedent一致）：`build_deck.py`、
-   `_grid_bg.png`、`05_出圖清單_maxmap.*`、`sites_status.csv`、pptx防蓋改鎖
+   `05_出圖清單_maxmap.*`、`sites_status.csv`、pptx防蓋改鎖
    `.dump.txt`、`00_總區位圖.png`（checkpoint圖，簡報已有正式版）——這些只留在
    本機`outputs/`產線資料夾，不搬上NAS。
 4. **去重與改名**：多份gpkg常有MD5完全重複（`Get-FileHash -Algorithm MD5`比對，
@@ -432,6 +435,10 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
   ⚠ 三個仍要注意的點：①**版次寫在服務名稱裡**（`..._Tiled_115Jun`），一律由
   `moa.newest_version()` 動態組出、不可寫死（寫死＝兩個月後靜默查到舊版，比留白更陰）；
   ②**分頁少抓一律拋錯**（少抓＝圖面留白）；③**權屬仍走 `public_land.py`**（本圖層無此欄位）。
+  ⚠ **fallback 不是斷線保險**（2026-09-04 精簡時查明）：框查與 fallback 的逐筆回填打的是
+  **同一台主機 coagis.colife.org.tw**、同一份 token、同一個設定檔，該站一斷兩條路一起斷。
+  fallback 真正能救的是「Tiled MapServer 單獨不可用而 SOE 擴充仍活著」——最可能的觸發是
+  **版次改名或該服務下架**。全站斷線時只能改天再跑或上 TCDGIS（需登入）。
   ⚠ **逐案場出圖要帶 `--sitemap`**：每個案場有自己的出圖框、以該案場置中且含角落避讓，
   可能伸出「合併基地」框之外（麻豆 S001 的 287×200 框北緣即超出合併 574×400 框）。
   ⚠ **多案場案件，「其他案場」的基地宗地要畫進本案場的周邊地籍**（2026-09-04 同案實見）：

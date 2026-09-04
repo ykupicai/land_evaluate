@@ -24,6 +24,13 @@ from shapely.geometry import box  # noqa: E402
 
 import cadastre_neighbors as cn  # noqa: E402
 
+# ★ 缺口偵測／子號探測那套已於 2026-09-04 移入 scripts/legacy（周邊地籍改走
+#   出圖框框查後，「候選清單受限於快照、需自動猜補」的前提不存在了）。
+#   測試**留在這裡**：它把七股／潮州的錯法鎖成斷言，日後若有人重走回頭路，
+#   這些斷言仍是最快的提醒。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "legacy"))
+import cadastre_snapshot_probe as probe  # noqa: E402
+
 CO, TOWN, SEG = "屏東縣", "潮州鎮", "五魁"
 
 
@@ -48,7 +55,7 @@ def test_shrunk_mother_detected():
     sur = _snap([(13, 0, 0, 0, 100, 100), (8, 0, 200, 0, 250, 50)])
     # 即時：13 只剩左半 40×100（4,000㎡，縮水）；8 原樣 50×50
     live = _live([("13", 0, 0, 40, 100), ("8", 200, 0, 250, 50)])
-    targets = cn.find_shrunk_mothers(sur, live)
+    targets = probe.find_shrunk_mothers(sur, live)
     key = (CO, TOWN, f"{SEG}段")
     assert key in targets, "縮水母號 13 應被抓到"
     assert "0013" in targets[key], "母號13(縮水 10,000→4,000)須列為探測目標"
@@ -59,14 +66,14 @@ def test_no_shrink_not_flagged():
     # 面積僅雜訊級微差（重測邊界 <GAP_MIN_AREA）不算縮水
     sur = _snap([(13, 0, 0, 0, 100, 100)])
     live = _live([("13", 0, 0, 100, 99.99)])   # 少 ~1㎡
-    assert cn.find_shrunk_mothers(sur, live) == {}, "雜訊級微差不可判為縮水"
+    assert probe.find_shrunk_mothers(sur, live) == {}, "雜訊級微差不可判為縮水"
 
 
 def test_mother_entirely_gone_flagged():
     # 母號在即時回填完全不在（live_area=0）也算縮水（極端分割/重測改號）
     sur = _snap([(9, 0, 0, 0, 30, 30)])
     live = _live([("8", 500, 500, 520, 520)])   # 完全沒有母號9
-    targets = cn.find_shrunk_mothers(sur, live)
+    targets = probe.find_shrunk_mothers(sur, live)
     assert "0009" in targets.get((CO, TOWN, f"{SEG}段"), set())
 
 
