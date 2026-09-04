@@ -56,8 +56,9 @@
 |---|---|
 | `greenbelt_ratio.py` | 隔離綠帶或設施：**最小寬度＋面積比雙門檻**，可指定加寬側。`--only-on 農業用地` 才是變更編定的正解（義務只對相鄰農業用地，定義見農地變更要點§2②，不含交通用地）。`--shape minimal`＝最少頂點構法（送審計算式用）、`--facility-near`＝臨路側分類為隔離設施 |
 | `cadastre_fetch.py` | 橋接 skill `cadastre-check`：**免登入**取官方地籍幾何＋使分/使類/登記面積**＋權屬**（自動呼叫 `public_land.py`）→ 產線可吃的 shp（`fetch`），並與平台官方 shp 對帳 IoU（`verify`）。⚠ 環敏53項與離島幾何仍須上 TCDGIS |
+| `moa_parcel_query.py` | **農業部地籍空間範圍查詢**（★2026-09-04 新增）：吃一個範圍（通常是 maxmap 出圖框）→ 回範圍內全部宗地的幾何＋屬性。走`CadastralMap/CadastralMap_Tiled_<版次>/MapServer`（layer 0=Penghu、1=Taiwan，maxRecordCount 2000、支援分頁），版次由 `moa.newest_version()` **動態組出、不可寫死**。屬性比 getLandInfo 還多（含**都市計畫區**）。與逐筆 ring API 比對 126 筆 **IoU 全部=1.000000**；密集市區大框 1,684 筆 **0.3 秒**回完（逐筆查要數小時）。⚠ 分頁少抓一律拋錯（少抓＝圖面留白）；權屬仍走 `public_land.py`。回歸測試 `tests/test_moa_parcel_query.py` |
 | ↑ 上面兩支是**主路徑**（⓪a 免登入）。走不通時**停下通知使用者改走 TCDGIS**（需本人登入），退回條件見 skill `cadastral-map-pipeline` 的「⓪a 走不通時」一節 |  |
-| `cadastre_neighbors.py` | **周邊地籍自動發現＋即時屬性回填**（2026-08-06）：評估範圍外擴 N 公尺（預設50）內與地籍有交集者，先用本機縣市快照做**空間識別**（只認地號身分、不採其屬性），再把發現的地號餵回 ⓪a 即時查（getLandInfo），產帶**現行**使分/使類/權屬的「鄰地.shp」——取代舊快照或 WMTS 疊圖作為分區/使用地編定等評估基準。`make_maps.py` 的 `extract_layers_trust` 已改為優先吃這份鄰地.shp（`ZONING_WMTS` 預設改 False，WMTS 降為 `--zoning-wmts` 備選）；`run_case.py --fetch` 已自動接掛（非硬性閘門，失敗只警告）；`--shp` 模式尚未接掛，需要時手動跑。⚠ **本機快照可能漏收「已從舊地號分割出的新地號」**（尤其交通用地/公路用地，七股案 66-42 即從 66-23 分割出、本機快照沒跟上）——內建 `check_coverage_gap()` 覆蓋率自我檢查（比對本機快照候選聯集 vs 即時回填後實際聯集，緊鄰20m內），有落差**自動探測補正**（`probe_siblings()`：找候選宗地母號、批次探測子號1~80、只留落在缺口範圍內者），全程免人工介入；探測用**整塊缺口幾何**找候選母號（不是單一取樣點——七股案67-11教訓：缺口常橫跨多個母號，單點取樣會漏掉另一側），並排除基地自身地號避免誤收。★2026-08-10 潮州中山段20案再強化：探測目標改以 `find_shrunk_mothers()`「**母號縮水**」精準鎖定（快照母號面積 vs 即時回填面積 <0.9 者才探；潮州 16 個緊鄰母號僅 2 個真縮水，避免逐一探 80 子號逾時），且**補正寫入 `_safe_to_file()` 抗檔案鎖**（遇 WinError 32 重試／改備援、不 crash——潮州案原本探到子號卻因寫回鄰地.shp 被鎖而整批丟失）。回歸測試 `tests/test_cadastre_neighbors.py` |
+| `cadastre_neighbors.py` | **周邊地籍取得：出圖框直接向農業部框查**（★2026-09-04 全面改寫，麻豆客子寮段案定案）：由基地幾何算出 maxmap 出圖框（合併框＋**逐案場框**，`--sitemap` 給了才含後者）∪ `--buffer` 外擴環 → 整個範圍送 `moa_parcel_query` 空間查詢，一次取回範圍內**全部**宗地的現行幾何＋屬性，**不必事先知道有哪些地號**；排除基地自身（幾何重疊≥50%）、補權屬、寫 `鄰地.shp`，並以**框內覆蓋率**當硬指標（應為 100%，不足即明確警告並寫入 `鄰地_coverage_check.json`）。15 個既有案回測：**逐框全部 100.00%**（舊路徑 53.16%~100%），零資料遺失。⚠ 舊路徑「本機快照認地號→逐筆線上回填→母號縮水探測」保留為 **fallback**（農業部斷線時自動改走，`--force-local` 可強制），其成果受限於快照 Ver 111年2月、屬性可能不完整，輸出會標明來源。回歸測試 `tests/test_cadastre_neighbors.py`、`tests/test_moa_parcel_query.py` |
 | `road_network.py` | **區位圖道路外擴基準**（2026-08-06）：算基地外擴到第一條國道／省道（OSM Overpass，本機無此資料）／市道／縣道／鄉道／市區快速道路（`2021 國道省道以外道路/`）為止的距離，供 `make_locality_map.py` 讀取取代固定 `--margin`。`run_case.py --fetch` 已自動接掛，產 `<案>/區位圖_道路基準.json` |
 | `nluz_landzone.py` | **⓪c 國土功能分區逐筆查＋本機面圖層比對**（2026-08-06，需 QGIS 內建 python）：橋接 skill `nluz-landzone-query` 引擎，但吃 `<案>/cadastre/基地.shp`＋`鄰地.shp`（不吃清冊），同步用 `make_maps.load_zones_for_county` 算本機面圖層值，不同時**nluz優先**。產 `國土功能分區_逐筆核對.csv`＋`國土功能分區/逐筆覆蓋.gpkg`（`make_maps.py` 的 `apply_nluz_override` 出主題3時自動偵測套用）。**鄰地查不查依案型自動分流**（`--neighbors auto`：非都市土地案查基地+出圖範圍內鄰地／都市計畫案只查基地，判準見 `detect_land_kind()`）。⚠ **跨分區宗地不覆蓋**：nluz 對橫跨多分區者回複合描述字串，不在 QML 21類分類表內、硬覆蓋會上不了色，且本機面圖層對這種宗地更精確（真的切成多塊面）→ 排除於覆蓋外並在 CSV 標註（七股66-14實測）。⚠ 平台限流5.5秒/筆，先 `--limit` 試跑。⚠ 兩個PyQGIS陷阱已修：`QgsRectangle.combineExtentWith()`原地mutate回傳None（不可把回傳值指回變數，同 `make_maps.py` 既有 `X.combineExtentWith(Y) or X` 寫法防的同一坑）；`initQgis`/`exitQgis`同行程呼叫兩次會崩潰（exit code 5），全程須同一個QGIS session |
 | `public_land.py` | **權屬查詢**（內政部 MOI_API_039 公有土地開放資料，**免登入**）：以段為單位回全段公有地之所有權人／公私別／管理者。布袋案與 TCDGIS 7/7 一致。⚠ 「未列＝私有」是反面推論；⚠ 管理機關可能是改制前舊名 |
@@ -83,6 +84,8 @@
 `overlay_placement.py`（角落疊圖避讓）、`nlsc_wmts.py`（WMTS 圖磚拼接）、
 `shp_trust_utils.py`（DBF 容錯／地號正規化／sitemap 分派／**欄名別名表 `F_*`**）、
 `zone_utils.py`（分區名正規化）、
+`deck_layout.py`（簡報版面引擎；**內建兩道產出檢核**：交付字串不得含 markdown
+標記、以及**缺圖硬停**——見下方第 6 點）、
 `map_sanity.py`（**出圖成果自我檢查**：出圖前擋 0 筆圖層、出圖後驗成品非空白，
 見下方第 4 點）、
 `urban_mix.py`（**基地都市／非都市組成判定**：全都市→只出使用分區，混合或全非都市→
@@ -127,6 +130,16 @@
 `--parcel-line-themes=<主題…>` 周邊宗地界線改黑／`--no-neighbor-themes=<主題…>` 不畫
 周邊地籍界線。⚠ 圖層在案場內是**共用的同一份物件**，故於主題迴圈內逐張重設，否則前
 一張的樣式會殘留到下一張。
+
+6. **簡報缺圖一律硬停，不得只在版面上放紅字放行**（2026-08-27 麻豆案實踩）：
+   `deck_layout.pic()` 原本找不到圖檔時只放一行「（圖檔缺 xxx）」紅字就繼續，結果兩份
+   變更編定簡報**各缺 5 張圖仍回報「saved / slides 8」**，要到逐頁目視才發現。
+   簡報每一頁的圖就是該頁主題的成果，缺圖等同該頁沒有依據——這種錯必須在產出當下擋，
+   不能靠人眼補救。現行行為：缺圖登記到 `_missing_pics`，`save()` 直接 `SystemExit`
+   並印出頁碼與檔名，**不產出 pptx**。
+   ⚠ 最常見的缺圖原因是**檔名對不上**：`make_maps` 的成果圖命名是
+   `<案場ID>_<案場名稱>_<主題>.png`（例 `S001_S001宗基地_使用分區.png`），
+   案件層另外產的主題圖（如本案的隔離綠帶）才可能是別的命名，內容檔要分開處理。
 
 **新增基地 shp 來源時只改一處**：`shp_trust_utils` 的 `F_LANDNO/F_COUNTY/F_TOWN/
 F_SEG/F_ZONE/F_LTYPE`。② area_join 用 `20251201_*`、⓪a cadastre_fetch 用中文短欄名

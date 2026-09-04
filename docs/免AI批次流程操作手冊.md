@@ -241,14 +241,27 @@ python -X utf8 scripts\cadastre_fetch.py fetch --county 嘉義縣 --town 布袋�
 python -X utf8 scripts\cadastre_neighbors.py --joined "outputs\<案子>\cadastre\基地.shp" --out "outputs\<案子>\cadastre" --buffer 50
 ```
 
-產 `基地.shp`／`鄰地.shp`（EPSG:3826、UTF-8，欄位含 地號／使分／使類／登面積／圖面積／
-版次／**公私別／所有權／管理者**），可直接餵 `greenbelt_ratio --neighbours`、`check_zones --joined`。
-`run_case.py --fetch` 已自動接掛這兩步，一般不必手動個別執行。
+**多案場（要逐案場出圖）時務必加 `--sitemap`**——每個案場有自己的出圖框，可能伸出
+「合併基地」框之外，不加會讓案場圖邊緣留白：
 
-`cadastre_neighbors.py` 內建**覆蓋率自我檢查＋自動探測補正**：本機縣市快照可能漏收
-「已從舊地號分割出的新地號」（尤其交通用地／公路用地，地籍圖重測系統不涵蓋「逕為
-分割」）——抓到落差會自動找候選宗地母號、批次探測子號、只留落在缺口範圍內者併入
-回填，全程免人工介入；跑完印「缺口已補齊、覆蓋率檢查通過」才算乾淨。
+```powershell
+python -X utf8 scripts\cadastre_neighbors.py --joined "outputs\<案子>\cadastre\基地.shp" --out "outputs\<案子>\cadastre" --sitemap "outputs\<案子>\案場定義\sitemap.csv"
+```
+
+產 `基地.shp`／`鄰地.shp`（EPSG:3826、UTF-8，欄位含 地號／使分／使類／登面積／圖面積／
+版次／**公私別／所有權／管理者**／**都計區**），可直接餵 `greenbelt_ratio --neighbours`、
+`check_zones --joined`。`run_case.py --fetch` 已自動接掛這兩步，一般不必手動個別執行。
+
+**鄰地是「出圖框直接向農業部框查」取得**（2026-09-04 起）：把出圖框（合併框＋各案場框）
+∪ buffer 環整個範圍送農業部地籍圖層做空間查詢，一次回傳範圍內**全部**宗地，不經本機快照、
+不必事先知道有哪些地號。跑完會印**逐框覆蓋率**，全部 `100.00%` 並顯示「✔ 全部出圖框已
+填滿，無留白」才算乾淨；某框不足時訊息會說明缺口成因（水域／未登錄地／離島／未帶
+`--sitemap`），該留白**必須在交付文件寫明**，不可讓看圖的人以為那裡沒有土地。
+覆蓋率與資料來源都寫在 `鄰地_coverage_check.json`。
+
+農業部服務偶爾會斷線（非程式錯誤）。斷線時會自動改走舊路徑（本機快照認地號→逐筆
+回填→母號縮水探測）並印警告，此時屬性受限於快照 Ver 111年2月、可能不完整，**服務恢復
+後建議重跑**。`--force-local` 可強制走舊路徑（重現舊成果或比對用）。
 
 **布袋306 實測**：幾何與 TCDGIS 官方 shp **完全相同**（IoU 100.00%、面積差 0.00 ㎡）；
 使分／使類 7/7 一致；登記面積＝平台標示面積；**權屬 7/7 一致**

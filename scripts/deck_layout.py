@@ -94,6 +94,9 @@ _img = None
 _out = None
 
 
+_missing_pics: list = []      # 缺圖登記簿：(頁碼, 檔名)；save() 會據此硬停
+
+
 def _grid_png(case_dir: str) -> str:
     p = os.path.join(case_dir, "_grid_bg.png")
     if os.path.exists(p):
@@ -145,6 +148,7 @@ def init(case_dir: str, out_name: str, img_subdir: str = "圖檔_maxmap",
     直接硬停——先把手改內容回寫進 build_deck.py（或確認要放棄）再 init(force=True)。
     安南案 2026-07-29 就是重建前沒比對，把使用者整輪手改蓋掉。"""
     global _prs, _blank, _grid, _here, _img, _out
+    _missing_pics.clear()      # 每份簡報獨立計算缺圖
     out_path = os.path.join(case_dir, out_name)
     fp_path = out_path + ".dump.txt"
     if not force and os.path.exists(out_path) and os.path.exists(fp_path):
@@ -356,11 +360,18 @@ def table(slide, l, t, w, rows, col_w=None, size=11, header_row=True, ncol=None,
 
 
 def pic(slide, name, l, t, w):
-    """放圖：先找 圖檔_maxmap/，再找案件根目錄；等比縮放至寬 w。"""
+    """放圖：先找 圖檔_maxmap/，再找案件根目錄；等比縮放至寬 w。
+
+    ★缺圖一律登記到 `_missing_pics`，`save()` 時硬停（2026-08-27 麻豆案實踩）：
+    原本只在版面上放一行紅字就繼續，結果兩份變更編定簡報各缺 5 張圖仍「建置成功」，
+    要到逐頁目視才發現。簡報每頁的圖是該頁主題的成果，缺圖等同該頁沒有依據——
+    這種錯必須在產出當下擋下來，不能靠人眼補救。
+    """
     p = os.path.join(_img, name)
     if not os.path.exists(p):
         p = os.path.join(_here, name)
     if not os.path.exists(p):
+        _missing_pics.append((len(_prs.slides._sldIdLst), name))
         tb(slide, l, t, w, Inches(0.4), f"（圖檔缺 {name}）", 12, False, RED)
         return
     im = Image.open(p); ratio = im.height / im.width
@@ -410,6 +421,13 @@ def _lint_markdown():
 
 
 def save():
+    if _missing_pics:
+        for pg, nm in _missing_pics[:10]:
+            print(f"  ✖ 第{pg}頁缺圖：{nm}")
+        raise SystemExit(
+            f"簡報缺 {len(_missing_pics)} 張圖，未存檔。"
+            "請確認圖檔已產出、且檔名與內容檔引用一致"
+            "（成果圖命名慣例：<案場ID>_<案場名稱>_<主題>.png）")
     bad = _lint_markdown()
     if bad:
         for pg, t in bad[:10]:

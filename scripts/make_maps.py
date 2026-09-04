@@ -485,7 +485,7 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                 continue
             base_norm = {normalize_landno(x) for x in c.get("_landnos", set()) if x}
             matched: set[str] = set(base_norm)   # 基地自身視為已配對，見下方直接灌入
-            rect = c["extent"].buffered(c["extent"].width() * NEIGH_EXPAND)
+            rect = neigh_rect(c, [g for g, *_ in own_feats.get(c["id"], [])])
             n = 0
             # ★ 基地自身也要進「周邊地籍」層——這層才是實際套 使用分區/使用地編定
             #   QML 上色的圖層（基地紅框層 l_red 只畫外框+標籤，不上色），鄰地.shp
@@ -495,6 +495,23 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
                 add_feat(neigh, g, [c["id"], ln, zone or URBAN_LABEL,
                                     typ or URBAN_LABEL, "Y", pub or ""])
                 n += 1
+            # ★ 多案場案件：**其他案場**的基地宗地，對本案場而言就是鄰地，一定要畫
+            #   （2026-09-04 麻豆案實見）：鄰地.shp 依設計排除「申請範圍全部宗地」，
+            #   而 own_feats 只補「本案場」的，於是別的案場那塊在本圖上沒有任何圖層
+            #   負責 → 圖面出現一整塊白（S001 圖左下 3,168 ㎡ 白塊其實是 S002 的
+            #   258/259/260）。留白會被讀成「那裡沒有宗地」，比屬性稍舊嚴重得多。
+            #   標 是否基地=""——對**這張圖**而言它不是基地，不該套基地紅框樣式。
+            for oid, ofeats in own_feats.items():
+                if oid == c["id"]:
+                    continue
+                for g, ln, zone, typ, pub in ofeats:
+                    if normalize_landno(ln) in base_norm:
+                        continue        # 同一宗地同屬多案場：本案場已灌過，不重覆
+                    if not g.boundingBoxIntersects(rect):
+                        continue
+                    add_feat(neigh, g, [c["id"], ln, zone or URBAN_LABEL,
+                                        typ or URBAN_LABEL, "", pub or ""])
+                    n += 1
             for f in neigh_fresh.getFeatures(QgsFeatureRequest().setFilterRect(rect)):
                 ln = attr_str(f[i_ln]) if i_ln >= 0 else ""
                 zone = attr_str(f[i_zone]) if i_zone >= 0 else ""
@@ -564,7 +581,7 @@ def extract_layers_trust(shp_path: str, cases: dict[str, dict], registry: dict,
             # 還原，兩邊格式可能不同（前導零/全形/「之」）→ 都經 normalize_landno 再比。
             base_norm = {normalize_landno(x) for x in base_set if x}
             matched: set[str] = set()
-            rect = c["extent"].buffered(c["extent"].width() * NEIGH_EXPAND)
+            rect = neigh_rect(c, [g for g, *_ in own_feats.get(c["id"], [])])
             attrs_idx = [i for i in (i_mother, i_child, i_zone, i_type) if i >= 0]
             req = QgsFeatureRequest().setFilterRect(rect).setSubsetOfAttributes(attrs_idx)
             n = 0
@@ -656,6 +673,40 @@ def wrap_cjk(s: str, width: int = 22) -> str:
 # ---------------------------------------------------------------------------
 # 比例尺與圖面範圍
 # ---------------------------------------------------------------------------
+
+
+def neigh_rect(c: dict, geoms) -> QgsRectangle:
+    """抽取周邊地籍用的取件範圍：**compact 與 maxmap 兩種版面框的聯集**再外擴。
+
+    ★ 為什麼不能只用 c["extent"]（2026-09-04 麻豆案實見圖面白邊）：`c["extent"]` 在
+      抽取階段是由 `compute_scale_extent` 以 **compact 版面**（MAP_W×MAP_H＝200×190mm）
+      算的，但 `--layout maxmap` 到**出圖階段**才把它換成 `op.place_fixed`（MAP2_W×MAP2_H
+      ＝287×200mm）的框——同比例尺下 maxmap 框寬 43.5%。抽取窗比實際出圖框窄，
+      左右緣的宗地根本沒被抽進 gpkg，於是圖面邊緣留白（S002 實測 496.9 ㎡）。
+      留白會被讀成「那裡沒有宗地」，故一律取兩者聯集，多抽一點無妨（只是圖層筆數）。
+    """
+    rect = QgsRectangle(c["extent"])
+    try:
+        import overlay_placement as op   # noqa: PLC0415  純幾何，與出圖階段同一支
+        geom = QgsGeometry.unaryUnion([QgsGeometry(g) for g in geoms])
+        bb = geom.boundingBox()
+        # ⚠ place_fixed 吃的是 **(xmin, ymin, xmax, ymax) 四元組**，不是 QgsRectangle
+        #   （出圖階段那支呼叫就是這樣轉的）。傳錯型別會拋例外、被下面的 except 吞掉，
+        #   於是靜默退回 compact 框——症狀就是圖面邊緣照樣留白、卻什麼錯都沒印。
+        bbox = (bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum())
+
+        def _isect(x1, y1, x2, y2, _g=geom):
+            it = _g.intersection(QgsGeometry.fromRect(QgsRectangle(x1, y1, x2, y2)))
+            return 0.0 if it.isEmpty() else it.area()
+
+        pl = op.place_fixed(_isect, bbox, map_w=op.MAP2_W, map_h=op.MAP2_H)
+        rect.combineExtentWith(
+            QgsRectangle(pl.extent[0], pl.extent[2], pl.extent[1], pl.extent[3]))
+    except Exception as e:  # noqa: BLE001
+        # 不可靜默：退回 compact 框＝maxmap 圖面邊緣會留白，必須讓人看見。
+        print(f"  ⚠ {c.get('id', '?')} maxmap 取件框計算失敗，退回 compact 框，"
+              f"圖面邊緣可能留白（{type(e).__name__}: {e}）", flush=True)
+    return rect.buffered(rect.width() * NEIGH_EXPAND)
 
 
 def compute_scale_extent(bbox: QgsRectangle) -> tuple[int, QgsRectangle]:
@@ -804,6 +855,7 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
 
         for c in clist:
             fids = sorted({f for row in c["rows"] for f in row["fids"]})
+            case_geoms: list = []       # 本案場基地幾何（供 neigh_rect 算 maxmap 框）
             feats = {f.id(): f for f in lyr.getFeatures(QgsFeatureRequest().setFilterFids(fids))}
             bbox = None
             for row in c["rows"]:
@@ -817,6 +869,7 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
                             f"{c['id']} 地號{row['地號']} FID {fid} 宗地母不符"
                             f"（shp={f[i_mother]} 02={row['宗地母']}），仍照 FID 出圖")
                     g = f.geometry()
+                    case_geoms.append(g)
                     add_feat(base, g, [c["id"], c["name"], row["地號"],
                                        row["使分"] or URBAN_LABEL,
                                        row["使類"] or URBAN_LABEL,
@@ -831,7 +884,7 @@ def extract_layers(cases: dict[str, dict], registry: dict, gpkg: Path) -> list[s
             # 周邊地籍：出圖範圍再外擴 NEIGH_EXPAND 內的所有宗地，帶 地號/使分/使類；
             # 基地宗地也在內（是否基地=Y，供標註規則排除、避免與基地紅框層重複標地號）
             case_fids = set(fids)
-            rect = c["extent"].buffered(c["extent"].width() * NEIGH_EXPAND)
+            rect = neigh_rect(c, case_geoms)
             attrs_idx = [i for i in (i_mother, i_child, i_zone, i_type) if i >= 0]
             req = QgsFeatureRequest().setFilterRect(rect).setSubsetOfAttributes(attrs_idx)
             n = 0

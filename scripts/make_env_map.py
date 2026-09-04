@@ -115,7 +115,10 @@ def main():
         got = []
         with io.open(path, encoding="utf-8-sig") as f:
             for r in csv.DictReader(f):
-                v = (r.get("套疊面積_m2") or "").strip()
+                # 兩種來源欄名不同：①b 平台版寫「套疊面積_m2」、⓪b NGIS 版
+                # （ngis_sensitive.py）寫「重疊面積_m2」。只認前者會讓 NGIS 來源
+                # 靜默回「套疊 0 項 → 不出圖」，明明有命中卻不畫（2026-08-27 麻豆案實踩）。
+                v = (r.get("套疊面積_m2") or r.get("重疊面積_m2") or "").strip()
                 try:
                     area = float(v)
                 except ValueError:

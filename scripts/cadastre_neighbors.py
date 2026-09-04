@@ -1,29 +1,41 @@
 # -*- coding: utf-8 -*-
-"""⓪a 周邊地籍自動發現＋即時屬性回填（2026-08-06 使用者定案）
+"""⓪a′ 周邊地籍取得：**出圖框 → 直接向農業部框查**（2026-09-04 使用者裁示「全改」）
 
-★ 建立緣由：既有「周邊地籍」概念（make_maps.py 出圖用）只從**本機縣市快照**
-  （Ver 111年2月）撈，僅供製圖時的視覺脈絡，屬性是舊的，不能拿來做分區／使用地
-  編定等評估判斷——這正是 2026-08-02 改用 NLSC WMTS 當主題1/2預設底圖的原因。
+★ 現行主路徑（online）
+------------------------------------------------------------------
+  1. 由**基地幾何**算出 maxmap 出圖框（`overlay_placement.place_fixed`，與 make_maps
+     同一支、同參數含角落避讓），再與 `--buffer` 外擴環聯集成 region。
+  2. 把 region 直接送農業部地籍圖層做**空間查詢**（`moa_parcel_query`），一次回傳
+     範圍內全部宗地的幾何＋現行屬性。**不必事先知道有哪些地號。**
+  3. 排除基地自身（幾何重疊 ≥50%），補權屬（MOI_API_039），寫 `<name>.shp`。
+  4. **框內覆蓋率硬指標**：框內未被宗地覆蓋的比例應為 0；有缺就明確警告並寫進
+     `<name>_coverage_check.json`，不可靜默留白。
 
-  現在 ⓪a（cadastre_fetch.py，免登入 getLandInfo）回傳路徑順暢，本模組把「發現
-  鄰地」與「取得鄰地即時屬性」分成兩步接起來：
-    1. **發現**：本機縣市快照只拿來做**空間識別**（哪些地號在範圍內），不採其屬性——
-       地號/段/鄉鎮這些**識別身分**不常變、快照堪用；使分/使類等**屬性**才會過時。
-    2. **回填**：把發現到的地號餵回 ⓪a 即時查（getLandInfo），拿到現在的使分／使類／
-       登記面積／權屬，跟基地本身用的是同一組免登入權威來源，口徑一致。
+★ 為什麼改（2026-09-04 麻豆客子寮段案）
+------------------------------------------------------------------
+舊路徑是「本機快照認地號 → 逐筆線上回填」，**候選清單完全由 Ver 111年2月 的快照
+決定**：快照沒有的地號從頭到尾不會被查。麻豆案港子尾段整段重測改名為客子寮段並
+全段重編號，其後又分割出 374-1／374-2（合計 36,338 ㎡、距基地 3.9 公尺），在快照
+裡沒有任何舊地號對得上 → 整片留白。既有補救（母號縮水偵測、子號探測）也同時失效：
+縮水偵測靠同地號比面積，整段重編號後兩邊集合不重疊；子號探測用舊段名，現行版查無。
 
-  評估範圍外擴 50 公尺內與地籍有交集者全數回傳（不是只挑「明顯相鄰」的幾筆）；
-  之後的分區圖、使用地編定圖、周邊使用地分析（adjacent_landuse.py）、隔離綠帶
-  應留設側判定（greenbelt_ratio.py --neighbours）都可以直接吃這份「鄰地.shp」，
-  取代舊快照或 WMTS 疊圖——WMTS 改列備選（圖磚抓不到、或要快速目視現況套疊時用）。
+框查實測（同一個出圖框）：154 筆、**框內覆蓋 100.00%**（舊路徑 145 筆／81.91%），
+與 ring API 逐筆比對 126 筆 **IoU 全部 = 1.000000**；密集市區大框 1,684 筆 **0.3 秒**
+回完（舊路徑逐筆查要數小時，員林案當初正因此放棄即時回填）。
+
+★ 舊路徑保留為 fallback（legacy）
+------------------------------------------------------------------
+農業部 coagis 會間歇性斷線（2026-08-19 湖口案實踩）。框查失敗時自動改走舊的
+「本機快照 → 逐筆回填 → 母號縮水探測」路徑，並在輸出明確標示資料來源；
+`--force-local` 可強制走舊路徑（重現舊成果或比對用）。
+⚠ fallback 的成果**屬性可能不完整**（那正是它被降級的原因），交付前須留意。
 
 用法（系統 Python，不需 QGIS）：
-  python -X utf8 scripts/cadastre_neighbors.py --joined <cadastre/基地.shp> \
-      --out outputs/<案>/cadastre [--buffer 50] [--name 鄰地]
+  python -X utf8 scripts/cadastre_neighbors.py --joined <cadastre/基地.shp>       --out outputs/<案>/cadastre [--buffer 50] [--name 鄰地] [--force-local]
 
-輸出：<out>/<name>.shp（與 cadastre_fetch.py 同欄位：地號/使分/使類/縣市/鄉鎮/段/
-  登面積/圖面積/偏差pct/版次/狀態/未登記/公私別/所有權/管理者/原地號）
-  ＋ <out>/<name>_neighbors.json（發現階段的分組與筆數，供除錯）
+輸出：<out>/<name>.shp（欄位同 cadastre_fetch，另加「都計區」）
+  ＋ <out>/<name>_coverage_check.json（框內覆蓋率、資料來源、缺口說明）
+  ＋ <out>/<name>_neighbors.json（走 fallback 時才有：發現階段的分組與筆數）
 """
 from __future__ import annotations
 
@@ -42,6 +54,7 @@ from shapely.ops import unary_union
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import overlay_placement as op  # noqa: E402  出圖框計算（與 make_maps 同一支）
+import moa_parcel_query as mpq  # noqa: E402  ★現行主路徑：出圖框直接向農業部框查
 
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,10 +71,13 @@ from cadastre_fetch import cmd_fetch  # noqa: E402
 
 
 def _section_name(seg, sub) -> str:
-    """本機快照『段』欄不含「段」字、『小段』欄不含「小段」字；即時查詢 API 要完整組字。"""
-    seg = "" if pd.isna(seg) else str(seg).strip()
-    sub = "" if pd.isna(sub) else str(sub).strip()
-    return f"{seg}段{sub}小段" if sub else f"{seg}段"
+    """本機快照『段』欄不含「段」字、『小段』欄不含「小段」字；查詢與下游 join 要完整組字。
+
+    ★ 實作已統一到 `moa_parcel_query.section_name`（2026-09-04）——框查與本機快照
+      兩條路徑必須組出**一字不差**的段名，各寫一份遲早分岔，而分岔的症狀是 join
+      靜默落空（不報錯、只是資料對不上）。此處保留薄殼以維持既有呼叫點。
+    """
+    return mpq.section_name(seg, sub)
 
 
 def _safe_to_file(gdf, path: str, retries: int = 4, wait: float = 0.6) -> str:
@@ -155,32 +171,155 @@ def _load_cadlib():
     return cadlib
 
 
-def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, object, object]:
-    """回 ({(縣市,鄉鎮,段): [landno,...]}, su, local_check_union)。
-    su＝基地聯集幾何；local_check_union＝本機快照在 GAP_CHECK_M 緊鄰帶內的候選
-    宗地聯集（含被排除的基地自身候選，供事後覆蓋率比對用，見 check_coverage_gap）。
+def map_frame(geom):
+    """單一幾何的 maxmap 出圖框（與 make_maps 同一支 place_fixed、同參數、含角落避讓）。
+
+    算不出來回 None（呼叫端須退回 buffer 環並警告）。
     """
-    cadlib = _load_cadlib()
+    try:
+        def _isect(x1, y1, x2, y2, _g=geom):
+            it = _g.intersection(_sbox(x1, y1, x2, y2))
+            return 0.0 if it.is_empty else it.area
+        pl = op.place_fixed(_isect, geom.bounds, map_w=op.MAP2_W, map_h=op.MAP2_H)
+        fx1, fx2, fy1, fy2 = pl.extent      # extent=(x1,x2,y1,y2)
+        return _sbox(fx1, fy1, fx2, fy2)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 出圖框計算失敗（{type(e).__name__}: {e}）")
+        return None
+
+
+def site_frames(site, sitemap: str | None):
+    """逐案場出圖框清單 [(案場ID, frame), ...]。無 sitemap 或對不上時回 []。
+
+    ★ 為什麼需要（2026-09-04 麻豆案實見）：`make_maps --sitemap` 是**逐案場**出圖，
+      每個案場有**自己的**出圖框，而該框是以該案場幾何置中、含角落避讓——它可能
+      伸出「合併基地」框之外（S001 的 287×200 框北緣就超出合併 574×400 框）。只用
+      合併框抓地籍，逐案場圖的邊緣會留白（實測 S001 94.48%、S002 95.26%）。
+      故 region 必須是「合併框 ∪ 各案場框 ∪ buffer 環」。
+    """
+    if not sitemap or not os.path.exists(sitemap):
+        return []
+    try:
+        import shp_trust_utils as SU  # noqa: PLC0415
+        smap = SU.load_sitemap(sitemap)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ sitemap 讀取失敗，逐案場框略過（{type(e).__name__}: {e}）")
+        return []
+    col_no = next((c for c in ("地號", "20251201_4") if c in site.columns), None)
+    if not col_no:
+        print("  ⚠ 基地 shp 無地號欄，逐案場框略過")
+        return []
+    col_seg = next((c for c in ("段", "20251201_3") if c in site.columns), None)
+    groups: dict[str, list] = {}
+    for _, r in site.iterrows():
+        no = SU.normalize_landno(r[col_no])
+        seg = SU.norm_seg(r[col_seg]) if col_seg else ""
+        hit = smap.get(f"{seg}|{no}") or smap.get(no)
+        if not hit:
+            continue
+        for sid, _nm in hit:
+            groups.setdefault(sid, []).append(r.geometry)
+    out = []
+    for sid in sorted(groups):
+        f = map_frame(unary_union(groups[sid]))
+        if f is not None:
+            out.append((sid, f))
+    return out
+
+
+def compute_region(joined: str, buffer_m: float, sitemap: str | None = None):
+    """回 (region, frames, su, site_gdf)：涵蓋範圍、出圖框清單、基地聯集、基地圖層。
+
+    ★ 涵蓋範圍由「maxmap 出圖框」決定（2026-08-23 永康三民段385 案定案）：固定 buffer
+      對細長／小基地會抓不滿框（框寬遠大於 buffer）→ 框內較遠宗地留白。出圖框僅由基地
+      幾何決定，可先算框、再用框篩地籍。buffer 仍作下限保證緊鄰收入。
+    ★ frames 是**清單**：`[("合併", 框), ("S001", 框), ...]`。逐案場出圖時每個案場有
+      自己的框且可能伸出合併框外（2026-09-04 麻豆案實見），全部都要納入涵蓋範圍。
+    框全算不出來時 frames 回 []，region 退回純 buffer 環（能跑但框內可能留白，會警告）。
+    """
     site = gpd.read_file(joined, engine="pyogrio")
     if site.crs and site.crs.to_epsg() != 3826:
         site = site.to_crs(3826)
     su = site.geometry.union_all()
     ring = su.buffer(buffer_m)
-
-    # ★ 涵蓋範圍改由「maxmap 出圖框」決定（2026-08-23 永康三民段385 案定案）：固定 buffer
-    #   對細長／小基地會抓不滿框（框寬遠大於 buffer）→ 框內較遠宗地留白。出圖框僅由基地
-    #   幾何決定，可先算框、再用框篩地籍。用與 make_maps 相同的 place_fixed＋基地交集函式
-    #   算框（含角落避讓退比例尺），確保涵蓋 make_maps 實際框。buffer 仍作下限保證緊鄰收入。
+    frames = []
+    f0 = map_frame(su)
+    if f0 is not None:
+        frames.append(("合併", f0))
+    frames.extend(site_frames(site, sitemap))
     region = ring
-    try:
-        def _isect(x1, y1, x2, y2, _g=su):
-            it = _g.intersection(_sbox(x1, y1, x2, y2))
-            return 0.0 if it.is_empty else it.area
-        pl = op.place_fixed(_isect, su.bounds, map_w=op.MAP2_W, map_h=op.MAP2_H)
-        fx1, fx2, fy1, fy2 = pl.extent      # extent=(x1,x2,y1,y2)
-        region = ring.union(_sbox(fx1, fy1, fx2, fy2))
-    except Exception as e:  # noqa: BLE001
-        print(f"  ⚠ 出圖框計算失敗，退回 buffer={buffer_m:.0f}m 涵蓋（{type(e).__name__}: {e}）")
+    for _n, f in frames:
+        region = region.union(f)
+    return region, frames, su, site
+
+
+def frame_coverage(frames, gdf, su) -> dict:
+    """逐個出圖框量「被宗地（鄰地＋基地）覆蓋的比例 %」。**新路徑的硬指標**。
+
+    框查回的就是框內全部宗地，覆蓋率理應 100%；不足即代表該處農業部圖層真的沒有
+    宗地（水域、未登錄地、離島無資料等），必須明講，不可讓讀圖的人以為那裡沒有地。
+    ⚠ 逐案場出圖時要量的是**各案場自己的框**，量合併框會漏掉案場框伸出去的邊緣
+      （2026-09-04 麻豆案：合併框 100%，但 S001 只有 94.48%）。
+    frames 可傳單一幾何（相容舊呼叫）或 [(名稱, 框), ...]；回 {名稱: 覆蓋率%}。
+    """
+    if frames is None:
+        return {}
+    if not isinstance(frames, list):
+        frames = [("合併", frames)]
+    parts = [g for g in getattr(gdf, "geometry", []) if g is not None and not g.is_empty]
+    if su is not None and not su.is_empty:
+        parts.append(su)
+    u = unary_union(parts) if parts else None
+    out = {}
+    for name, f in frames:
+        if f is None or f.is_empty:
+            continue
+        out[name] = 0.0 if u is None else u.intersection(f).area / f.area * 100.0
+    return out
+
+
+def discover_online(joined: str, buffer_m: float, version: str | None = None,
+                    no_owner: bool = False, sitemap: str | None = None):
+    """★現行主路徑：出圖框直接向農業部框查，回 (gdf, region, frames, su)。
+
+    不經本機快照、不必事先知道地號，故不受「快照沒收錄」「整段重測改號」影響
+    （2026-09-04 麻豆案定案，詳見模組 docstring）。
+    """
+    region, frames, su, site = compute_region(joined, buffer_m, sitemap)
+    url, ver = mpq.service_url(version)
+    x1, y1, x2, y2 = region.bounds
+    names = "、".join(n for n, _f in frames) or "無（僅 buffer）"
+    print(f"框查：地籍版次 {ver}，範圍 {x2 - x1:,.0f}×{y2 - y1:,.0f} m"
+          f"（出圖框：{names}）")
+    n = mpq.count_envelope(x1, y1, x2, y2, version)
+    print(f"  範圍內宗地 {n} 筆，取回中…")
+    recs = mpq.query_region(region, version, progress=print)
+    gdf = mpq.to_gdf(recs, ver)
+    if len(gdf) == 0:
+        raise mpq.MoaQueryError("框查回 0 筆——該範圍農業部圖層無資料（離島？），"
+                                "或服務異常")
+    # 排除基地自身：與基地重疊達自身 50% 以上視為同一宗地。★用幾何不用地號字串——
+    # 重測改號、異體字、段名變更都會讓字串比對失效（本專案反覆踩過的坑）。
+    ov = gdf.geometry.intersection(su).area / gdf.geometry.area.replace(0, 1)
+    gdf = gdf[ov < 0.5].reset_index(drop=True)
+    if not no_owner:
+        gdf = mpq.attach_ownership(gdf)
+    assert site is not None
+    return gdf, region, frames, su
+
+
+def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, object, object]:
+    """【fallback】本機快照認地號 → 逐筆線上回填（2026-09-04 起降為備援）。
+
+    回 ({(縣市,鄉鎮,段): [landno,...]}, su, local_check_union, sur)。
+    su＝基地聯集幾何；local_check_union＝本機快照在 GAP_CHECK_M 緊鄰帶內的候選
+    宗地聯集（含被排除的基地自身候選，供事後覆蓋率比對用，見 check_coverage_gap）。
+
+    ⚠ 本路徑的候選清單受限於快照（Ver 111年2月），快照沒有的地號不會被查到；
+      只在框查失敗（農業部斷線）或 --force-local 時使用。
+    """
+    cadlib = _load_cadlib()
+    region, _frames, su, site = compute_region(joined, buffer_m)
 
     if not county:
         for c in ("縣市", "縣市名稱"):
@@ -254,6 +393,71 @@ def fetch_all(groups: dict, out_dir: str, name: str = "鄰地") -> tuple[str, "g
         raise SystemExit("✖ 所有分組皆無成功筆數，未產出鄰地.shp")
     merged = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
     merged = gpd.GeoDataFrame(merged, crs=parts[0].crs)
+    # ★ 逐筆重試沒回來的地號（2026-08-27 麻豆客子寮段案）：整段成功不代表每筆都成功。
+    #   該案 149 筆送查、只回 140 筆，圖上基地旁大片留白。逐筆看失敗原因分兩類：
+    #     ① **暫時性**——重測改號要退回 MOI 新舊地號 API，該 API 會 read operation
+    #        timed out。實測重試即成功（港子尾段11 → 客子寮段314 水利用地）。
+    #     ② **農業部資料本身沒有**——新舊地號對照解得出新地號，但農業部查無其幾何
+    #        （港子尾段18→客子寮段380、19-1→378、16-3→375；API 回別筆地，被 14 碼
+    #        閘門正確拒絕）。這類重試無效，只能如實報出。
+    #   ⚠ 缺的宗地一律**明確列出**，不可靜默留白——留白會被讀成「那裡沒有宗地」。
+    def _returned(df):
+        """已回來的「請求地號」集合。★重測改號時回傳的是**新地號**（港子尾段11 →
+        客子寮段314），只比 `地號` 欄會把它判成沒回來、整批重抓（2026-08-27 實錯：
+        149 筆送查卻併出 266 筆）。`cadastre_fetch` 有記 `原地號`，優先用它。"""
+        out = set()
+        for col in ("原地號", "地號"):
+            if col in df.columns:
+                out |= {str(x).strip() for x in df[col] if str(x).strip()
+                        and str(x).strip().lower() != "nan"}
+        return out
+
+    got = _returned(merged)
+    missing = {k: [ln for ln in v if str(ln).strip() not in got]
+               for k, v in groups.items()}
+    missing = {k: v for k, v in missing.items() if v}
+    if missing:
+        n_miss = sum(len(v) for v in missing.values())
+        print(f"\n→ 首輪有 {n_miss} 筆未回，逐段重試一次（多為新舊地號 API 逾時）…")
+        retried = []
+        for (county, town, section), landnos in missing.items():
+            tag = f"_{name}_{county}{town}{section}_retry".replace("/", "")
+            a2 = types.SimpleNamespace(
+                county=county, town=town, section=section, landnos=landnos,
+                version=None, no_owner=True, out=out_dir, name=tag)
+            try:
+                cmd_fetch(a2)
+            except SystemExit as e:      # cmd_fetch 對 0 成功筆數丟 SystemExit
+                print(f"  ⚠ {section} 重試仍無成功筆數（{e}）")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ {section} 重試仍失敗（{type(e).__name__}）")
+            shp2 = os.path.join(out_dir, f"{tag}.shp")
+            if os.path.exists(shp2):
+                retried.append(gpd.read_file(shp2, engine="pyogrio"))
+        if retried:
+            add = pd.concat(retried, ignore_index=True)
+            before = len(merged)
+            merged = gpd.GeoDataFrame(
+                pd.concat([merged, add], ignore_index=True), crs=merged.crs)
+            if "地號" in merged.columns:      # 去重：同一宗地兩輪都回時只留一筆
+                merged = merged.drop_duplicates(subset=["段", "地號"], keep="first")
+                merged = gpd.GeoDataFrame(merged.reset_index(drop=True), crs=add.crs)
+            print(f"  ✔ 重試救回 {len(merged) - before} 筆")
+        got = _returned(merged)
+        still = {"/".join(k): [ln for ln in v if str(ln).strip() not in got]
+                 for k, v in missing.items()}
+        still = {k: v for k, v in still.items() if v}
+        if still:
+            n_still = sum(len(v) for v in still.values())
+            print(f"  ✖ 仍有 {n_still} 筆線上取不到（農業部無其幾何，非本工具可解）：")
+            for k2, v2 in still.items():
+                print(f"      {k2}：{'、'.join(map(str, v2))}")
+            print("    → 圖面該處會留白。如需完整圖面，須上 TCDGIS 平台取官方 shp"
+                  "（需登入），或向地政事務所調閱。")
+            with open(os.path.join(out_dir, f"{name}_線上取不到.json"),
+                      "w", encoding="utf-8") as f:
+                json.dump(still, f, ensure_ascii=False, indent=1)
+
     out_shp = _safe_to_file(merged, os.path.join(out_dir, f"{name}.shp"))
     print(f"\n→ {out_shp}（合併 {len(groups)} 段、共 {len(merged)} 筆鄰地）")
     return out_shp, merged
@@ -408,23 +612,16 @@ def probe_siblings(targets: dict, existing_landnos: set, gap_union, log: list) -
     return found
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--joined", required=True, help="基地 shp（cadastre/基地.shp 或申請範圍）")
-    ap.add_argument("--out", required=True, help="輸出資料夾")
-    ap.add_argument("--buffer", type=float, default=50.0,
-                    help="緊鄰下限外擴公尺（預設 50）；實際涵蓋以 maxmap 出圖框為準"
-                         "（框大於此值時以框為準，確保框內不留白）")
-    ap.add_argument("--county", default=None, help="縣市（未給則從基地 shp 屬性讀）")
-    ap.add_argument("--name", default="鄰地")
-    ap.add_argument("--no-auto-resolve", action="store_true",
-                    help="關閉缺口自動探測（2026-08-06新增，預設開啟；67-11教訓："
-                         "光印警告要求人工肉眼查，人工會漏，改成自動探測子號補回）")
-    a = ap.parse_args()
+def run_local(a):
+    """【fallback】舊路徑：本機快照認地號 → 逐筆回填 → 母號縮水探測補正。
 
+    只在框查失敗或 --force-local 時走。回 (merged_gdf, su, frame, info)。
+    """
+    region, frames, su0, _site = compute_region(a.joined, a.buffer, a.sitemap)
+    assert region is not None
     groups, su, local_check_union, sur = discover(a.joined, a.buffer, a.county)
     total = sum(len(v) for v in groups.values())
-    print(f"發現階段：出圖框涵蓋（buffer≥{a.buffer:.0f}m 下限）共 {total} 筆鄰地，"
+    print(f"發現階段（本機快照）：出圖框涵蓋（buffer≥{a.buffer:.0f}m 下限）共 {total} 筆，"
           f"分 {len(groups)} 組（縣市/鄉鎮/段不同者不能同一次查詢）")
     for k, v in groups.items():
         print(f"  {'/'.join(k)}：{len(v)} 筆　{v[:10]}{'...' if len(v) > 10 else ''}")
@@ -477,7 +674,6 @@ def main():
                 groups.setdefault(k, [])
                 groups[k] = sorted(set(groups[k]) | set(v))
             print(f"→ {out_shp}（自動補正後合計 {len(merged)} 筆鄰地）")
-            # 補正後重新檢查是否還有殘餘缺口
             gap_warning, gap = check_coverage_gap(su, local_check_union, merged)
             if gap_warning:
                 print(f"\n（自動補正後仍有殘餘）{gap_warning}")
@@ -486,11 +682,85 @@ def main():
         else:
             print("→ 探測未找到符合的子號——落差可能是水域/未登記空地/母號≥9000未登記土地"
                  "等真實現象，非本機快照漏收，建議人工核對正射影像確認。")
+    info = {"資料來源": "本機快照候選＋逐筆線上回填（fallback）",
+            "快照缺口警告": gap_warning, "探測紀錄": probe_log}
+    return merged, su, frames, info
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--joined", required=True, help="基地 shp（cadastre/基地.shp 或申請範圍）")
+    ap.add_argument("--out", required=True, help="輸出資料夾")
+    ap.add_argument("--buffer", type=float, default=50.0,
+                    help="緊鄰下限外擴公尺（預設 50）；實際涵蓋以 maxmap 出圖框為準"
+                         "（框大於此值時以框為準，確保框內不留白）")
+    ap.add_argument("--county", default=None,
+                    help="縣市（未給則從基地 shp 屬性讀；僅 fallback 路徑需要）")
+    ap.add_argument("--name", default="鄰地")
+    ap.add_argument("--version", default=None, help="地籍版次，省略＝最新（建議省略）")
+    ap.add_argument("--no-owner", action="store_true",
+                    help="不查權屬（預設會用 public_land.py 免登入查公有土地名冊）")
+    ap.add_argument("--force-local", action="store_true",
+                    help="強制走 fallback 舊路徑（本機快照＋逐筆回填），用於重現舊成果或比對")
+    ap.add_argument("--sitemap", default=None, metavar="sitemap.csv",
+                    help="逐案場出圖用的 sitemap（案場定義/sitemap.csv）。★給了才會把"
+                         "**各案場自己的出圖框**納入涵蓋範圍——逐案場圖的框以該案場置中、"
+                         "可能伸出合併基地框之外，只用合併框會讓案場圖邊緣留白"
+                         "（2026-09-04 麻豆案實見 S001 僅 94.48%%）")
+    ap.add_argument("--no-auto-resolve", action="store_true",
+                    help="（僅 fallback 路徑）關閉缺口自動探測")
+    a = ap.parse_args()
+    os.makedirs(a.out, exist_ok=True)
+
+    src, merged, su, frame, info = None, None, None, None, {}
+    if not a.force_local:
+        try:
+            merged, _region, frames, su = discover_online(
+                a.joined, a.buffer, a.version, a.no_owner, a.sitemap)
+            src = "農業部框查（出圖框空間查詢）"
+            info = {"資料來源": src, "版次": str(merged["版次"].iloc[0]) if len(merged) else ""}
+        except Exception as e:  # noqa: BLE001
+            # ★ 農業部 coagis 會間歇性斷線（2026-08-19 湖口案實踩）。斷線不是程式錯誤，
+            #   改走 fallback 讓案子跑得完，但**必須明講資料來源已降級**。
+            print(f"\n⚠ 框查失敗（{type(e).__name__}: {e}）"
+                  "\n  → 改走 fallback：本機快照候選＋逐筆線上回填。"
+                  "\n    ⚠ 此路徑受限於快照 Ver 111年2月，快照未收錄的地號"
+                  "查不到；服務恢復後建議重跑。")
+    if merged is None:
+        merged, su, frames, info = run_local(a)
+        src = info["資料來源"]
+    else:
+        out_shp = _safe_to_file(mpq.drop_internal(merged),
+                                os.path.join(a.out, f"{a.name}.shp"))
+        print(f"\n→ {out_shp}（{len(merged)} 筆鄰地，來源：{src}）")
+
+    # ★ 框內覆蓋率＝新路徑的硬指標（舊路徑也一併量，兩者可直接比較）。
+    #   逐案場出圖時必須逐框量——合併框 100% 不代表各案場框都滿（麻豆案實見）。
+    covs = frame_coverage(frames, merged, su)
+    info["框內覆蓋率_pct"] = {k: round(v, 2) for k, v in covs.items()}
+    if not covs:
+        info["結論"] = "出圖框不可用，未計算覆蓋率"
+        print("⚠ 出圖框不可用，未計算覆蓋率")
+    else:
+        worst = min(covs, key=covs.get)
+        for k, v in covs.items():
+            print(f"  框「{k}」覆蓋率 {v:.2f}%")
+        if covs[worst] >= 99.95:
+            info["結論"] = "全部出圖框內無留白"
+            print("✔ 全部出圖框已填滿，無留白")
+        else:
+            msg = (f"⚠ 出圖框「{worst}」覆蓋率僅 {covs[worst]:.2f}%，有 "
+                   f"{100 - covs[worst]:.2f}% 留白。成因可能是：①該處農業部地籍圖層"
+                   "確實無宗地（水域、未登錄地）②離島（本服務 Penghu 層以外無資料）"
+                   "③涵蓋範圍未納入該案場的出圖框（逐案場出圖請加 --sitemap）。"
+                   "**留白處必須在交付文件說明，不可讓讀圖者誤以為那裡沒有土地**；"
+                   "需要完整圖面請上 TCDGIS 取官方 shp（需登入）。")
+            info["結論"] = msg
+            print(msg)
 
     with open(os.path.join(a.out, f"{a.name}_coverage_check.json"), "w",
-             encoding="utf-8") as f:
-        json.dump({"gap_check_m": GAP_CHECK_M, "警告": gap_warning,
-                  "探測紀錄": probe_log}, f, ensure_ascii=False, indent=1)
+              encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=1)
 
 
 if __name__ == "__main__":
