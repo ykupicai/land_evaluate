@@ -2141,7 +2141,12 @@ def main() -> None:
                                None),
                 # 權屬：分色層在下、基地紅框在上（紅框標地號、分色層標周邊地號）。
                 # 圖框與其他主題同尺度（以基地為準），周邊只顯示落在框內的部分。
-                "權屬": ([l_own, l_red] if l_own is not None else [l_red],
+                # ⚠ theme_defs 的圖層清單是 QgsLayoutItemMap.setLayers 順序＝**第一個在最上層**
+                #   （對照 overlay_layers=[l_red, emap, photo]、zoning_layers=[l_red, …, l_nz]）。
+                #   2026-09-11 前本主題誤寫成 [l_own, l_red]，與上面那行註解的意圖相反──
+                #   分色層蓋在基地紅框上，基地邊界被周邊宗地填色遮住、幾乎看不出基地在哪
+                #   （內湖西湖段案使用者指出）。圖例清單順序另有其義（上→下），維持原樣。
+                "權屬": ([l_red, l_own] if l_own is not None else [l_red],
                          [l_own, l_red] if l_own is not None else [l_red],
                          set(),
                          common_note + "\n權屬：公有土地開放資料(MOI_API_039)＋地籍屬性"
