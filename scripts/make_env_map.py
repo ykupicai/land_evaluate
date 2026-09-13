@@ -30,9 +30,12 @@ sys.path.insert(0, str(HERE))
 
 from qgis.core import (  # noqa: E402
     QgsApplication, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
-    QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsLayoutExporter, QgsProject,
-    QgsRasterLayer, QgsRectangle, QgsRendererCategory, QgsVectorLayer,
+    QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsLayoutExporter,
+    QgsLinePatternFillSymbolLayer, QgsLineSymbol, QgsProject, QgsRasterLayer,
+    QgsRectangle, QgsRendererCategory, QgsSimpleFillSymbolLayer, QgsUnitTypes,
+    QgsVectorLayer,
 )
+from qgis.PyQt.QtGui import QColor  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
 from nlsc_wmts import build_basemap  # noqa: E402
@@ -46,6 +49,37 @@ EXPORT_DPI = 300
 from env_registry import (  # noqa: E402
     DEFAULT_ALPHA, GENERIC_PALETTE, REGISTRY, resolve_layer,
 )
+
+
+def hatch_symbol(rgb, angle: float = 45.0, spacing: float = 5.0,
+                 width: float = 0.35) -> QgsFillSymbol:
+    """45° 斜線紋理填色（透明底＋同色外框）。
+
+    ★2026-09-13 使用者定案：全覆蓋圖層改以 45° 斜線表示，取代原本的「只畫虛線外框」。
+    斜線同時交代**範圍**與**存在**，又不像實心填色那樣把底下的圖層與正射整片染掉——
+    這正是 .claude/rules/出圖上色與分區.md 記的「要用填色紋理不是邊框」那條的延伸
+    （特定目的事業用地的紅底綠斜線是同一個手法）。
+    ⚠ 間距 5.0mm 是**全幅尺度**的值，不是宗地符號的 2.2mm：這層通常涵蓋整個圖框，
+      2.2mm 會密到把正射與底下圖層糊成一片粉紅（2026-09-13 實見），等於沒有退讓。
+    """
+    sym = QgsFillSymbol()
+    base = QgsSimpleFillSymbolLayer()
+    base.setColor(QColor(0, 0, 0, 0))                 # 透明底
+    base.setStrokeColor(QColor(*rgb))
+    base.setStrokeWidth(0.5)
+    sym.changeSymbolLayer(0, base)
+    lp = QgsLinePatternFillSymbolLayer()
+    lp.setLineAngle(angle)
+    lp.setDistance(spacing)
+    lp.setDistanceUnit(QgsUnitTypes.RenderMillimeters)
+    lp.setLineWidth(width)
+    lp.setLineWidthUnit(QgsUnitTypes.RenderMillimeters)
+    lp.setColor(QColor(*rgb))
+    # 子線符號的顏色要另外設，只設 layer 的 color 會留下預設色
+    lp.setSubSymbol(QgsLineSymbol.createSimple({
+        "color": "%d,%d,%d,255" % tuple(rgb), "width": str(width)}))
+    sym.appendSymbolLayer(lp)
+    return sym
 
 
 def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPHA,
@@ -66,22 +100,18 @@ def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPH
                       key=lambda v: list(colors).index(v) if v in colors else 99)
         for v in vals:
             rgb = colors.get(v, base)
-            sym = QgsFillSymbol.createSimple({
-                "color": "%d,%d,%d,%d" % (rgb + (0 if outline_only
-                                                 else int(alpha * 255),)),
+            sym = hatch_symbol(rgb) if outline_only else QgsFillSymbol.createSimple({
+                "color": "%d,%d,%d,%d" % (rgb + (int(alpha * 255),)),
                 "outline_color": "%d,%d,%d,255" % rgb,
-                "outline_width": "0.8" if outline_only else "0.15",
-                "outline_style": "dash" if outline_only else "solid"})
+                "outline_width": "0.15", "outline_style": "solid"})
             cats.append(QgsRendererCategory(v, sym, labels.get(v, str(v))))
         lyr.setRenderer(QgsCategorizedSymbolRenderer(fld, cats))
     else:
         dark = tuple(int(c * 0.6) for c in base)   # 外框用同色調暗版，維持可區辨
-        sym = QgsFillSymbol.createSimple({
-            "color": "%d,%d,%d,%d" % (base + (0 if outline_only
-                                              else int(alpha * 255),)),
+        sym = hatch_symbol(base) if outline_only else QgsFillSymbol.createSimple({
+            "color": "%d,%d,%d,%d" % (base + (int(alpha * 255),)),
             "outline_color": "%d,%d,%d,255" % dark,
-            "outline_width": "0.8" if outline_only else "0.3",
-            "outline_style": "dash" if outline_only else "solid"})
+            "outline_width": "0.3", "outline_style": "solid"})
         lyr.setRenderer(lyr.renderer().__class__(sym) if False else lyr.renderer())
         lyr.renderer().setSymbol(sym)
     return lyr
@@ -215,7 +245,7 @@ def main():
                              outline_only=outline_only, color_idx=color_idx)
         if outline_only:
             print(f"    （{title} 覆蓋率 {100 * area / geom_area:.1f}% ≥99%，"
-                  f"改畫外框不填色）")
+                  f"改畫 45° 斜線紋理，不用實心填色）")
         if lyr is None:
             print(f"  ⚠ 圖層讀取失敗：{shp}")
             continue

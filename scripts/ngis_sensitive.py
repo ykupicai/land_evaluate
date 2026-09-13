@@ -13,6 +13,19 @@
 產出（outputs/<案>/）：
   環敏NGIS.csv    逐命中項：級別／圖層／重疊面積／佔基地比例
   環敏NGIS.json   完整結果（含屬性、基地面積、聯集重疊）
+  環敏/<平台圖層名>.geojson   ★命中圖層的**平台幾何**（EPSG:3826），供出圖用
+
+★ 環敏出圖幾何一律以 **NGIS 為優先**（2026-09-13 使用者定案）：本步驟會把命中圖層的
+  幾何一併抓回，寫成 `<案>/環敏/<平台圖層名>.geojson`——`make_env_map` 的
+  `resolve_case_override` 本來就把案件層 `環敏/` 排在本機 `環境敏感相關/` 之前，
+  所以檔案一落地就自動優先採用，本機圖資退為「NGIS 無幾何時」的備援。
+  與既有原則一致（CLAUDE.md：本機 vs NGIS 不一致時以 NGIS 為主），且一次解決兩件事：
+  ① 本機圖資過舊（龍崎 NR23）② **本機根本沒有該圖層**（大眾捷運兩側禁建限建）。
+  ⚠ 實測 NGIS 回的是**完整要素、不是裁到查詢範圍**：2-27 民航禁限建回 35,123,240 ㎡，
+    與本機松山機場 shp 同一面 35,123,241 ㎡ 只差 1 ㎡。故可直接拿來出圖，不會缺周邊。
+  ⚠ 檔名必須是**完整平台圖層名**（含 `2-27`／`2-31` 前綴）——覆蓋檔比對是
+    `layer_name in p.stem`，少了前綴會比不中而**靜默忽略**。
+  `--no-geometry` 可關閉（只要面積不要幾何時用）。
 
 ★ 為什麼是主路徑（取代原 PDF 應免查初篩，2026-08-05 使用者定案）：
   單一官方來源一次涵蓋 54 項，且做的是**實際幾何套疊**（不是行政區級的應查／免查），
@@ -88,9 +101,73 @@ def load_sitemap(path: Path) -> dict:
     return m
 
 
+def save_ngis_geometry(ngis, token, groups, case_dir: Path) -> None:
+    """把命中圖層的平台幾何寫成 <案>/環敏/<平台圖層名>.geojson（EPSG:3826）。
+
+    ★ 讓環敏出圖以 NGIS 幾何為優先（見模組 docstring）。逐組查完後依圖層名合併：
+    同一圖層 NGIS 會**逐面各回一筆**，而且不同組（逐案場時）會重複回同一面，
+    故以 WKT 去重後再寫檔。
+    """
+    import geopandas as gpd  # noqa: PLC0415 — 與 main() 一致，延後載入
+    from shapely.geometry import MultiPolygon, Polygon  # noqa: PLC0415
+
+    def rings_merc(geom):
+        """★ `query_polygon` 吃的是 **Mercator(3857)** 環（參數名就叫 rings_merc），
+        與 `overlay.analyze` 吃的 TM2(3826) 環**不同**——直接把 rings_of() 餵進去會
+        靜默回空（2026-09-13 實踩：印「平台未回幾何」但其實是座標系送錯）。"""
+        m = gpd.GeoSeries([geom], crs=3826).to_crs(3857).iloc[0]
+        parts = [m] if m.geom_type == "Polygon" else list(m.geoms)
+        out = []
+        for pp in parts:
+            out.append([list(c) for c in pp.exterior.coords])
+            for h in pp.interiors:
+                out.append([list(c) for c in h.coords])
+        return out
+
+    out_dir = case_dir / "環敏"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bucket: dict[str, list] = {}
+    for geom in groups.values():
+        try:
+            res = ngis.query_polygon(token, rings_merc(geom),
+                                     levels=("一級", "二級"), return_geometry=True)
+        except Exception as exc:  # noqa: BLE001 — 取幾何失敗不阻斷面積成果
+            print(f"  ⚠ 取平台幾何失敗（{type(exc).__name__}: {exc}）→ 出圖將退回本機圖資")
+            return
+        for items in (res or {}).values():
+            for it in items:
+                gj = it.get("geometry") or {}
+                rings = [Polygon(r) for r in gj.get("rings", []) if len(r) >= 4]
+                if not rings:
+                    continue
+                gg = (MultiPolygon(rings) if len(rings) > 1 else rings[0]).buffer(0)
+                bucket.setdefault(it["layerName"], []).append(
+                    (it.get("attributes", {}), gg))
+    if not bucket:
+        print("  （平台未回幾何；出圖沿用本機 環境敏感相關/）")
+        return
+    n = 0
+    for name, recs in bucket.items():
+        seen, rows, geoms = set(), [], []
+        for attrs, gg in recs:
+            k = gg.wkt
+            if k in seen:
+                continue
+            seen.add(k)
+            rows.append({"Layer": str(attrs.get("Layer", "") or "")})
+            geoms.append(gg)
+        gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs=3857).to_crs(3826)
+        # 檔名＝完整平台圖層名，resolve_case_override 靠 `layer_name in p.stem` 比對
+        gdf.to_file(out_dir / f"{name}.geojson", driver="GeoJSON")
+        n += 1
+    print(f"  ✔ 平台幾何 {n} 層已寫入 {out_dir}（出圖將優先採用，本機圖資退為備援）")
+
+
 def main():
     ap = argparse.ArgumentParser(description="⓪b NGIS 環敏套疊（正式初篩）")
     ap.add_argument("--case", required=True, help="案名（outputs/<案名>）")
+    ap.add_argument("--no-geometry", action="store_true",
+                    help="不抓命中圖層的平台幾何（預設會抓並寫入 <案>/環敏/，供出圖優先採用）")
     ap.add_argument("--shp", default=None, help="基地 shp（預設 <案>/cadastre/基地.shp）")
     ap.add_argument("--per-site", action="store_true",
                     help="依 案場定義/sitemap.csv 逐案場各算一份")
@@ -150,6 +227,9 @@ def main():
             all_rows.append({"案場": sid, "級別": "", "圖層名稱": "（54 項均無套疊）",
                              "重疊面積_m2": 0, "佔基地_pct": 0,
                              "基地面積_m2": round(res["site_area"], 2)})
+
+    if not a.no_geometry:
+        save_ngis_geometry(ngis, token, groups, case_dir)
 
     with io.open(case_dir / "環敏NGIS.csv", "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["案場", "級別", "圖層名稱", "重疊面積_m2",
