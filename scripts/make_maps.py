@@ -181,6 +181,8 @@ ZONING_WMTS = False    # ★使用分區／使用地編定主題預設改回向�
 # 都市計畫土地使用分區（補都市土地 使分/使類=None 的缺口，見 config/urban_plan_legend.yaml）
 URBAN_SHP = "都市計畫/全台都市計畫土地使用分區.shp"
 URBAN_ZONE_FIELD = "zone"
+# 標註／圖例欄位候選（順序＝標註欄偵測優先序；圖例另由 urban_fullname_field 挑全名欄）
+URBAN_ZONE_FIELD_CANDS = (URBAN_ZONE_FIELD, "ZONE_USE", "ZONE", "NAME", "使用分區")
 URBAN_COLOR_FIELD = "Color1"
 URBAN_QML = "都市計畫.qml"
 URBAN_LEGEND_YAML = "config/urban_plan_legend.yaml"
@@ -1112,6 +1114,39 @@ def load_urban_color_names(yaml_path: Path) -> dict[str, list[str]]:
     return out
 
 
+def urban_fullname_field(lyr: QgsVectorLayer, candidates: tuple[str, ...],
+                         sample: int = 400) -> str | None:
+    """從候選欄位中挑出「寫全名」的那一欄，給**圖例**用。
+
+    ★2026-09-11 使用者定案：**圖例一律用全名，不要簡稱**（「保」要寫成「保護區」）。
+    圖面標註仍用簡稱——標在宗地裡要塞得下；只有圖例改全名。
+
+    為什麼不寫死欄名：各縣市圖台的欄位語意不一致，同一個 ZONE/ZONE_USE 在不同縣市
+    可能一個是全名、一個是簡稱（臺北市 ZONE=第三種住宅區、ZONE_USE=住3；臺南市
+    ZONE=LANDUSE、ZONE_USE=PUBNO）。改以**實際值的平均長度**判斷：全名必然比簡稱長，
+    此判準不依賴欄名慣例，新接縣市不必再改碼。取不到值就回 None，由呼叫端退回原欄位。
+    """
+    best, best_len = None, 0.0
+    for cand in candidates:
+        i = lyr.fields().indexOf(cand)
+        if i < 0:
+            continue
+        vals, n = [], 0
+        for f in lyr.getFeatures():
+            v = attr_str(f[i])
+            if v:
+                vals.append(len(v))
+            n += 1
+            if n >= sample:
+                break
+        if not vals:
+            continue
+        avg = sum(vals) / len(vals)
+        if avg > best_len:
+            best, best_len = cand, avg
+    return best
+
+
 def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
                             color_to_names: dict[str, list[str]],
                             keep_alive: list,
@@ -1417,15 +1452,21 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
         return False
     cats = []
     ids = sorted({str(f["site_id"]) for f in lyr.getFeatures()})
+    # ★只有一宗基地時不呈現「宗基地／S001」（使用者定案 2026-09-11）：圖層名、圖例標籤、
+    #   圖面標註、標題與備註一律拿掉編號，只留面積。
+    single = len(ids) <= 1
+    if single:
+        lyr.setName("申請範圍")
     for i, sid in enumerate(ids):
         sym = fill_symbol(tuple(int(x) for x in
                           OVERVIEW_COLORS[i % len(OVERVIEW_COLORS)].split(",")),
                           outline="60,60,60,255", width="0.4")
         sym.setOpacity(0.65)
-        cats.append(QgsRendererCategory(sid, sym, sid))
+        cats.append(QgsRendererCategory(sid, sym, "" if single else sid))
     lyr.setRenderer(QgsCategorizedSymbolRenderer("site_id", cats))
     lyr.setLabeling(label_settings(
-        "\"site_id\" || '\\n' || format_number(\"area_m2\"/10000, 2) || ' ha'",
+        ("format_number(\"area_m2\"/10000, 2) || ' ha'" if single else
+         "\"site_id\" || '\\n' || format_number(\"area_m2\"/10000, 2) || ' ha'"),
         size=10.0, is_expression=True))
     lyr.setLabelsEnabled(True)
     ext = lyr.extent()
@@ -1444,9 +1485,11 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
         layers = [lyr, rl]
     project.addMapLayer(lyr, False)
     keep_alive.append(lyr)
-    layout = build_layout(project, "00_overview", "總區位圖（宗基地聚合）",
+    layout = build_layout(project, "00_overview",
+                          "總區位圖" if single else "總區位圖（宗基地聚合）",
                           layers, [lyr], set(), scale, extent,
-                          "宗基地＝毗鄰地號聚合（fishpv）；編號對照 臨路評估/成果.xlsx",
+                          ("申請範圍＝毗鄰地號聚合；面積對照 臨路評估/成果.xlsx" if single else
+                           "宗基地＝毗鄰地號聚合（fishpv）；編號對照 臨路評估/成果.xlsx"),
                           keep_alive)
     exp = QgsLayoutExporter(layout)
     st = QgsLayoutExporter.ImageExportSettings()
@@ -1695,15 +1738,22 @@ def main() -> None:
         urban_lyr_landtype = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
         urban_ok = urban_lyr_zoning.isValid() and urban_lyr_landtype.isValid()
         urban_zone_field = URBAN_ZONE_FIELD
+        urban_legend_field = URBAN_ZONE_FIELD
         if urban_ok:
-            # 標註欄自動偵測：本機 shp=zone；縣市圖台=ZONE_USE(用地全名，較 ZONE 簡稱可讀)
-            for cand in (URBAN_ZONE_FIELD, "ZONE_USE", "ZONE", "NAME", "使用分區"):
+            # 標註欄自動偵測：本機 shp=zone；縣市圖台 ZONE_USE/ZONE 何者為全名視縣市而定
+            # （臺北市 ZONE=第三種住宅區、ZONE_USE=住3；臺南市則相反）。標註用短的塞得下，
+            # 圖例用全名——兩者分開挑，見下方 urban_legend_field。
+            for cand in URBAN_ZONE_FIELD_CANDS:
                 if urban_lyr_zoning.fields().indexOf(cand) >= 0:
                     urban_zone_field = cand
                     break
+            # 圖例另挑「寫全名」的欄位（使用者定案：圖例不用簡稱），圖面標註維持簡稱
+            urban_legend_field = (urban_fullname_field(urban_lyr_zoning, URBAN_ZONE_FIELD_CANDS)
+                                  or urban_zone_field)
             if URBAN_SHP_OVERRIDE:
                 print(f"  都市計畫圖層改用圖台 shp：{urban_shp_path}"
-                      f"（{urban_lyr_zoning.featureCount()} 筆，標註欄={urban_zone_field}）",
+                      f"（{urban_lyr_zoning.featureCount()} 筆，標註欄={urban_zone_field}"
+                      f"、圖例欄={urban_legend_field}）",
                       flush=True)
                 if urban_lyr_zoning.fields().indexOf(URBAN_COLOR_FIELD) < 0:
                     warnings.append(f"圖台 shp 無 {URBAN_COLOR_FIELD} 欄，都市計畫將無底色："
@@ -1856,7 +1906,7 @@ def main() -> None:
                       f" → 略過 {'、'.join(sorted(skip_by_mix))}", flush=True)
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
                                                         color_to_names, keep_alive,
-                                                        zone_field=urban_zone_field)
+                                                        zone_field=urban_legend_field)
                                 if is_urban else None)
             if urban_legend_lyr is not None:
                 # 必須註冊進專案，圖例面板才能解析並顯示都市計畫分區節點
@@ -2064,19 +2114,27 @@ def main() -> None:
                     if _hit:
                         sites_lyr.setSubsetString(
                             '"site_id" IN (' + ','.join(f"'{s}'" for s in _hit) + ')')
+                    # ★只有一宗基地時不呈現「宗基地／S001」（使用者定案 2026-09-11）：
+                    #   圖層名、圖例標籤、圖面標註、備註一律拿掉編號，只留臨路狀態。
+                    _feats = list(sites_lyr.getFeatures())
+                    _single = len(_feats) <= 1
+                    if _single:
+                        sites_lyr.setName("申請範圍(臨路)")
                     scats = []
-                    for f in sites_lyr.getFeatures():
+                    for f in _feats:
                         sid = str(f["site_id"])
                         st_, dist, _n = status.get(sid, ("", "", ""))
                         rgb = road_status_color(st_)
                         sym = outline_symbol(color=f"{rgb[0]},{rgb[1]},{rgb[2]},255", width="1.1")
-                        scats.append(QgsRendererCategory(sid, sym, f"{sid} {st_ or '無資料'}"))
+                        lbl = (st_ or "無資料") if _single else f"{sid} {st_ or '無資料'}"
+                        scats.append(QgsRendererCategory(sid, sym, lbl))
                         road_note_lines.append(
-                            f"{sid}:{st_ or '無資料'}"
+                            ("" if _single else f"{sid}:") + (st_ or "無資料")
                             + (f"(距{dist}m)" if dist not in ("", "0.0", "0.00") else ""))
                     sites_lyr.setRenderer(QgsCategorizedSymbolRenderer("site_id", scats))
-                    sites_lyr.setLabeling(label_settings("site_id", size=10.0))
-                    sites_lyr.setLabelsEnabled(True)
+                    if not _single:
+                        sites_lyr.setLabeling(label_settings("site_id", size=10.0))
+                        sites_lyr.setLabelsEnabled(True)
                     roads_lyr = QgsVectorLayer(str(fishpv_dir / "features.geojson"), "道路地物", "ogr")
                     if not roads_lyr.isValid():
                         raise RuntimeError("features.geojson 讀取失敗")

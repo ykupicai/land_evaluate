@@ -147,8 +147,13 @@ def main():
         sl = QgsVectorLayer(a.sites, "宗基地", "ogr")
         if sl.isValid():
             idx = sl.fields().indexFromName("site_id")
-            if idx >= 0:
-                ids = sorted({str(f["site_id"] or "") for f in sl.getFeatures()} - {""})
+            ids = (sorted({str(f["site_id"] or "") for f in sl.getFeatures()} - {""})
+                   if idx >= 0 else [])
+            # ★單一宗基地時不呈現「宗基地」這件事（使用者定案 2026-09-11）：
+            #   只有一宗時「S001」不帶任何資訊，圖例多一列反而讓人以為還有別宗。
+            #   仍保留半透明紅填色（區位圖外擴後基地很小，只有紅框看不清楚），
+            #   但用與「基地地籍」同一個紅、且**不進圖例**，由基地地籍那列代表。
+            if len(ids) > 1:
                 cats = []
                 for i, sid in enumerate(ids):
                     r, g, b = SITE_PALETTE[i % len(SITE_PALETTE)]
@@ -159,14 +164,15 @@ def main():
                 sl.setRenderer(QgsCategorizedSymbolRenderer("site_id", cats))
                 print(f"  宗基地 {len(ids)} 宗依 site_id 分色（圖例辨識，圖面不標註）："
                       + "／".join(ids))
+                legend.insert(0, sl)
             else:
                 sl.renderer().setSymbol(QgsFillSymbol.createSimple({
                     "color": "220,30,30,110", "outline_color": "220,30,30,255",
                     "outline_width": "0.9"}))
+                print("  單一宗基地：套基地紅、不列入圖例（不呈現宗基地編號）")
             sl.setLabelsEnabled(False)
             project.addMapLayer(sl, False); keep.append(sl)
             layers.insert(0, sl)
-            legend.insert(0, sl)
 
     # 都市計畫土地使用分區（★2026-07-29 使用者要求：區位圖同時套疊都市計畫分區）
     # 用 Color1 官方色 data-defined 上色（同 make_maps 的做法），半透明疊在 EMAP 上。
