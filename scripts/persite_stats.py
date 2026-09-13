@@ -60,6 +60,58 @@ def classify_ownership(v) -> str | None:
     return None
 
 
+# ★ 面積基準：**登記面積優先**（使用者定案 2026-09-11）
+#   交付文件的面積一律以登記面積為準；圖面積（geometry.area）只作參考。
+#   ⚠ 不可無條件改用登記面積——**未登記土地（母號 ≥9000）的登記面積是 0**
+#   （見 CLAUDE.md「地號母號 ≥9000 ＝ 未登記土地」），逕改會產生 0 面積的案場。
+#   故採「逐筆取登記面積、取不到者該筆退回圖面積」，並在輸出標明本案場用的是哪種基準，
+#   讓簡報端看得出有沒有混用。長度／周長／距離不受此口徑影響。
+_REG_COLS = ("登面積", "登記面積", "標示面積")
+
+
+def registered_area(row, cols=_REG_COLS):
+    """單筆宗地的登記面積（㎡）；取不到或為 0 回 None（＝未登記地／欄位缺）。"""
+    for c in cols:
+        if c not in row:
+            continue
+        v = row[c]
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            return f
+    return None
+
+
+def area_of(df, cols=_REG_COLS):
+    """一組宗地的採用面積 → (面積, 基準說明, 登記面積合計, 圖面積合計)。
+
+    逐筆優先取登記面積，該筆取不到才用其圖面積；全部取得＝「登記面積」，
+    部分取得＝「登記面積（N 筆未登記以圖面積計）」，全部取不到＝「圖面積」。
+    """
+    reg_sum = geo_sum = 0.0
+    n_fallback = 0
+    for _, r in df.iterrows():
+        ga = float(r.geometry.area)
+        geo_sum += ga
+        ra = registered_area(r, cols)
+        if ra is None:
+            n_fallback += 1
+            reg_sum += ga
+        else:
+            reg_sum += ra
+    if len(df) == 0:
+        return 0.0, "無宗地", 0.0, 0.0
+    if n_fallback == 0:
+        basis = "登記面積"
+    elif n_fallback == len(df):
+        basis = "圖面積（無登記面積）"
+    else:
+        basis = f"登記面積（{n_fallback} 筆未登記以圖面積計）"
+    return reg_sum, basis, reg_sum, geo_sum
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joined", required=True)
@@ -87,8 +139,12 @@ def main():
 
     for _, s in sites.iterrows():
         sid, g = s["site_id"], s.geometry
-        d = {"面積_m2": round(g.area, 2), "公頃": round(g.area / 10000, 4)}
         inner = site[site.geometry.intersects(g.buffer(-0.5))]
+        # 面積基準：登記面積優先（見上方 area_of 說明）。案場面 geometry 的面積另存
+        # 圖面積_m2 供對帳——兩者本就會有數十 ㎡ 的差，不是錯誤。
+        area, basis, _reg, _geo = area_of(inner)
+        d = {"面積_m2": round(area, 2), "公頃": round(area / 10000, 4),
+             "面積基準": basis, "圖面積_m2": round(float(g.area), 2)}
         if no_col:
             d["地號"] = sorted(inner[no_col].astype(str).tolist())
         if pub_col:
@@ -99,7 +155,7 @@ def main():
             if n_unk:
                 d["公私別無法判定筆數"] = n_unk   # 空白≠私有，明著標出來
             pub = inner[cls == "公"]
-            d["公有面積_m2"] = round(float(pub.area.sum()), 2)
+            d["公有面積_m2"] = round(area_of(pub)[0], 2)   # 同採登記面積優先
             if no_col:
                 d["公有地號"] = sorted(pub[no_col].astype(str).tolist())
 
@@ -110,7 +166,10 @@ def main():
             up = up.to_crs(site.crs)
             up["ov"] = up.geometry.intersection(g).area
             zz = up[up["ov"] > 1].groupby("zone")["ov"].sum().sort_values(ascending=False)
+            # 套疊面積本質是幾何交集，維持幾何值；另給占比，簡報端要換算成
+            # 登記面積基準時用「占比 × 面積_m2」即可（口徑一致、不必回頭改這裡）
             d["都市計畫分區"] = {k: round(v, 2) for k, v in zz.items()}
+            d["都市計畫分區_占基地pct"] = {k: round(v / g.area * 100, 2) for k, v in zz.items()}
 
         # 使用者指定的 overlay
         for spec in a.overlay:
@@ -136,6 +195,7 @@ def main():
                 gg = gg.to_crs(site.crs)
             gg["ov"] = gg.geometry.intersection(g).area
             hit = gg[gg["ov"] > 1]
+            d[name + "_占基地pct"] = round(float(hit["ov"].sum()) / g.area * 100, 2)
             if fld and fld in hit.columns:
                 d[name] = {str(k): round(v, 2)
                            for k, v in hit.groupby(fld)["ov"].sum().items()}
@@ -159,9 +219,17 @@ def main():
                 "主要地形": r.get("主要地形"),
             })
 
+    out["_面積口徑"] = ("面積_m2／公頃／公有面積_m2 採**登記面積優先**（逐筆取登記面積，"
+                       "未登記地該筆退回圖面積），基準見各案場「面積基準」欄；"
+                       "圖面積_m2 為案場幾何面積，僅供對帳。"
+                       "都市計畫分區與 overlay 為幾何交集面積，換算成登記面積基準請用"
+                       "「占基地pct × 面積_m2」。長度／周長／距離不受此口徑影響。")
+
     p = os.path.join(case_dir, "逐案場統計.json")
     io.open(p, "w", encoding="utf-8").write(json.dumps(out, ensure_ascii=False, indent=1))
     for sid, d in out.items():
+        if sid.startswith("_"):
+            continue
         print("=" * 50)
         print(sid)
         for k, v in d.items():
