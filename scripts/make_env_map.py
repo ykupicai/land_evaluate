@@ -136,6 +136,15 @@ def main():
         print(f"本機補充（平台清單外）{len(ex)} 項")
         seen = {n for n, _ in hits}
         hits += [(n, ar) for n, ar in ex if n not in seen]
+    # ★同一圖層名在 NGIS 會逐面各回一列（2-31 捷運禁建限建回 3 列），照單全收會把同一份
+    #   圖資載入三次、圖例與逐類面積各出現三次。依圖層名去重、保留最大那筆的面積供排序；
+    #   真正的面積由下方 dissolve 後重算，不靠這裡的值。
+    _seen: dict = {}
+    for n, ar in hits:
+        _seen[n] = max(_seen.get(n, 0.0), ar)
+    if len(_seen) != len(hits):
+        print(f"  （同名圖層去重：{len(hits)} 列 → {len(_seen)} 層）")
+    hits = sorted(_seen.items(), key=lambda t: -t[1])
     for n, ar in hits:
         print(f"  - {n}：{ar:,.2f} m²")
     if not hits:
@@ -186,6 +195,11 @@ def main():
     # 邊界離基地很遠），畫面近乎全空、完全看不出基地與範圍的關係——這正是外框規則
     # 原本要防的「疊很多層看不清楚」的反面情況。判斷改為：僅當 ≥2 個命中項各自都
     # ≥99% 覆蓋（真的會疊加壓糊）才退為外框；單一全覆蓋命中一律給透明填色。
+    # ★2026-09-13 再修（內湖保護區案）：條件由「≥2 個全覆蓋圖層」改為
+    #   「本層全覆蓋 **且** 還有別的圖層要看」。全覆蓋層一鋪滿色，底下所有圖層都被
+    #   染成同一片糊色——不必等到兩個全覆蓋層才會發生，一個就夠（本案民航禁限建
+    #   100% 蓋住山坡地、捷運禁限建、地質敏感區三層）。維持湖口案的修正：**單一命中項**
+    #   （len(hits)==1）一律給填色，否則虛線邊界落在圖框外、畫面近乎全空。
     n_full = sum(1 for _, ar in hits if ar >= 0.99 * geom_area)
     env_layers, legend_layers, notes, stats = [], [], [], []
     for color_idx, (name, area) in enumerate(hits):
@@ -196,7 +210,7 @@ def main():
             continue
         subs = rule.get("_subs", {})
         title = rule["title"].format(**subs) if "{" in rule["title"] else rule["title"]
-        outline_only = area >= 0.99 * geom_area and n_full >= 2
+        outline_only = area >= 0.99 * geom_area and len(hits) >= 2
         lyr = load_env_layer(shp, rule, title, alpha=a.alpha,
                              outline_only=outline_only, color_idx=color_idx)
         if outline_only:
@@ -211,15 +225,21 @@ def main():
         # （2026-08-04 龍崎案實錯）。分級圖層（如淹水潛勢）才會有多列，且列數＝分級數。
         fld = rule.get("field")
         req = QgsFeatureRequest().setFilterRect(bb)
+        # ★同一分級內先 dissolve 再算面積（2026-09-13 內湖保護區案實錯）：原本逐 feature
+        #   把交集面積相加，同一圖層的要素若彼此重疊就會**重複計算**。2-31 大眾捷運系統
+        #   兩側禁建限建地區有「禁建線」「二側限建範圍」「環狀線」三個互相重疊的面，
+        #   相加得 8,449 ㎡（50.3%）、實際聯集只有 6,048 ㎡（36.04%），高估近四成。
+        #   多數圖層的要素不重疊、結果不變；會變的就是本來就被算錯的那些。
         agg: dict = {}
         for f in lyr.getFeatures(req):
             inter = geom.intersection(f.geometry())
             if inter.isEmpty():
                 continue
             key = f[fld] if (fld and lyr.fields().indexFromName(fld) >= 0) else "（全區）"
-            agg[key] = agg.get(key, 0.0) + inter.area()
-        for key, ar in agg.items():
-            stats.append([title, key, round(ar, 2)])
+            agg.setdefault(key, []).append(inter)
+        for key, parts in agg.items():
+            u = QgsGeometry.unaryUnion(parts)
+            stats.append([title, key, round(u.area(), 2)])
         project.addMapLayer(lyr, False)
         keep_alive.append(lyr)
         env_layers.append(lyr)
