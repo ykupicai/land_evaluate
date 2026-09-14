@@ -33,6 +33,7 @@ from qgis.core import (  # noqa: E402
 from qgis.PyQt.QtGui import QColor, QFont  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
+import district_line  # noqa: E402
 import overlay_placement as op  # noqa: E402
 from nlsc_wmts import build_basemap  # noqa: E402
 
@@ -281,6 +282,12 @@ def main():
     idx_ln = site.fields().indexFromName("地號")
     lns = [str(f[idx_ln]).strip() for f in site.getFeatures()] if idx_ln >= 0 else []
     pnote = sheet.parcel_note(section, lns[0] if lns else "", len(lns))
+
+    # 行政區界（`<案>/行政區界/行政區界.shp` 存在才畫；沒有就完全不影響既有行為）
+    _dist = district_line.district_layers(out_dir, project, keep, QgsRectangle(*bbox))
+    if _dist:
+        layers = layers[:1] + _dist.layers + layers[1:]
+        legend = list(legend) + _dist.legend
 
     img_dir = out_dir / "圖檔_maxmap"
     img_dir.mkdir(parents=True, exist_ok=True)

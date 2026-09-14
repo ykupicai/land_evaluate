@@ -97,6 +97,47 @@ def _rasterize(shp, ref_ds, where=None):
     return mem.ReadAsArray()
 
 
+def clip_slope_raster(slope_tif: str, site_shp: str, out_tif: str) -> str:
+    """把 `坡度_percent.tif` 裁到基地範圍供**出圖**用，遮罩方法與本檔統計數字
+    完全同一套（呼叫同一支 `_rasterize`，ALL_TOUCHED=TRUE），**不用 `gdal.Warp`
+    cutline**。
+
+    ★2026-09-14 內湖保護區案實錯：`make_extra_maps.py --theme 坡度` 與
+    `make_hazard_map.py` 原本各自用 `gdal.Warp(..., cutlineDSName=..., cropToCutline=
+    True)` 裁切圖面——這是另一套遮罩方法（cutline 重新計算輸出網格，預設用像元
+    中心是否落在多邊形內判斷去留），跟本檔算統計數字用的 ALL_TOUCHED 網格法**不是
+    同一份遮罩**。本案 42 個像元（Warp cutline）vs 70 個像元（ALL_TOUCHED）：
+    差的 28 個像元裡剛好包含全案**唯一一個 30~40% 像元**（30.9%），圖上因此
+    「整區看起來都<30%」，跟 `坡度分級.json` 寫的「30~40% 佔 1.43%」對不上，
+    使用者一眼就看出圖表不符。加 `warpOptions=["CUTLINE_ALL_TOUCHED=TRUE"]` 測過
+    仍差 7 個像元（Warp 對 cutline 的柵格化與本檔手動 `RasterizeLayer` 演算法不保證
+    位元對位元一致）——不要再嘗試調校 Warp 參數去逼近，**直接不重新投影／不重算
+    網格，用本檔的 `_rasterize` 把同一份遮罩燒在 `坡度_percent.tif` 原始網格上**，
+    保證圖與表用的是同一個像元集合，不會再打架。
+    """
+    from osgeo import gdal
+    import numpy as np
+    sd = gdal.Open(slope_tif)
+    if sd is None:
+        raise SystemExit(f"讀取失敗：{slope_tif}")
+    slope = sd.ReadAsArray().astype(np.float32)
+    mask = _rasterize(site_shp, sd)
+    if mask is None:
+        raise SystemExit(f"基地無法燒成遮罩：{site_shp}")
+    nod = -9999.0
+    out = np.where(mask == 1, slope, nod).astype(np.float32)
+    drv = gdal.GetDriverByName("GTiff")
+    dst = drv.Create(out_tif, sd.RasterXSize, sd.RasterYSize, 1, gdal.GDT_Float32)
+    dst.SetGeoTransform(sd.GetGeoTransform())
+    dst.SetProjection(sd.GetProjection())
+    b = dst.GetRasterBand(1)
+    b.SetNoDataValue(nod)
+    b.WriteArray(out)
+    b.FlushCache()
+    dst = None
+    return out_tif
+
+
 def _stats(slope, sel):
     """回傳 (逐級 list, 分組 dict, 有效像元數, 坡度統計)。"""
     n = int(sel.sum())

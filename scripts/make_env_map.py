@@ -38,6 +38,7 @@ from qgis.core import (  # noqa: E402
 from qgis.PyQt.QtGui import QColor  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
+import district_line  # noqa: E402
 from nlsc_wmts import build_basemap  # noqa: E402
 
 CRS = "EPSG:3826"
@@ -46,6 +47,7 @@ EXPORT_DPI = 300
 
 # 圖層登錄表與解析已抽至 env_registry.py（純模組、可單測；REGISTRY 的自然保留區
 # 1152→1061 順序由 tests/test_env_registry.py 鎖住）。本檔只留 QGIS 出圖端。
+from env_color_assign import assign_layer_colors  # noqa: E402
 from env_registry import (  # noqa: E402
     DEFAULT_ALPHA, GENERIC_PALETTE, REGISTRY, resolve_layer,
 )
@@ -83,14 +85,16 @@ def hatch_symbol(rgb, angle: float = 45.0, spacing: float = 5.0,
 
 
 def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPHA,
-                   outline_only: bool = False, color_idx: int = 0):
+                   outline_only: bool = False, fallback_rgb: tuple = (127, 127, 127)):
     lyr = QgsVectorLayer(str(shp), name, "ogr")
     if not lyr.isValid():
         return None
     if not lyr.crs().isValid() and rule.get("crs"):
         lyr.setCrs(QgsCoordinateReferenceSystem(f"EPSG:{rule['crs']}"))
-    # 本層代表色：規則層指定的語意色優先，否則依疊圖順序取色環（見 GENERIC_PALETTE）
-    base = tuple(rule.get("rgb") or GENERIC_PALETTE[color_idx % len(GENERIC_PALETTE)])
+    # 本層代表色：規則層指定的語意色優先，否則用呼叫端算好的「保證不撞色」的配色
+    # （見 assign_layer_colors；不要在這裡用 color_idx 對 GENERIC_PALETTE 取模——
+    # 語意色本身可能剛好等於色環某格，索引式取色會撞色，見該函式 docstring）
+    base = tuple(rule.get("rgb") or fallback_rgb)
     fld = rule.get("field")
     if fld and lyr.fields().indexFromName(fld) >= 0:
         cats = []
@@ -231,9 +235,13 @@ def main():
     #   100% 蓋住山坡地、捷運禁限建、地質敏感區三層）。維持湖口案的修正：**單一命中項**
     #   （len(hits)==1）一律給填色，否則虛線邊界落在圖框外、畫面近乎全空。
     n_full = sum(1 for _, ar in hits if ar >= 0.99 * geom_area)
+    # 先把全部命中項的規則解析出來，才能配「保證不撞色」的代表色（見 assign_layer_colors；
+    # 不能像舊版那樣邊解析邊用命中順序的索引取色，索引跟語意色互不相關才會撞色）。
+    resolved = [(name, *resolve_layer(name, county, case_dir=out_dir)) for name, _ in hits]
+    layer_colors = assign_layer_colors(resolved, GENERIC_PALETTE)
     env_layers, legend_layers, notes, stats = [], [], [], []
-    for color_idx, (name, area) in enumerate(hits):
-        shp, rule = resolve_layer(name, county, case_dir=out_dir)
+    for name, area in hits:
+        shp, rule = next((s, r) for n, s, r in resolved if n == name)
         if shp is None:
             print(f"  ⚠ 無法解析為本機圖資：{name}（該項僅以表格呈現）")
             notes.append(f"{name}（本機無對應圖資）")
@@ -241,8 +249,8 @@ def main():
         subs = rule.get("_subs", {})
         title = rule["title"].format(**subs) if "{" in rule["title"] else rule["title"]
         outline_only = area >= 0.99 * geom_area and len(hits) >= 2
-        lyr = load_env_layer(shp, rule, title, alpha=a.alpha,
-                             outline_only=outline_only, color_idx=color_idx)
+        lyr = load_env_layer(shp, rule, title, alpha=a.alpha, outline_only=outline_only,
+                             fallback_rgb=layer_colors.get(name, (127, 127, 127)))
         if outline_only:
             print(f"    （{title} 覆蓋率 {100 * area / geom_area:.1f}% ≥99%，"
                   f"改畫 45° 斜線紋理，不用實心填色）")
@@ -320,6 +328,12 @@ def main():
     idx_ln = site.fields().indexFromName("地號")
     lns = [str(f[idx_ln]).strip() for f in site.getFeatures()] if idx_ln >= 0 else []
     pnote = sheet.parcel_note(section, lns[0] if lns else "", len(lns))
+
+    # 行政區界（`<案>/行政區界/行政區界.shp` 存在才畫；沒有就完全不影響既有行為）
+    _dist = district_line.district_layers(out_dir, project, keep_alive, QgsRectangle(*bbox))
+    if _dist:
+        layers = layers[:1] + _dist.layers + layers[1:]
+        legend = list(legend) + _dist.legend
 
     img_dir = out_dir / "圖檔_maxmap"
     img_dir.mkdir(parents=True, exist_ok=True)

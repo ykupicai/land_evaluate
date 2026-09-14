@@ -58,6 +58,8 @@ from openpyxl.styles import Alignment, Font
 from zone_utils import normalize_zone
 import map_sanity
 import urban_mix
+import urbanplan_image
+import district_line
 import ownership_style
 from cadastre_fetch import is_unregistered
 from nlsc_wmts import build_basemap
@@ -103,7 +105,7 @@ from qgis.core import (
     QgsMapSettings,
     QgsPalLayerSettings,
     QgsPrintLayout,
-    QgsProject,
+    QgsPointXY, QgsProject,
     QgsRasterLayer,
     QgsRectangle,
     QgsRendererCategory,
@@ -192,6 +194,12 @@ URBAN_LANDTYPE_OPACITY = 1.0  # 使用地編定圖也完整呈現都市計畫分
 # 含 Color1；現行版、精度足以正確切道路截角）取代本機全台 2019 舊 shp。臺南/高雄等有
 # 登錄圖台的縣市案子建議帶此旗標；標註欄自動偵測（zone→ZONE_USE→ZONE→NAME）。
 URBAN_SHP_OVERRIDE = None
+# --urban-image[=<縣市>|auto]：**出圖**改吃縣市都發局的官方分區彩繪圖（ArcGIS export，
+# scripts/urbanplan_image.py），向量 shp 退居**計算與圖例**用（使用者 2026-09-14 定案：
+# 「計算用向量、出圖用官方圖」）。動機：臺北市圖台向量 renderer 對住宅區/商業區整類回
+# 0,0,0（黑），照著色標的分區會全黑；官方彩繪圖就是官網那張圖、且已內建分區簡稱標註。
+# 不帶值或 auto＝從基地 shp 縣市欄判斷；縣市未登錄彩繪圖服務時自動退回向量著色。
+URBAN_IMAGE_COUNTY = None
 # 主題限定的圖面調整（預設空＝維持原行為）：
 #   NO_LANDNO_THEMES     這些主題不標基地地號（清爽的分區圖常不要地號干擾）
 #   PARCEL_LINE_THEMES   這些主題的宗地界線改黑實線，取代預設的細灰線
@@ -1232,6 +1240,65 @@ def luimap_legend_categories(features_geojson: Path, colortable_csv: Path,
     return out
 
 
+def urban_image_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
+                             image_tif: str, zone_field: str,
+                             keep_alive: list) -> QgsVectorLayer | None:
+    """圖例層：分區名 → **從官方分區彩繪圖實地取樣**的顏色（--urban-image 專用）。
+
+    為什麼不讀向量的 `Color1`：臺北市圖台對住宅區／商業區整類回 `0,0,0`（黑），
+    照它出的圖例會把住二／住三／住三(特) 併成一格黑色，**與圖上的黃色對不上**。
+    直接量「圖上這塊被畫成什麼顏色」，圖例必然與官方彩繪圖一致（2026-09-14 定案）。
+
+    兩個取樣上的坑（都已實見並修掉）：
+      ① **每個多邊形只取一點會取到圖上內建的分區簡稱文字像元**（深灰字）或計畫道路留白
+         → 公園用地取成深灰。改成每個多邊形取內部網格多點、由 `sample_zone_colors`
+         取眾數，文字/邊界像元自然被稀釋。
+      ② **大面積分區的多邊形會延伸到圖框外好幾公里**（保護區、農業區），未裁切時取樣點
+         幾乎都落在彩繪圖範圍外被跳過 → **該分區整格從圖例消失**（實見：圖例 16 類獨缺
+         保護區，而它正是該案標的）。故一律先 `intersection(extent)` 再取樣。
+    """
+    if not urban_lyr.isValid():
+        return None
+    i_zone = urban_lyr.fields().indexOf(zone_field)
+    if i_zone < 0:
+        return None
+    frame = QgsGeometry.fromRect(extent)
+    pts: dict[str, list] = {}
+    for f in urban_lyr.getFeatures(QgsFeatureRequest().setFilterRect(extent)):
+        zone = attr_str(f[i_zone])
+        if not zone:
+            continue
+        g = f.geometry().intersection(frame)
+        if g.isEmpty():
+            continue
+        bb = g.boundingBox()
+        lst = pts.setdefault(zone, [])
+        p0 = g.pointOnSurface().asPoint()
+        lst.append((p0.x(), p0.y()))
+        for ix in range(1, 6):
+            for iy in range(1, 6):
+                x = bb.xMinimum() + bb.width() * ix / 6.0
+                y = bb.yMinimum() + bb.height() * iy / 6.0
+                if g.contains(QgsGeometry.fromPointXY(QgsPointXY(x, y))):
+                    lst.append((x, y))
+    colors = urbanplan_image.sample_zone_colors(image_tif, pts, samples=400)
+    if not colors:
+        return None
+    lyr = QgsVectorLayer(f"Polygon?crs={CRS_3826}&field=cat:string",
+                         URBAN_LAYER_NAME, "memory")
+    cx, cy = extent.center().x(), extent.center().y()
+    half = extent.width() * 0.001
+    cats = []
+    for i, (zone, rgb) in enumerate(sorted(colors.items())):
+        cats.append(QgsRendererCategory(
+            str(i), fill_symbol(rgb, outline="120,120,120,255", width="0.1"), zone))
+        add_feat(lyr, QgsGeometry.fromRect(QgsRectangle(
+            cx - half, cy - half, cx + half, cy + half)), [str(i)])
+    lyr.setRenderer(QgsCategorizedSymbolRenderer("cat", cats))
+    keep_alive.append(lyr)
+    return lyr
+
+
 def road_status_color(status: str) -> tuple:
     """臨路狀態文字 → 框色（純規則，見設計文件 Task6 brief）。"""
     s = str(status or "")
@@ -1508,7 +1575,7 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
 def main() -> None:
     global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS
     global NO_LANDNO_THEMES, PARCEL_LINE_THEMES, NO_NEIGHBOR_THEMES, BASE_LINE_THEMES
-    global URBAN_SHP_OVERRIDE
+    global URBAN_SHP_OVERRIDE, URBAN_IMAGE_COUNTY
     args = [a for a in sys.argv[1:]]
     case_name = "20260707-清潔隊部資訊"
     only: set[str] | None = None
@@ -1554,6 +1621,15 @@ def main() -> None:
             URBAN_SHP_OVERRIDE = a.split("=", 1)[1]
         elif a == "--urban-shp":
             URBAN_SHP_OVERRIDE = args[i + 1]; i += 1
+        elif a.startswith("--urban-image="):
+            URBAN_IMAGE_COUNTY = a.split("=", 1)[1].strip()
+        elif a == "--urban-image":
+            # 不帶值＝從基地 shp 的縣市欄自動判斷（值型旗標同時支援 `--flag=值`／`--flag 值`，
+            # 但下一個 token 若是別的旗標就當成「不帶值」）
+            if i + 1 < len(args) and not str(args[i + 1]).startswith("--"):
+                URBAN_IMAGE_COUNTY = args[i + 1]; i += 1
+            else:
+                URBAN_IMAGE_COUNTY = "auto"
         elif a == "--no-loc-parcel":
             SHOW_LOC_PARCEL = False   # 已是預設值;保留旗標供既有指令/手冊沿用
         elif a == "--loc-parcel":
@@ -1734,6 +1810,7 @@ def main() -> None:
         else:
             urban_shp_path = REPO_ROOT / URBAN_SHP
         urban_qml_path = str(styles_dir / URBAN_QML)
+        urban_label_lyr = None      # --urban-image 模式才會建（只標註、不著色）
         urban_lyr_zoning = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
         urban_lyr_landtype = QgsVectorLayer(str(urban_shp_path), URBAN_LAYER_NAME, "ogr")
         urban_ok = urban_lyr_zoning.isValid() and urban_lyr_landtype.isValid()
@@ -1768,6 +1845,22 @@ def main() -> None:
             urban_lyr_zoning.setLabeling(
                 label_settings(urban_zone_field, size=7.5, color=(40, 40, 40)))
             urban_lyr_zoning.setLabelsEnabled(True)
+            # --urban-image 模式用的「只標註不著色」層：官方彩繪圖自帶的分區簡稱是
+            # **螢幕尺度**的字（圖磚快取預先渲染，export 的 dpi 參數對它無效——2026-09-14
+            # 實測 dpi=96 與 300 回傳同一張圖），貼進 300dpi 成果圖後小到看不清。
+            # 故疊一層全透明填色的同一份向量、只借它的標註，字級與其他主題一致。
+            urban_label_lyr = QgsVectorLayer(str(urban_shp_path),
+                                             URBAN_LAYER_NAME + "（標註）", "ogr")
+            if urban_label_lyr.isValid():
+                urban_label_lyr.renderer().setSymbol(QgsFillSymbol.createSimple({
+                    "color": "0,0,0,0", "style": "no", "outline_style": "no"}))
+                urban_label_lyr.setLabeling(
+                    label_settings(urban_zone_field, size=7.5, color=(40, 40, 40)))
+                urban_label_lyr.setLabelsEnabled(True)
+                project.addMapLayer(urban_label_lyr, False)
+                keep_alive.append(urban_label_lyr)
+            else:
+                urban_label_lyr = None
         else:
             warnings.append(f"都市計畫圖層載入失敗：{urban_shp_path}（使用分區/使用地編定圖將無都市底色）")
         color_to_names = load_urban_color_names(REPO_ROOT / URBAN_LEGEND_YAML)
@@ -1978,6 +2071,31 @@ def main() -> None:
                 if rl is not None:
                     project.addMapLayer(rl, False)
                     keep_alive.append(rl)
+
+            # --urban-image：都發局官方分區彩繪圖（出圖用；計算與圖例仍走向量 shp）
+            urban_image_rl = None
+            if URBAN_IMAGE_COUNTY and is_urban:
+                _img_county = (str(c.get("county", "")).strip()
+                               if URBAN_IMAGE_COUNTY in ("auto", "")
+                               else URBAN_IMAGE_COUNTY)
+                try:
+                    if not urbanplan_image.county_supported(_img_county):
+                        warnings.append(f"{cid} --urban-image：{_img_county} 未登錄官方分區"
+                                        f"彩繪圖服務 → 維持向量著色")
+                    else:
+                        _t = urbanplan_image.fetch_zone_image(
+                            _img_county, ext_3826,
+                            basemap_dir / f"{cid}_都市計畫官方圖.tif", scale=c["scale"])
+                        _rl = QgsRasterLayer(str(_t), "都市計畫使用分區圖（都發局官方圖）")
+                        if _rl.isValid():
+                            project.addMapLayer(_rl, False)
+                            keep_alive.append(_rl)
+                            urban_image_rl = _rl
+                        else:
+                            warnings.append(f"{cid} 官方分區彩繪圖讀取失敗 → 維持向量著色")
+                except Exception as exc:  # noqa: BLE001 — 取不到就退回向量，不阻斷出圖
+                    warnings.append(f"{cid} 官方分區彩繪圖取得失敗（退回向量著色）："
+                                    f"{type(exc).__name__}: {exc}")
 
             # maxmap 臨路判定專用底圖:基地外擴 ROAD_MARGIN_M,正射＋EMAP2 電子地圖(疊路名/
             # 道路分類),圖框放大到可見最近的區道/市道/縣道/鄉道(使用者定案)。
@@ -2193,6 +2311,40 @@ def main() -> None:
                                  + datetime.now().strftime("%Y-%m-%d") + "）")
                 if is_urban:
                     landtype_note += "\n都市計畫圖資：全台都市計畫土地使用分區（Color1 官方色）"
+
+            # --urban-image 時，圖例色改「從官方彩繪圖取樣」而不是讀向量 Color1：
+            # 臺北市圖台的 Color1 對住宅區／商業區整類回 0,0,0（黑），照它出的圖例會把
+            # 住二/住三/住三(特) 併成一格黑色，與圖上的黃色對不上（2026-09-14 實見）。
+            if urban_image_rl is not None and urban_lyr_zoning is not None:
+                try:
+                    _plyr = urban_image_legend_layer(
+                        urban_lyr_zoning, c["extent"], urban_image_rl.source(),
+                        urban_legend_field, keep_alive)
+                    if _plyr is not None:
+                        project.addMapLayer(_plyr, False)
+                        urban_legend_lyr = _plyr
+                        print(f"  [{cid}] 圖例色改由官方彩繪圖取樣"
+                              f"（{len(_plyr.renderer().categories())} 類）", flush=True)
+                except Exception as exc:  # noqa: BLE001 — 取樣失敗就沿用原圖例，不阻斷
+                    warnings.append(f"{cid} 圖例取色失敗（沿用 Color1）：{type(exc).__name__}: {exc}")
+
+            # ★ --urban-image：出圖改用都發局官方分區彩繪圖（放在 WMTS 覆寫之後＝優先）。
+            #   向量層 urban_lyr_zoning 退出「使用分區」圖面（它的標註會與彩繪圖內建的
+            #   分區簡稱重疊成兩份），但 urban_legend_lyr 仍留在圖層清單裡——圖例開了
+            #   setLegendFilterByMapEnabled，沒進 layers 的圖層其圖例會被整段濾掉。
+            #   面積／占比／逐筆分區一律仍由向量 shp 計算（persite_stats 另行讀取，不受影響）。
+            if urban_image_rl is not None:
+                zoning_layers = ([l_red, *gray_opt]
+                                 + ([urban_label_lyr] if urban_label_lyr is not None else [])
+                                 + ([urban_legend_lyr] if urban_legend_lyr is not None else [])
+                                 + [urban_image_rl])
+                zoning_legend = ([urban_legend_lyr, l_red] if urban_legend_lyr is not None
+                                 else [l_red])
+                zoning_note = (common_note + "\n都市計畫分區圖面："
+                               + str(c.get("county", "")).strip()
+                               + "都發局官方分區彩繪圖（ArcGIS export，查詢日期 "
+                               + datetime.now().strftime("%Y-%m-%d") + "）"
+                               + "\n面積與占比仍以都發局向量圖層實算")
             theme_defs = {
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
@@ -2240,10 +2392,20 @@ def main() -> None:
                 except Exception:  # noqa: BLE001 — 數不到就不擋，檢查本身不可成為失敗源
                     pass
 
+            # 行政區界：`<案>/行政區界/行政區界.shp` 存在就**每張主題圖都畫**
+            # （基地橫跨兩個行政區時才有意義；沒跑過 district_fetch.py 的案子回空、行為不變）
+            dist = district_line.district_layers(out_dir, project, keep_alive, c["extent"])
+            if dist:
+                print(f"  [{cid}] 行政區界：{'、'.join(dict.fromkeys(dist.names))}", flush=True)
+
             for theme in themes:
                 layers, leg_layers, hide, note, overlay = theme_defs[theme]
                 if theme in NO_NEIGHBOR_THEMES:      # 不畫周邊地籍界線，只留基地框
                     layers = [x for x in layers if x is not l_gray]
+                if dist:
+                    # 區界線放在基地紅框之下、其餘主題圖層之上：壓不住基地，也不被底圖蓋掉
+                    layers = layers[:1] + dist.layers + layers[1:]
+                    leg_layers = list(leg_layers) + dist.legend
                 fname = f"{cid}_{sanitize(c['name'])}_{theme}.png"
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M")
                 if theme == "正射套疊" and not case_wmts_ok:

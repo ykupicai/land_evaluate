@@ -65,6 +65,7 @@ from qgis.PyQt.QtCore import QVariant  # noqa: E402
 from qgis.PyQt.QtGui import QColor, QFont  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
+import district_line  # noqa: E402
 from nlsc_wmts import build_basemap  # noqa: E402
 
 CRS = "EPSG:3826"
@@ -438,19 +439,22 @@ def main():
     elif a.theme == "坡度":
         # 坡度分段圖（開發審議規範總編§16 三段）。這張圖回答的是「可開發的地在哪裡」，
         # 不只是「占多少百分比」——量體配置與不可開發區的空間關係要看得見。
-        from osgeo import gdal          # noqa: PLC0415 — 僅本主題需要，且須 QGIS python
-        gdal.UseExceptions()
-
         src = a.slope_tif or str(out_dir / "坡度分級" / "坡度_percent.tif")
         if not os.path.exists(src):
             raise SystemExit(f"找不到坡度 raster：{src}（先跑 scripts/slope_check.py）")
 
-        # ★必須先以基地為 cutline 裁切：slope_check 產出的 tif 是基地 bbox 矩形，
+        # ★必須先以基地為遮罩裁切：slope_check 產出的 tif 是基地 bbox 矩形，
         #   直接畫會把基地外的坡度一起著色，畫面占比也對不上權威占比。
+        # ⚠ 裁切一律呼叫 `slope_check.clip_slope_raster()`（ALL_TOUCHED 遮罩，與
+        #   `坡度分級.json` 的統計數字同一套演算法），**不要用 `gdal.Warp` cutline**——
+        #   2026-09-14 內湖保護區案實錯：Warp cutline 是另一套遮罩（像元中心判斷去留），
+        #   本案少算了全案唯一一個 30~40% 像元，圖上「整區都<30%」跟 json 對不上、
+        #   使用者一眼看出圖表不符。見 `slope_check.clip_slope_raster` docstring。
+        from slope_check import clip_slope_raster  # noqa: PLC0415 — 僅本主題需要
         clipped = str(out_dir / "坡度分級" / "坡度_percent_基地裁切.tif")
-        gdal.Warp(clipped, src, cutlineDSName=a.joined, cropToCutline=True,
-                  dstNodata=-9999.0, dstSRS=CRS)
-        print(f"  坡度 raster 已以基地為 cutline 裁切 → {Path(clipped).name}")
+        clip_slope_raster(src, a.joined, clipped)
+        print(f"  坡度 raster 已以基地為遮罩裁切（ALL_TOUCHED，與坡度分級.json 同演算法）"
+              f" → {Path(clipped).name}")
 
         rl = QgsRasterLayer(clipped, "坡度分段（總編§16）")
         if not rl.isValid():
@@ -639,6 +643,12 @@ def main():
                 project.addMapLayer(rl, False); keep.append(rl); layers.append(rl)
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠ 底圖失敗：{type(exc).__name__}: {exc}")
+
+    # 行政區界（`<案>/行政區界/行政區界.shp` 存在才畫；沒有就完全不影響既有行為）
+    _dist = district_line.district_layers(out_dir, project, keep, QgsRectangle(*bbox))
+    if _dist:
+        layers = layers[:1] + _dist.layers + layers[1:]
+        legend = list(legend) + _dist.legend
 
     img_dir = out_dir / "圖檔_maxmap"
     img_dir.mkdir(parents=True, exist_ok=True)

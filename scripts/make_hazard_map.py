@@ -18,12 +18,20 @@
    法規作業**」→ 成果只作交叉核對與現況說明，法定認定仍以 NGIS／eland／主管機關為準。
    警語**不印在圖面上**（使用者 2026-09-13 定案），由交付文字承載。
 
+★2026-09-14 加：基地內坡度分級（開發審議規範總編§16 三段）疊圖（使用者要求）。
+沿用 `make_extra_maps.py --theme 坡度` 同一套三段離散色階與裁切邏輯（cutline=基地，
+否則 slope_check 產出的 tif 是基地 bbox 矩形、會把基地外的坡度一起著色）；坡度raster
+放在災害圖層之下、正射之上，讓「崩塌土石流套疊」與「哪裡是不可開發區」同一張圖看得到。
+需先跑過 `scripts/slope_check.py`（產 `<案>/坡度分級/坡度_percent.tif`），沒有就整段略過
+（不阻斷本圖其餘內容），並在標題列/console 印出略過原因。
+
 須用 QGIS 內建 python（要 osgeo 解 MVT、要 QGIS 出圖）：
   & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_hazard_map.py --case <案名> [--county 臺北市]
 
 產出：
   <案>/崩塌土石流/*.geojson          各圖層（EPSG:3826，已裁到圖框附近）
   <案>/崩塌土石流/坡地災害檢核.csv    逐圖層件數／距基地／與基地交集
+  <案>/坡度分級/坡度_percent_基地裁切.tif（不存在才重算；已存在直接沿用）
   <案>/圖檔_maxmap/001_<案>_崩塌土石流套疊.png
 """
 from __future__ import annotations
@@ -52,12 +60,14 @@ from shapely.geometry import MultiPolygon, Polygon, shape  # noqa: E402
 from shapely.ops import unary_union  # noqa: E402
 
 from qgis.core import (  # noqa: E402
-    QgsApplication, QgsCoordinateReferenceSystem, QgsFillSymbol, QgsGeometry,
-    QgsLayoutExporter, QgsLineSymbol, QgsProject, QgsRasterLayer, QgsRectangle,
-    QgsVectorLayer,
+    QgsApplication, QgsColorRampShader, QgsCoordinateReferenceSystem, QgsFillSymbol,
+    QgsGeometry, QgsLayoutExporter, QgsLineSymbol, QgsProject, QgsRasterLayer,
+    QgsRasterShader, QgsRectangle, QgsSingleBandPseudoColorRenderer, QgsVectorLayer,
 )
+from qgis.PyQt.QtGui import QColor  # noqa: E402
 
 import build_layout as sheet  # noqa: E402
+import district_line
 import overlay_placement as op  # noqa: E402
 from nlsc_wmts import build_basemap  # noqa: E402
 
@@ -109,6 +119,45 @@ STYLE = [
     ("土石流潛勢溪流集水區", "土石流潛勢溪流／集水區範圍", (60, 150, 220), "outline"),
 ]
 ALPHA = 0.40
+SLOPE_ALPHA = 0.45  # 坡度raster放在災害圖層之下，稍降不透明度免蓋掉災害範圍
+
+
+def load_slope_layer(case_dir: Path, joined_shp: str):
+    """基地裁切後的坡度分段 raster（與 make_extra_maps.py --theme 坡度 同一套三段
+    離散色階／裁切邏輯），供本圖疊用。找不到來源 tif 就回 None（不阻斷本圖其餘內容）。
+
+    ⚠ 裁切一律呼叫 `slope_check.clip_slope_raster()`（ALL_TOUCHED 遮罩，與
+    `坡度分級.json` 的統計數字同一套演算法），**不要用 `gdal.Warp` cutline**——
+    2026-09-14 內湖保護區案實錯：Warp cutline 是另一套遮罩（像元中心判斷去留），
+    少算了全案唯一一個 30~40% 像元，圖上「整區都<30%」跟 json 對不上。也**不要
+    用「檔案已存在」當快取**：裁切是秒級成本，案件資料夾裡舊的裁切檔可能是更早
+    的基地版本，見 `slope_check.clip_slope_raster` docstring。
+    """
+    slope_dir = case_dir / "坡度分級"
+    src = slope_dir / "坡度_percent.tif"
+    clipped = slope_dir / "坡度_percent_基地裁切.tif"
+    if not src.exists():
+        print(f"  （無坡度 raster {src}，本圖略過坡度分級圖層——先跑 scripts/slope_check.py）")
+        return None
+    from slope_check import clip_slope_raster  # noqa: PLC0415 — 僅本分支需要，且非 QGIS 模組
+    clip_slope_raster(str(src), joined_shp, str(clipped))
+    print(f"  坡度 raster 已以基地為遮罩裁切（ALL_TOUCHED，與坡度分級.json 同演算法） → {clipped.name}")
+    rl = QgsRasterLayer(str(clipped), "坡度分段（總編§16）")
+    if not rl.isValid():
+        print(f"  ⚠ 坡度 raster 讀取失敗：{clipped}（略過）")
+        return None
+    a = int(SLOPE_ALPHA * 255)
+    shader = QgsRasterShader()
+    ramp = QgsColorRampShader()
+    ramp.setColorRampType(QgsColorRampShader.Discrete)
+    ramp.setColorRampItemList([
+        QgsColorRampShader.ColorRampItem(30.0, QColor(64, 160, 64, a), "坡度<30%／可開發"),
+        QgsColorRampShader.ColorRampItem(40.0, QColor(255, 190, 60, a), "坡度30~40%／僅開放性設施"),
+        QgsColorRampShader.ColorRampItem(1e6, QColor(214, 39, 40, a), "坡度≥40%／不可開發區"),
+    ])
+    shader.setRasterShaderFunction(ramp)
+    rl.setRenderer(QgsSingleBandPseudoColorRenderer(rl.dataProvider(), 1, shader))
+    return rl
 
 
 def tile_xy(lon, lat, z):
@@ -295,6 +344,11 @@ def main() -> int:
         keep.append(lyr)
         haz.append(lyr)
 
+    slope_rl = load_slope_layer(case_dir, str(site_shp))
+    if slope_rl is not None:
+        project.addMapLayer(slope_rl, False)
+        keep.append(slope_rl)
+
     geom = QgsGeometry.unaryUnion([f.geometry() for f in lyr_site.getFeatures()])
     frame_geom = geom.buffer(a.margin, 8)
     fbb = frame_geom.boundingBox()
@@ -328,8 +382,16 @@ def main() -> int:
 
     img_dir = case_dir / "圖檔_maxmap"
     img_dir.mkdir(parents=True, exist_ok=True)
+    # 疊圖順序（第一個在最上層）：基地紅框 > 災害圖層 > 坡度分級(基地內) > 正射。
+    # 圖例順序沿用既有慣例（災害圖層在前、基地框最後），坡度分級接在災害圖層之後。
+    slope_list = [slope_rl] if slope_rl is not None else []
+    # 行政區界（`<案>/行政區界/行政區界.shp` 存在才畫）
+    _dist = district_line.district_layers(case_dir, project, keep,
+                                          QgsRectangle(fl, fb, fr, ft))
     layout, _pl = sheet.build_sheet_layout(
-        project, "001_崩塌土石流套疊", [lyr_site] + haz + [photo], haz + [lyr_site],
+        project, "001_崩塌土石流套疊",
+        [lyr_site] + _dist.layers + haz + slope_list + [photo],
+        haz + slope_list + _dist.legend + [lyr_site],
         set(), frame_geom, bbox, fld("縣市") + fld("鄉鎮"), pnote, keep,
         show_loc_parcel=False)
     st = QgsLayoutExporter.ImageExportSettings()
