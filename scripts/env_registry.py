@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import os
 import sys
 from pathlib import Path
@@ -25,8 +27,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_ROOT = REPO_ROOT / "環境敏感相關"
 
-_SKILL = (Path(os.path.expanduser("~")) / ".claude" / "skills"
-          / "env-sensitivity-check" / "scripts")
+_SKILL = skill_path("env-sensitivity-check", "scripts")
 if str(_SKILL) not in sys.path:
     sys.path.insert(0, str(_SKILL))
 

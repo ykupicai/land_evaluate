@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import re
 import sys
@@ -39,8 +41,7 @@ _EXPORT = "https://eland.nlma.gov.tw/seportal/Web_SEData/ExportPdfAll"
 def download_pdf(out_dir: Path) -> Path:
     """線上下載最新『應免查範圍』全表 PDF，存 config/環敏應免查範圍_<版本>.pdf。"""
     # gov_session＝已掛政府 TLS 相容 adapter（eland 憑證缺 SKI，見 skill govtls.py）
-    sys.path.insert(0, str(Path.home() / ".claude" / "skills"
-                          / "env-sensitivity-check" / "scripts"))
+    sys.path.insert(0, str(skill_path("env-sensitivity-check", "scripts")))
     from govtls import gov_session  # noqa: PLC0415
     s = gov_session()
     ua = {"User-Agent": "Mozilla/5.0 env-sensitivity-check/1.0"}

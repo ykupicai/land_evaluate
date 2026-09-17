@@ -22,6 +22,8 @@ TGOS 國家空間資料資產（`www.tgos.tw/tgos/NgdaMap`，**免登入**）對
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import io
 import sys
@@ -30,8 +32,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ENV_ROOT = REPO / "環境敏感相關"
-sys.path.insert(0, str(Path.home() / ".claude" / "skills"
-                       / "env-sensitivity-check" / "scripts"))
+sys.path.insert(0, str(skill_path("env-sensitivity-check", "scripts")))
 
 # TGOS 可下載 SHP 的本機環敏圖層。url 與 skill tgos_layers.py 的遠端源一致（同一份 zip）。
 # dest＝相對 環境敏感相關/ 的目標夾（與 LOCAL_LAYERS 的 shp 路徑對齊）。

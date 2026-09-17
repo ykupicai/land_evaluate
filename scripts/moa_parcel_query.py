@@ -60,6 +60,8 @@ ring API 會做**模糊比對**，查不到就回別筆地（實測會跨縣市�
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import json
 import os
 import ssl
@@ -69,8 +71,7 @@ import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SKILL = os.path.join(os.path.expanduser("~"), ".claude", "skills",
-                     "cadastre-check", "scripts")
+SKILL = str(skill_path("cadastre-check", "scripts"))
 
 TIMEOUT = 120
 PAGE = 2000              # 服務端 maxRecordCount，取滿以減少往返

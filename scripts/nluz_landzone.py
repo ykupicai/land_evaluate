@@ -53,6 +53,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import csv
 import io
@@ -63,7 +65,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
-SKILL = Path(os.path.expanduser("~")) / ".claude" / "skills" / "nluz-landzone-query" / "scripts"
+SKILL = skill_path("nluz-landzone-query", "scripts")
 
 from shp_trust_utils import (  # noqa: E402
     F_COUNTY, F_LANDNO, F_SEG, F_TOWN, F_ZONE,

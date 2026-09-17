@@ -245,7 +245,7 @@ scripts/            現行產線引擎 → 索引見 scripts/README.md
 config/             縣市註冊表、段小段索引、LUIMAP 色碼、都市計畫圖例、門牌坐標來源
   檢核清單/*.yaml   禁止事由清單（換用途只加 YAML 不寫碼）
 styles/             出圖 QML（使分/使類/國土功能分區/都市計畫/周邊地籍/基地紅框）
-tests/              185 個單測（含把「錯法」寫成斷言的聚落判定測試）
+tests/              回歸測試（數量以 pytest tests/ -q 為準，含把「錯法」寫成斷言的測試）
 docs/               免AI批次流程操作手冊.md、產線沿革.md、TCDGIS 平台官方手冊
   superpowers/      設計文件 specs/plans
 .claude/rules/      路徑範圍規則（碰到相關檔案才載入）
@@ -622,6 +622,11 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
      `qgs.exitQgis()`**：5 萬條級的 OGR provider 在 QGIS teardown 時解構會崩。
      ⚠ 崩潰發生在**全部工作完成之後**，圖與 CSV 其實都已寫出——別被 exit code 誤導成
      「沒產出」，先去看檔案。
+     ★ **2026-09-17 收尾修復**：不只大型圖層，單一 OGR 圖層晚於 `exitQgis()`
+     釋放也可重現同一 GDAL 存取違例。`make_maps.main` 現透過 `qgis_session`
+     等工作函式退場（含例外 traceback locals 清理）、清除 project／循環參照後才關閉 QGIS。
+     `run_case` 的 maps 步驟不再豁免異常碼；麻豆／七股副本均 returncode 0。
+     詳見 `docs/2026-09-17_QGIS收尾修復.md`，勿再把此缺陷直接歸因於 libxml2 或視為無害。
 - **線圖層標註要設 placement**：`QgsPalLayerSettings` 預設 AroundPoint，線圖層會**完全標不
   出來**。要 `Qgis.LabelPlacement.Curved` ＋ `QgsLabelLineSettings.setPlacementFlags(
   AboveLine|OnLine)`／`setMergeLines(True)`。`make_extra_maps.label_field(..., line=True)`

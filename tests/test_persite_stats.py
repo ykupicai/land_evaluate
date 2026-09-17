@@ -99,3 +99,28 @@ def test_area_of_未登記地不得計為零面積():
 ])
 def test_classify_ownership(v, want):
     assert ps.classify_ownership(v) == want
+
+
+def test_main_keeps_road_geometry_area_separate_from_registered_area(tmp_path, monkeypatch):
+    """陸域＋水域對的是圖面積，不是登記面積；保護統計主程式的接表口徑。"""
+    import json
+    import pandas as pd
+    site = _gdf([(120.0, 10.0)])  # 登記 120，但圖面積 100
+    site['公私別'] = ['國有']
+    sites = gpd.GeoDataFrame({'site_id': ['S001']}, geometry=site.geometry, crs=3826)
+    joined, site_path = tmp_path / 'base.gpkg', tmp_path / 'sites.gpkg'
+    site.to_file(joined, driver='GPKG')
+    sites.to_file(site_path, driver='GPKG')
+    road = tmp_path / 'road.xlsx'
+    pd.DataFrame([{'site_id': 'S001', '臨路狀態': '直接臨路',
+                   '鄰接路寬中位數_m': 4.25, '陸域面積_m2': 70,
+                   '水域面積_m2': 30, '主要地形': '平地'}]).to_excel(road, index=False)
+    monkeypatch.setattr(ps, 'URBAN', str(tmp_path / 'missing.shp'))
+    monkeypatch.setattr(sys, 'argv', ['persite_stats.py', '--joined', str(joined),
+                       '--sites', str(site_path), '--road', str(road), '--out', str(tmp_path)])
+    ps.main()
+    result = json.loads((tmp_path / '逐案場統計.json').read_text(encoding='utf-8'))['S001']
+    assert result['陸域_m2'] + result['水域_m2'] == result['圖面積_m2'] == 100
+    assert result['面積_m2'] == result['公有面積_m2'] == 120
+    assert result['公有筆數'] == 1
+    assert result['鄰接路寬中位數_m'] == 4.25

@@ -41,6 +41,7 @@ import sys
 
 import geopandas as gpd
 import yaml
+from config_loader import resource_path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # settlement_check / nlsc_facility
@@ -78,6 +79,9 @@ def _resolve_paths(item: dict, county: str) -> list[str]:
         raw = [raw]
     got = []
     for tmpl in raw:
+        # @breed_shp 等資源鍵共用 paths.yaml；既有相對/絕對圖層路徑仍照常接受。
+        if tmpl.startswith('@'):
+            tmpl = str(resource_path(tmpl[1:], repo_root=REPO))
         cands = ([tmpl.format(county=c) for c in _county_variants(county)]
                  if "{county}" in tmpl else [tmpl])
         for p in cands:

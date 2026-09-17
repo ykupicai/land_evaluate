@@ -390,13 +390,33 @@ def test_run_crash_code_with_stale_artifact_exits(tmp_path, monkeypatch):
         run_case._run(["bat", "s"], label="extract gpkg", crash_artifact=art)
 
 
-def test_run_maps_explicit_allowed_codes_pass(monkeypatch):
-    """maps 步驟由呼叫端明示 allowed=(0,5,3221225477) → 照舊豁免。"""
+def test_run_maps_crash_codes_are_not_success(monkeypatch):
+    """收尾已修復，maps 恢復只接受正常結束。"""
     import run_case
-    for rc in (0, 5, 3221225477):
+    _patch_subprocess(monkeypatch, 0)
+    assert run_case._run(["bat", "make_maps.py"], label="六張圖+qgz") is True
+    for rc in (5, 3221225477):
         _patch_subprocess(monkeypatch, rc)
-        assert run_case._run(["bat", "make_maps.py"], label="六張圖+qgz",
-                             allowed=(0,) + run_case.QGIS_CRASH_CODES) is True
+        with pytest.raises(SystemExit):
+            run_case._run(["bat", "make_maps.py"], label="六張圖+qgz")
+
+
+def test_main_dispatches_maps_without_crash_exemption(tmp_path, monkeypatch):
+    import run_case
+    monkeypatch.setattr(run_case, 'REPO', tmp_path)
+    calls = []
+
+    def fake_run(cmd, cwd=None, label='', allowed=(0,), crash_artifact=None, fatal=True):
+        if label == '六張圖+qgz':
+            calls.append(label)
+            assert allowed == (0,) and crash_artifact is None
+        return True
+
+    monkeypatch.setattr(run_case, '_run', fake_run)
+    monkeypatch.setattr(sys, 'argv', ['run_case.py', '--shp', str(tmp_path / 'base.shp'),
+                                   '--case', 'shutdown', '--mode', 'single'])
+    run_case.main()
+    assert calls == ['六張圖+qgz']
 
 
 def test_run_fatal_false_returns_false_without_exit(monkeypatch, capsys):

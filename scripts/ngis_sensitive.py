@@ -46,6 +46,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import csv
 import io
@@ -55,7 +57,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL = Path(os.path.expanduser("~")) / ".claude" / "skills" / "ngis-sensitive" / "scripts"
+SKILL = skill_path("ngis-sensitive", "scripts")
 
 # ★ NGIS 已知涵蓋落差清單（2026-08-06 建，七股土資場案實錯）——這幾類 NGIS 曾經
 #   回 0 命中、但本機圖資／eland／同案前例證實確有涉及。不是查詢錯誤，是 NGIS

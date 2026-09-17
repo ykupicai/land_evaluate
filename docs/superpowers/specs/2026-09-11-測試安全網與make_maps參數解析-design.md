@@ -1,5 +1,11 @@
 # 測試安全網與 make_maps 參數解析 — 設計文件
 
+> 2026-09-16 落地紀錄：本文件保留 9/11 設計背景；最新結果見
+> [專案整理與驗證](../../2026-09-16_專案整理與驗證.md)。本次以 `6e7573b` 為整理前基準，
+> 尚未 commit。原有 persite_stats 權屬測試已存在，這次補主程式面積口徑接表測試；
+> WKT 改放可讀 JSON fixture。陸域＋水域對照「圖面積」，不對照登記面積。
+> road_access 保存既有成果與 SHA256，未重新計算。另納入 9/14 新增的 `--urban-image`。
+
 - **日期**：2026-09-11
 - **回溯點**：`pre-refactor-20260911`（tag，指向 `e65680c`）
 - **範圍**：補三支黃金測試（零產線碼變動）＋ `make_maps` 參數解析抽出改 argparse
@@ -17,11 +23,11 @@
 |---|---|---|---|
 | `parse_helpers` 343 行 | 58 | `parse_stage1` 553 行 | 0 |
 | `zone_utils` | 52 | `greenbelt_ratio` 739 行 | 0 |
-| `run_case_helpers` | 38 | `run_case.main` | 0 |
+| `run_case_helpers` | 38（當時） | `run_case.main` | 更正：已有替身子程序整合測試，非零 |
 | `shp_trust_utils` | 23 | `make_maps` 2,354 行 | 0 |
 | `overlay_placement` | 7 | `make_extra_maps` 660 行 | 0 |
 
-**每一支 helper 都測得很好，每一支 orchestrator 都零測試。**
+**部分主流程缺少端到端覆蓋，不能從 helper 測試通過推定全產線無誤。**
 
 這不是疏忽，而是硬約束的結果：
 
@@ -67,7 +73,7 @@ CLAUDE.md 記載的靜默失敗幾乎全發生在這支：龍崎案三圖層降�
   用 `make_valid(union_all([make_valid(x) for x in ...]))`（踩過無效幾何才加的），
   `cadastre_neighbors`／`road_network` 只用 `site.geometry.union_all()`，
   `slope_check` 連 `engine="pyogrio"` 都沒帶。沒加 `make_valid` 的那幾支隨時可能踩同一個坑。
-- **`_county_file` 有兩份實作**（`adjacent_landuse`、`cadastre_neighbors`）。
+- **`_county_file` 原有兩份實作**：2026-09-16 已合併至 `shp_trust_utils.find_county_shp`，保留舊呼叫介面。
 - **`parse_stage1` 553 行零測試**（清冊模式的 orchestrator，同型問題）。
 
 ---
@@ -242,9 +248,11 @@ a = make_maps_cli.parse_args(sys.argv[1:])
 
 ## 七、驗收標準
 
-- [ ] `pytest tests/ -q` 全過，測試數由 314 增至約 350
-- [ ] `test_greenbelt_ratio.py` 的兩組黃金值與 `綠帶計算.json` 完全相符
-- [ ] `test_make_maps_cli.py` 中 `--road-margin 0` 通過（現行版本此案例失敗）
-- [ ] 麻豆與七股兩案的 05 清單，除「產出時間」欄外逐格相符
-- [ ] `make_maps.main()` 行數由 870 降至約 780（僅參數解析搬出）
-- [ ] CLAUDE.md 不再含「值型旗標皆同時支援兩種寫法」的錯誤描述
+- [x] `pytest tests/ -q` 全過：整理前 338，本輪 385
+- [x] `test_greenbelt_ratio.py` 的兩組黃金值與既有 `綠帶計算.json` 在指定浮點容差內相符
+- [x] `test_make_maps_cli.py` 中 `--road-margin 0` 通過
+- [x] 麻豆與七股兩案的 05 清單，除「產出時間」欄外逐格相符（案件副本、沿用圖層／底圖）
+- [x] `make_maps.main()` 僅搬參數解析；實際以 9/16 版本由 985 降至 892 行，不再套用舊預估值
+- [x] 值型旗標兩種寫法已實作並有測試，現行說明與程式一致
+
+上述是重構驗收，不是完整交付 QA；QGIS 結束階段異常及回歸限制見最新驗證紀錄。

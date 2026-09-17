@@ -34,6 +34,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import csv
 import io
@@ -44,7 +46,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL = Path(os.path.expanduser("~")) / ".claude" / "skills" / "env-sensitivity-check"
+SKILL = skill_path("env-sensitivity-check")
 
 
 def _load_skill_api():

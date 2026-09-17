@@ -28,7 +28,7 @@
                   且畫面占比與權威占比不符（2026-08-04 龍崎案：未裁 44.8/20.4/34.9，
                   裁切後 38.5/23.4/38.2）。
 
-版面沿用 build_layout.build_sheet_layout（與六主題同框）。
+版面沿用 build_layout.build_sheet_layout（與基本主題圖同框）。
 須用 QGIS 內建 python 執行。
 
   & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_extra_maps.py `
@@ -74,8 +74,9 @@ EXPORT_DPI = 300
 # 同資料夾內的 BREED47.shp 是 **2016-01-20 舊版、僅 47 個、無 .prj**，
 # 用它會漏掉後來新增的生產區——本案「安南港西區」就是新增的，
 # 舊版算出「未涉及、最近 6,453m」，新版才看出**基地 100% 在生產區內**（2026-07-29 實錯）。
-BREED_DEFAULT = (r"\\192.168.1.134\Public-TN\3. 圖資\gis圖資\產業相關"
-                 r"\一級產業\養殖漁業生產區\養殖漁業生產區_114_SHP\養殖漁業生產區.shp")
+from config_loader import resource_path
+
+BREED_DEFAULT = str(resource_path('breed_shp'))
 # 權屬配色與分色實作集中在 ownership_style（make_maps 權屬主題共用同一份，
 # 不可各自複製——兩份必然分岔）。此處僅 re-export 供既有引用者沿用。
 from ownership_style import OWNER_STYLE, OWNER_UNKNOWN, style_by_owner  # noqa: E402,F401

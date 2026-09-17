@@ -52,6 +52,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import json
 import os
@@ -62,6 +64,7 @@ import warnings
 
 import geopandas as gpd
 import pandas as pd
+from shp_trust_utils import find_county_shp
 from shapely.geometry import box as _sbox, shape
 from shapely.ops import unary_union
 
@@ -73,8 +76,7 @@ warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 CAD_DIR = os.path.join(REPO, "地籍圖資")
-SKILL = os.path.join(os.path.expanduser("~"), ".claude", "skills",
-                     "cadastre-check", "scripts")
+SKILL = str(skill_path("cadastre-check", "scripts"))
 GAP_CHECK_M = 20.0     # 覆蓋率自我檢查的緊鄰帶寬度（小於 --buffer，聚焦「緊鄰」而非全部外擴範圍）
 GAP_MIN_AREA = 10.0    # 低於此面積視為浮點誤差/畸零縫隙雜訊，不警告
 # ↑ 兩者供 fallback 的 discover() 與 legacy/cadastre_snapshot_probe.py 共用
@@ -161,11 +163,7 @@ def _current_town(county: str, town: str) -> str:
 
 
 def _county_file(county: str) -> str | None:
-    for c in (county, county.replace("臺", "台"), county.replace("台", "臺")):
-        p = os.path.join(CAD_DIR, c + ".shp")
-        if os.path.exists(p):
-            return p
-    return None
+    return find_county_shp(county, CAD_DIR)
 
 
 def map_frame(geom):

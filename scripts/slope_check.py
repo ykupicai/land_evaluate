@@ -46,8 +46,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DEM_DEFAULT = (r"\\192.168.1.134\Public-TN\3. 圖資\gis圖資\dem地形資料"
-               r"\20公尺\全國DTM-20\twdtm20m_float.img")
+from config_loader import resource_path
+
+DEM_DEFAULT = str(resource_path('dem_path'))
 GT30 = "MOI_SLOPEP_GT30_2"
 PAD = 200.0          # DEM 裁切外擴（公尺），避免邊界像元坡度算不出來
 

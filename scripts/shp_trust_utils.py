@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import codecs
 import csv
+import os
 import re
 import struct
 from collections import Counter
@@ -22,6 +23,15 @@ UNMAPPED_NAME = "未對應宗基地"
 # 地號正規化用：全形連字號類與「之」→ 半形「-」
 _HYPHEN_LIKE = "－—–ー﹣‐‑之"
 _FW_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def find_county_shp(county: str, directory) -> str | None:
+    """本機縣市地籍檔：保留原名優先與臺／台備援順序。"""
+    for name in (county, county.replace("臺", "台"), county.replace("台", "臺")):
+        path = os.path.join(directory, name + ".shp")
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def normalize_landno(s) -> str:

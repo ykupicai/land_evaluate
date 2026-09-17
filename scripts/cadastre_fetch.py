@@ -48,14 +48,15 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import io
 import json
 import os
 import sys
 
-SKILL = os.path.join(os.path.expanduser("~"), ".claude", "skills",
-                     "cadastre-check", "scripts")
+SKILL = str(skill_path("cadastre-check", "scripts"))
 CRS = 3826
 
 

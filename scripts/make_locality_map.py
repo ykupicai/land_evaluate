@@ -2,7 +2,7 @@
 """區位圖（簡報第2頁用）：基地在區域中的位置
 
 以 NLSC 通用電子地圖（EMAP）為底、外擴 N 公尺，疊各宗基地並標註 site_id，
-版面沿用與六主題相同的 maxmap 版面（build_layout.build_sheet_layout）。
+版面沿用與基本主題圖相同的 maxmap 版面（build_layout.build_sheet_layout）。
 
 為什麼要獨立一張：有了區位圖承擔「周邊道路與聚落脈絡」，臨路判定圖就不必外擴，
 可與其他主題維持同一比例尺（使用者定案 2026-07-29）。

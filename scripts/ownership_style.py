@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """權屬（公私別）分色的**唯一**實作 —— make_maps 與 make_extra_maps 共用。
 
-2026-08-26 使用者定案：權屬圖納入基本圖組（`make_maps` 六主題之一），不再只是
+2026-08-26 使用者定案：權屬圖納入基本圖組（`make_maps` 七主題之一），不再只是
 `make_extra_maps --theme 權屬` 的加值品項。為此把原本巢狀在 make_extra_maps 主流程
 裡的 `_style_by_owner` 抽到這裡——**兩支出圖腳本一律 import 同一份，不可各自複製**。
 

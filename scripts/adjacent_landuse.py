@@ -31,6 +31,7 @@ import os
 import warnings
 
 import geopandas as gpd
+from shp_trust_utils import find_county_shp
 
 warnings.filterwarnings("ignore")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,11 +42,7 @@ BUILDABLE = ("甲種建築", "乙種建築", "丙種建築", "丁種建築", "�
 
 
 def _county_file(county: str) -> str | None:
-    for c in (county, county.replace("臺", "台"), county.replace("台", "臺")):
-        p = os.path.join(CAD_DIR, c + ".shp")
-        if os.path.exists(p):
-            return p
-    return None
+    return find_county_shp(county, CAD_DIR)
 
 
 def analyze(joined: str, county: str | None, rings: list[float]) -> dict:

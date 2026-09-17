@@ -27,6 +27,8 @@
 """
 from __future__ import annotations
 
+from config_loader import skill_path
+
 import argparse
 import json
 import os
@@ -37,7 +39,7 @@ import urllib.parse
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKILL = os.path.join(os.path.expanduser("~"), ".claude", "skills", "cadastre-check", "scripts")
+SKILL = str(skill_path("cadastre-check", "scripts"))
 CAD_DIR = os.path.join(REPO_ROOT, "地籍圖資")
 CRS = 3826
 NEAR_EDGE_M = 5.0          # 點距邊界 <此值 → 標「近界、建議人工確認」

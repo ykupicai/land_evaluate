@@ -113,7 +113,7 @@ python -X utf8 scripts\run_case.py --list <清冊> --resume --mode single --layo
 ```
 
 第一步解析出 `01_中繼檔.xlsx` 後停下（請人工核對地號／分區辨識結果）；
-`--resume` 續跑到 `00_總區位圖` 停點；再加 `--mode single|persite` 跑完六張圖 + qgz。
+`--resume` 續跑到 `00_總區位圖` 停點；再加 `--mode single|persite` 跑完基本主題圖 + qgz（通常七張，全都市案六張）。
 
 `--resume` 續跑會自動做：比對地籍 → 若有比不到的地號，**自動接新舊地號查詢（query_landno）→ 回填（apply_landno）→ 重新比對**，全程留痕於 `04_新舊地號對照清單.xlsx`，不會中斷。查得完整對應→改用新地號；查無（疑逕為分割）→退一步用「母號範圍」示意出圖；母號也無→記入 `03_無法對應清單.xlsx`、該地號不出圖但不影響其他。
 
@@ -137,8 +137,8 @@ python -X utf8 scripts\run_case.py --list <清冊> --resume --mode single --layo
 
 | 模式 | 首跑停在 | 續跑（--resume/--mode）停在 |
 |---|---|---|
-| trust-shp | `00_總區位圖`（等 `--mode`） | 選 `--mode` 後跑完六張圖 + qgz |
-| 清冊 | `01_中繼檔`（等人工核對＋`--resume`） | `--resume` 停在 `00_總區位圖`；再加 `--mode` 跑完六張圖 + qgz |
+| trust-shp | `00_總區位圖`（等 `--mode`） | 選 `--mode` 後跑完基本主題圖 + qgz（通常七張，全都市案六張） |
+| 清冊 | `01_中繼檔`（等人工核對＋`--resume`） | `--resume` 停在 `00_總區位圖`；再加 `--mode` 跑完基本主題圖 + qgz（通常七張，全都市案六張） |
 
 ### 常見狀況：桌面 QGIS 開著同一個案子
 
@@ -456,7 +456,7 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 - ⚠️ 臨路三態門檻（≤0.5m／≤1.5m）與道路關鍵字**非經核可不得改動**。
 - 效能：逐案 × 全部地物面相交，57 案場約 10 分鐘。極大型（跨縣市／全國）清冊記憶體會爆，須按縣市切分分批跑。
 
-### 階段3：出圖（六主題）
+### 階段3：出圖（七主題，全都市案六張）
 
 ```powershell
 & "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_maps.py <案子資料夾名> --layout maxmap [--cases=004,005] [--road-margin=0]
