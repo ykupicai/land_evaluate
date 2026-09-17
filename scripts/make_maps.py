@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-階段3出圖：02_比對結果.xlsx → 每案場 4 張 A4 橫式 PNG ＋ 全案 .qgz ＋ 05_出圖清單.xlsx
+階段3出圖：02_比對結果.xlsx → 每案場最多 7 張基本 A4 橫式 PNG ＋ 全案 .qgz ＋ 05_出圖清單.xlsx
 
 執行（必須用 QGIS 內建 Python，PowerShell 呼叫）：
   & "C:\\Program Files\\QGIS 3.40.12\\bin\\python-qgis-ltr.bat" scripts\\make_maps.py \
@@ -20,16 +20,19 @@ trust-shp 模式（--trust-shp <基地.shp>，spec §5.1）：基地層幾何與
      使用分區圖與使用地編定圖靠它讓周邊宗地也上底色）
    - 功能分區（各縣市功能分區 shp 於出圖範圍之要素，分區名以 zone_utils.normalize_zone 標準化；
      載入清單/CRS 修正邏輯與 scripts/match_parcels.py 的 load_county_zones() 一致）
-3. 每案場 4 張主題圖（A4 橫式、EPSG:3826）：
+3. 每案場最多 7 張基本主題圖（全都市案略過使用地編定；另可 --themes 篩選）（A4 橫式、EPSG:3826）：
    1 使用分區、2 使用地編定（此二張套 styles/使用分區.qml、使用地編定.qml——由
      scripts/build_legend_styles.py 從使用者 QGIS 樣式庫 symbology-style.db 產出，
      含 LinePatternFill 紋理；周邊宗地與基地都上色、基地另疊粗紅框）、
-   3 國土功能分區（配色依 國土功能分區/圖例.xml）、
-   4 NLSC WMTS 正射影像 PHOTO2 ＋ EMAP 半透明 50% 套疊
-4. 比例尺：案場 bbox 外擴 25%（BBOX_EXPAND 可調）後就近取整
-   （1/500、1/1000、1/2500、1/5000，超出取實際值進位至千）；4 張圖同一範圍
+   3 權屬（公私別，與 make_extra_maps 共用 ownership_style）、
+   4 國土功能分區（配色依 國土功能分區/圖例.xml）、
+   5 NLSC WMTS 正射影像 PHOTO2 ＋ EMAP 半透明套疊、
+   6 國土利用調查、7 臨路判定（需相應資料）
+4. 比例尺與圖框依 compact／maxmap 版面計算；compact 的 BBOX_EXPAND 預設 1.12，
+   maxmap 依 overlay_placement 放大基地並避讓角落；臨路圖可依道路範圍另調整
 5. 輸出：圖檔/<案場ID>_<案場名>_<主題>.png、<案子>.qgz（圖層依案場分組＋每張圖一個 Layout）、
-   05_出圖清單.xlsx；單張失敗記入清單續跑不中斷。
+   05_出圖清單.csv/xlsx（maxmap 加 _maxmap）；單張失敗記入清單續跑不中斷。
+參數解析集中在 make_maps_cli.py；不需 QGIS 即可單獨測試。
 """
 
 from __future__ import annotations
@@ -1573,116 +1576,33 @@ def render_overview(project: QgsProject, case_dir: Path, keep_alive: list) -> bo
 
 
 def main() -> None:
+    from qgis_session import run_qgis_job
+
+    def create_application():
+        QgsApplication.setPrefixPath(QGIS_PREFIX, True)
+        return QgsApplication([], True)
+
+    run_qgis_job(_run_maps, create_application, lambda: QgsProject.instance().clear())
+
+
+def _run_maps(start_qgis) -> None:
     global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS
     global NO_LANDNO_THEMES, PARCEL_LINE_THEMES, NO_NEIGHBOR_THEMES, BASE_LINE_THEMES
     global URBAN_SHP_OVERRIDE, URBAN_IMAGE_COUNTY
-    args = [a for a in sys.argv[1:]]
-    case_name = "20260707-清潔隊部資訊"
-    only: set[str] | None = None
-    exclude: set[str] = set()
-    skip_extract = False
-    extract_only = overview_only = False
-    trust_shp: str | None = None
-    sitemap_path: str | None = None
-    themes = list(THEMES)
-    layout_mode = "compact"
-    themes_filter: set[str] | None = None
-    road_margin_cli: float | None = None
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a.startswith("--cases="):
-            only = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a.startswith("--exclude="):
-            exclude = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a.startswith("--trust-shp="):
-            trust_shp = a.split("=", 1)[1]
-        elif a == "--trust-shp":
-            trust_shp = args[i + 1]; i += 1
-        elif a.startswith("--sitemap="):
-            sitemap_path = a.split("=", 1)[1]
-        elif a == "--sitemap":
-            sitemap_path = args[i + 1]; i += 1
-        elif a == "--no-qgz":
-            WRITE_QGZ = False
-        elif a == "--mem":
-            MATERIALIZE = True
-        elif a == "--reuse-basemap":
-            REUSE_BASEMAP = True
-        elif a == "--zoning-local":
-            ZONING_WMTS = False   # 已是預設值（2026-08-06起）；保留旗標供指令明示/相容舊指令
-        elif a == "--zoning-wmts":
-            ZONING_WMTS = True    # 改走 NLSC WMTS 官方現行套疊（2026-08-06起為備選）
-        elif a.startswith("--basemap-dir="):
-            BASEMAP_DIR = a.split("=", 1)[1]
-        elif a == "--basemap-dir":
-            BASEMAP_DIR = args[i + 1]; i += 1
-        elif a.startswith("--urban-shp="):
-            URBAN_SHP_OVERRIDE = a.split("=", 1)[1]
-        elif a == "--urban-shp":
-            URBAN_SHP_OVERRIDE = args[i + 1]; i += 1
-        elif a.startswith("--urban-image="):
-            URBAN_IMAGE_COUNTY = a.split("=", 1)[1].strip()
-        elif a == "--urban-image":
-            # 不帶值＝從基地 shp 的縣市欄自動判斷（值型旗標同時支援 `--flag=值`／`--flag 值`，
-            # 但下一個 token 若是別的旗標就當成「不帶值」）
-            if i + 1 < len(args) and not str(args[i + 1]).startswith("--"):
-                URBAN_IMAGE_COUNTY = args[i + 1]; i += 1
-            else:
-                URBAN_IMAGE_COUNTY = "auto"
-        elif a == "--no-loc-parcel":
-            SHOW_LOC_PARCEL = False   # 已是預設值;保留旗標供既有指令/手冊沿用
-        elif a == "--loc-parcel":
-            SHOW_LOC_PARCEL = True    # 明示要回到舊版面(畫位置／涵蓋地號角落框)
-        elif a == "--skip-extract":
-            skip_extract = True
-        elif a == "--extract-only":
-            extract_only = True
-        elif a == "--overview-only":
-            overview_only = True
-        elif a == "--basic":
-            themes = THEMES[:4]
-        elif a.startswith("--layout="):
-            layout_mode = a.split("=", 1)[1].strip()
-        elif a == "--layout":
-            layout_mode = args[i + 1]; i += 1
-        elif a.startswith("--road-margin="):
-            road_margin_cli = float(a.split("=", 1)[1])
-        elif a.startswith("--base-line-themes="):
-            BASE_LINE_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a == "--base-line-themes":
-            BASE_LINE_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
-        elif a.startswith("--no-neighbor-themes="):
-            NO_NEIGHBOR_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a == "--no-neighbor-themes":
-            NO_NEIGHBOR_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
-        elif a.startswith("--no-landno-themes="):
-            NO_LANDNO_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a == "--no-landno-themes":
-            NO_LANDNO_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
-        elif a.startswith("--parcel-line-themes="):
-            PARCEL_LINE_THEMES = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a == "--parcel-line-themes":
-            PARCEL_LINE_THEMES = {x.strip() for x in args[i + 1].split(",") if x.strip()}; i += 1
-        elif a.startswith("--themes="):
-            themes_filter = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
-        elif a.startswith("--"):
-            # ★未知旗標一律硬停，不可靜默忽略（2026-08-04 實踩：`--basemap-dir <路徑>`
-            #   當時只支援 `=` 形式，空格形式落到下面的位置參數分支，**路徑被當成案名**，
-            #   於是 12 張圖與 圖層.gpkg 全寫到 outputs/<那串路徑>/ 的岔路資料夾，
-            #   真正的案件資料夾一個字都沒動，而程式全程回報「成功」。）
-            raise SystemExit(
-                f"未知旗標：{a}\n"
-                "  （若是值型旗標，請確認拼字；本腳本的值型旗標皆同時支援 "
-                "`--flag=值` 與 `--flag 值` 兩種寫法）")
-        else:
-            case_name = a
-        i += 1
-
-    if layout_mode not in ("compact", "maxmap"):
-        raise SystemExit(f"--layout 只接受 compact 或 maxmap，收到 {layout_mode!r}")
-    if themes_filter:
-        themes = [t for t in themes if t in themes_filter]
+    from make_maps_cli import parse_args
+    a = parse_args(sys.argv[1:])
+    case_name, only, exclude = a.case_name, a.cases, a.exclude
+    skip_extract, extract_only, overview_only = a.skip_extract, a.extract_only, a.overview_only
+    trust_shp, sitemap_path = a.trust_shp, a.sitemap
+    layout_mode, road_margin_cli = a.layout, a.road_margin
+    WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP = not a.no_qgz, a.mem, a.reuse_basemap
+    BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS = a.basemap_dir, a.show_loc_parcel, a.zoning_wmts
+    URBAN_SHP_OVERRIDE, URBAN_IMAGE_COUNTY = a.urban_shp, a.urban_image
+    BASE_LINE_THEMES, NO_NEIGHBOR_THEMES = a.base_line_themes, a.no_neighbor_themes
+    NO_LANDNO_THEMES, PARCEL_LINE_THEMES = a.no_landno_themes, a.parcel_line_themes
+    themes = list(THEMES[:4] if a.basic else THEMES)
+    if a.themes:
+        themes = [theme for theme in themes if theme in a.themes]
 
     out_dir = REPO_ROOT / "outputs" / case_name
     # maxmap 版面另存，全程不覆蓋既有 compact 成果（圖檔/05/qgz 皆加 _maxmap 後綴）
@@ -1715,9 +1635,7 @@ def main() -> None:
         cases = read_cases(out_dir / "02_比對結果.xlsx", only, exclude)
         print(f"出圖案場 {len(cases)} 個（排除 {sorted(exclude)}）", flush=True)
 
-    QgsApplication.setPrefixPath(QGIS_PREFIX, True)
-    app = QgsApplication([], True)
-    app.initQgis()
+    start_qgis()
     QgsSettings().setValue("qgis/networkAndProxy/networkTimeout", 120000)
 
     project = QgsProject.instance()
@@ -2553,9 +2471,11 @@ def main() -> None:
                 print(f"[警告] .qgz 寫入例外：{type(exc).__name__}: {exc}", flush=True)
         sys.stdout.flush()
     finally:
-        app.exitQgis()
+        # QGIS 在外層等本函式退場後才關閉；此處先放掉額外保活參照。
+        keep_alive.clear()
 
-    # QGIS 已結束，另起乾淨子進程把 CSV 轉成正式 xlsx（該子進程不載入 GDAL，無衝突）
+    # 另起乾淨子進程把 CSV 轉成正式 xlsx（子進程不載入 GDAL，無衝突）。
+    # 本函式退場、圖層／版面參照釋放之後，外層才結束 QGIS。
     _csv_to_xlsx(out05_csv, out05)
 
 

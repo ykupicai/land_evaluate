@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""整合總控：shp/土地清冊 → 基地 → 六張基本圖 + qgz（spec 2026-07-11）。
+"""整合總控：shp/土地清冊 → 基地 → 基本主題圖 + qgz（流程起源 spec 2026-07-11）。
 
 用法見 spec §3。停點：
 - 清冊模式首跑：解析出 01 後停（人工核對；--resume 續跑）。
@@ -331,17 +331,16 @@ def digest_fishpv(case_dir: Path) -> None:
     print(f"digest：sites_status.csv + sitemap.csv（{len(rows)} 地號，無段欄舊路徑）")
 
 
-# QGIS 已知收尾崩潰碼：5=QGIS 慣有結束碼；3221225477(0xC0000005 存取違例)=大量 GDAL
-# 圖磚處理後 app.exitQgis()/解譯器收尾時 libxml2 全域狀態損毀觸發（CLAUDE.md 已記錄），
-# 崩潰發生在產物都已成功寫出「之後」，屬無害的行程收尾雜訊。
+# 歷史 QGIS 異常碼，僅供明示的產物新鮮度備援檢查；不可單憑代碼認定無害。
+# 2026-09-17 已重現並修復 make_maps 的圖層晚於 exitQgis 釋放問題（GDAL 存取違例）。
+# maps 步驟恢復僅接受 0；其他舊步驟的有限備援仍保留。
 QGIS_CRASH_CODES = (5, 3221225477)
 
 
 def _run(cmd, cwd=None, label="", allowed=(0,), crash_artifact=None, fatal=True) -> bool:
     """執行子進程步驟；回傳是否成功。
 
-    - allowed：視為成功的 returncode（預設僅 0）。**只有 maps 步驟**因已知的
-      QGIS 收尾崩潰（見 QGIS_CRASH_CODES 註解）可由呼叫端明示放寬。
+    - allowed：視為成功的 returncode（預設僅 0）；make_maps 已修復收尾，不再放寬。
     - crash_artifact：extract/overview 等其餘 QGIS 步驟不豁免崩潰碼，但若
       returncode 屬 QGIS_CRASH_CODES 且指定的產物「本次執行期間剛寫出」，
       判定為收尾崩潰（產物已完成）→ 警告後放行；產物沒剛寫出則照樣失敗。
@@ -622,8 +621,8 @@ def main():
                 if chosen == "persite":
                     cmd += ["--sitemap", fp / "sitemap.csv"]
             cmd += passthru
-            # 僅 maps 豁免 QGIS 收尾崩潰碼（大量圖磚後已知崩潰，產物已寫出，見 QGIS_CRASH_CODES）
-            _run(cmd, label="六張圖+qgz", allowed=(0,) + QGIS_CRASH_CODES)
+            # 已修復收尾順序，異常結束必須回報，不再把存取違例當作成功。
+            _run(cmd, label="六張圖+qgz")
         elif s == "STOP_MODE":
             png = case_dir / "00_總區位圖.png"
             if png.exists():
