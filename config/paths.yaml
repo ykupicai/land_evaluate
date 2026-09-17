@@ -1,5 +1,5 @@
-# 外部相依路徑集中設定（換機器 / 搬專案 / 給同事時，只改這一個檔）。
-# 缺項或本檔不存在時，程式一律回退到內建預設值，故刪掉本檔也不會壞。
+# 外部相依路徑集中設定；個別機器建議改 paths.local.yaml，避免污染共用設定。
+# 缺項或本檔不存在時回退到內建預設值；預設路徑仍須在該機器上存在。
 # 核心參考圖資（地籍圖資/國土功能分區/都市計畫/環境敏感相關）仍用相對路徑，不列於此。
 
 # QGIS 安裝的 qgis-ltr 目錄（QgsApplication.setPrefixPath 用）
@@ -7,6 +7,14 @@ qgis_prefix: C:\Program Files\QGIS 3.40.12\apps\qgis-ltr
 
 # LUIMAP 官方色碼表；留空＝用本專案 config/luimap_colortable.csv（2026-07-26 起已 vendor）
 luimap_colortable: ""
+
+# 機器專屬設定可寫 config/paths.local.yaml（不進 Git）；非空值覆蓋本檔。
+# 留空 skills_root＝目前使用者的 .claude/skills（這些引擎是程式相依，不需安裝 Claude App）。
+skills_root: ""
+nas_gis_root: '\\192.168.1.134\Public-TN\3. 圖資\gis圖資'
+# 留空＝由 nas_gis_root 推導；離線複製到本機時可在 paths.local.yaml 指定。
+dem_path: ""
+breed_shp: ""
 
 # 註：臨路評估 2026-07-26 起改為產線內建（scripts/road_access.py），
 # 已不再相依外部「漁電共生評估」(fishpv) 專案，故原 fishpv_root 設定已移除。

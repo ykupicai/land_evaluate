@@ -1,0 +1,19 @@
+# 2026-09-16 工作機已驗證版本（系統 Python 3.14.0）；不是 QGIS Python 的升級清單。
+geopandas==1.1.2
+shapely==2.1.2
+numpy==2.4.2
+pandas==3.0.1
+pyogrio==0.12.1
+pyproj==3.7.2
+PyYAML==6.0.3
+openpyxl==3.1.5
+xlrd==2.0.2
+Pillow==12.1.1
+python-pptx==1.0.2
+requests==2.32.5
+scipy==1.17.1
+matplotlib==3.11.0
+dbfread==2.0.7
+pdfplumber==0.11.9
+PyMuPDF==1.27.2.3
+rasterio==1.5.0

@@ -16,6 +16,8 @@ __pycache__/
 
 # Claude Code：本機設定不進版控，但 .claude/rules/（團隊共用規則）要進
 .claude/settings.local.json
+config/paths.local.yaml
+.venv/
 
 # 案件來源/暫存檔（非程式碼）
 *.xls
