@@ -31,9 +31,9 @@
 版面沿用 build_layout.build_sheet_layout（與基本主題圖同框）。
 須用 QGIS 內建 python 執行。
 
-  & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_extra_maps.py `
+  .\\scripts\\qgis_python.ps1 scripts\\make_extra_maps.py `
       --joined <基地.shp> --case <案名> --theme 權屬
-  & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_extra_maps.py `
+  .\\scripts\\qgis_python.ps1 scripts\\make_extra_maps.py `
       --joined <基地.shp> --case <案名> --theme 環域 --buffer 200
 """
 from __future__ import annotations

@@ -194,7 +194,7 @@ python -X utf8 scripts\run_case.py --shp <基地.shp> --mode single --layout max
 **範例：要一張乾淨的分區圖**（無地號、無周邊線、基地黑框）：
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_maps.py <案名> `
+.\scripts\qgis_python.ps1 scripts\make_maps.py <案名> `
     --trust-shp <基地shp> --layout maxmap `
     --no-landno-themes=使用分區 --base-line-themes=使用分區 --no-neighbor-themes=使用分區
 ```
@@ -224,6 +224,9 @@ python -X utf8 scripts\run_case.py --shp <基地.shp> --mode single --layout max
 - `地籍圖資/`、`國土功能分區/`、`都市計畫/`、`環境敏感相關/`、`農地重劃區/` 各縣市 shp
 - `styles/*.qml`
 - QGIS 3.40.12 LTR（路徑固定：`C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat`）
+  ⚠ **一律經 `.\scripts\qgis_python.ps1` 呼叫，不要直接執行上面那支 .bat**——
+  直接執行會讀到別的專案 `pip --user` 裝的 numpy 2.x，所有底圖靜默消失（圖照出、回報成功）。
+  包裝腳本會隔離使用者 site-packages；`python -X utf8 scripts\doctor.py --qgis` 可檢查。
 - 系統 Python（跑階段1/2/2b）需有：`pandas`、`openpyxl`、`pyogrio`、`geopandas`、`pdfplumber`、`requests`、`pyyaml`、`dbfread`
 
 ## 逐階段指令
@@ -444,7 +447,7 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 ### 階段2d：臨路評估
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\road_access.py --joined <面積join.shp> --sitemap "outputs\<案子>\案場定義\sitemap.csv" --out "outputs\<案子>\臨路評估"
+.\scripts\qgis_python.ps1 scripts\road_access.py --joined <面積join.shp> --sitemap "outputs\<案子>\案場定義\sitemap.csv" --out "outputs\<案子>\臨路評估"
 ```
 
 國土利用 LUIMAP 圖磚 → 最近色分類向量化 → 逐宗基地**臨路三態**（直接臨路≤0.5m／需搭橋≤1.5m／不臨路；一般道路與防汛道路分別評估）＋地形組成＋**沿基地邊界法向量測之鄰接路寬**。
@@ -459,7 +462,7 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 ### 階段3：出圖（七主題，全都市案六張）
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_maps.py <案子資料夾名> --layout maxmap [--cases=004,005] [--road-margin=0]
+.\scripts\qgis_python.ps1 scripts\make_maps.py <案子資料夾名> --layout maxmap [--cases=004,005] [--road-margin=0]
 ```
 
 讀 `02_比對結果.xlsx`（或 `--trust-shp=<shp>`）+ 圖資，**預設輸出每案場 6 張 PNG**＋`05_出圖清單_maxmap.csv`＋`.qgz`。
@@ -477,7 +480,7 @@ python -X utf8 scripts\build_sites_sitemap.py --joined <面積join.shp> --out-di
 
 ```powershell
 python -X utf8 scripts\road_network.py --joined <cadastre\基地.shp> --out "outputs\<案子>"
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_locality_map.py --joined <面積join.shp> --case <案子名> --sites "outputs\<案子>\臨路評估\sites.shp"
+.\scripts\qgis_python.ps1 scripts\make_locality_map.py --joined <面積join.shp> --case <案子名> --sites "outputs\<案子>\臨路評估\sites.shp"
 ```
 
 圖層順序：**透明電子地圖 EMAP2 置最上層** → 宗基地（標 `site_id`）→ 基地地籍 → 都市計畫分區（45%）→ 不透明 EMAP 置最底。
@@ -491,7 +494,7 @@ python -X utf8 scripts\road_network.py --joined <cadastre\基地.shp> --out "out
 ### 階段3c：環境敏感套疊圖
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_env_map.py --joined <面積join.shp> --case <案子名> --alpha 0.40
+.\scripts\qgis_python.ps1 scripts\make_env_map.py --joined <面積join.shp> --case <案子名> --alpha 0.40
 ```
 
 讀 `環境敏感套疊.csv`（圖台①b 產物）挑出套疊面積>0 的圖層，解析到本機 `環境敏感相關/` 的 shp，出圖並產 `環境敏感套疊_逐類面積.csv`。
@@ -527,21 +530,21 @@ python -X utf8 scripts\road_network.py --joined <cadastre\基地.shp> --out "out
 ### 階段3d：補充主題圖
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 權屬
+.\scripts\qgis_python.ps1 scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 權屬
 ```
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 環域 --buffer 200
+.\scripts\qgis_python.ps1 scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 環域 --buffer 200
 ```
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 養殖漁業生產區
+.\scripts\qgis_python.ps1 scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 養殖漁業生產區
 ```
 
 **灌排水道（農田水利灌溉／排水渠道）**——法源：農地變更要點§5①二「有妨礙上、下游農業灌排水系統輸水能力之虞者，不同意變更使用」（**不同意變更事由，非成本問題**）。
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 灌排水道
+.\scripts\qgis_python.ps1 scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 灌排水道
 ```
 
 **坡度分段圖**——山坡地案的必備圖（簡報「開發強度限制」頁）。依非都市土地開發審議
@@ -551,7 +554,7 @@ python -X utf8 scripts\road_network.py --joined <cadastre\基地.shp> --out "out
 空間關係要看得見。
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 坡度
+.\scripts\qgis_python.ps1 scripts\make_extra_maps.py --joined <面積join.shp> --case <案子名> --theme 坡度
 ```
 
 ⚠ `slope_check.py` 產的 `坡度_percent.tif` 是**基地 bbox 矩形、未裁到基地邊界**；
@@ -565,7 +568,7 @@ python -X utf8 scripts\road_network.py --joined <cadastre\基地.shp> --out "out
 `申請範圍.shp`，不是原地號的面積join.shp。**
 
 ```powershell
-& "C:\Program Files\QGIS 3.40.12\bin\python-qgis-ltr.bat" scripts\make_extra_maps.py --joined <申請範圍.shp 或 面積join.shp> --case <案子名> --theme 隔離綠帶
+.\scripts\qgis_python.ps1 scripts\make_extra_maps.py --joined <申請範圍.shp 或 面積join.shp> --case <案子名> --theme 隔離綠帶
 ```
 
 ### 階段3e-0：部分變更編定（基地涉及公路時，先切再算綠帶）

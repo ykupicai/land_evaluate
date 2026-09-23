@@ -5,7 +5,30 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from config_loader import (DEFAULT_PATHS, load_paths, luimap_colortable_path,
-                           qgis_python_bat)
+                           qgis_env, qgis_python_bat)
+
+
+# ── qgis_env：隔離 user-site（2026-09-24 numpy 2.x 蓋掉 QGIS 自帶 1.x、底圖靜默消失） ──
+def test_qgis_env_隔離使用者site_packages():
+    assert qgis_env({"PATH": "x"})["PYTHONNOUSERSITE"] == "1"
+
+
+def test_qgis_env_保留其他環境變數():
+    env = qgis_env({"PATH": r"C:\bin", "QT_QPA_PLATFORM": "offscreen"})
+    assert env["PATH"] == r"C:\bin" and env["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_qgis_env_不修改全域os_environ(monkeypatch):
+    """只能影響子程序；改到全域會讓系統 Python 3.14 也一起忽略 user-site。"""
+    import os
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    qgis_env()
+    assert "PYTHONNOUSERSITE" not in os.environ
+
+
+def test_qgis_env_預設取自目前環境(monkeypatch):
+    monkeypatch.setenv("SOME_MARKER", "yes")
+    assert qgis_env()["SOME_MARKER"] == "yes"
 
 
 def test_load_paths_missing_file_uses_defaults(tmp_path):

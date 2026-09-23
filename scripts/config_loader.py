@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """專案外部路徑設定的單一讀取入口。"""
 from collections.abc import Callable
+import os
 from pathlib import Path
 
 import yaml
@@ -48,6 +49,26 @@ def luimap_colortable_path(repo_root: Path, paths: dict) -> Path:
 def qgis_python_bat(paths: dict) -> Path:
     """由 .../apps/qgis-ltr 推導 QGIS 隨附的 Python 啟動器。"""
     return Path(paths["qgis_prefix"]).parent.parent / "bin" / "python-qgis-ltr.bat"
+
+
+def qgis_env(base: dict | None = None) -> dict:
+    """啟動 QGIS 內建 Python 時要用的環境變數：**隔離使用者 site-packages**。
+
+    ⚠ 為什麼一定要（2026-09-24 阿里山案實踩）：Python 的 user-site 是**依版本號**
+    分資料夾（`%APPDATA%\\Python\\Python312\\site-packages`），不是依安裝位置。
+    本機另有一支 uv 裝的 CPython 3.12，別的專案用 `pip install --user` 裝了
+    numpy 2.5.3 進去——**QGIS 內建的 Python 3.12 也會讀同一個資料夾**，於是蓋掉
+    QGIS 自帶的 numpy 1.26.4，`osgeo.gdal_array` 匯入即失敗。
+    症狀非常陰：`nlsc_wmts.build_basemap` 讀不到圖磚、回 None，出圖腳本印一行
+    「底圖取得失敗」後**照樣出圖、回報成功**——只是整張圖少了正射／電子地圖底圖。
+
+    `PYTHONNOUSERSITE=1` 只影響這個子程序，不動全機設定、也不動那個專案的套件。
+    ⚠ 不要改成設全機環境變數：那會讓系統 Python 3.14 與 uv 專案一起忽略 user-site。
+    回傳新 dict，不修改 `os.environ`。
+    """
+    env = dict(os.environ if base is None else base)
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
 
 
 def resource_path(key: str, repo_root: Path | None = None, paths: dict | None = None) -> Path:

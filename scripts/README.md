@@ -12,7 +12,8 @@
 
 | 腳本 | 用途 |
 |---|---|
-| `doctor.py` | 唯讀環境健檢；`--qgis` 驗 GIS 匯入、`--nas` 檢查網路圖資。安裝步驟見 [環境建置與驗證](../docs/環境建置與驗證.md) |
+| `doctor.py` | 唯讀環境健檢；`--qgis` 驗 GIS 匯入（含 `gdal_array` 與 user-site 污染）、`--nas` 檢查網路圖資。安裝步驟見 [環境建置與驗證](../docs/環境建置與驗證.md) |
+| `qgis_python.ps1` | **呼叫 QGIS 內建 Python 的唯一入口**（取代直接執行 `python-qgis-ltr.bat`）：設 `PYTHONNOUSERSITE=1` 隔離使用者 site-packages，避免別的專案裝的 numpy 2.x 讓底圖靜默消失。QGIS 路徑讀 `config/paths(.local).yaml` |
 | `api_health.py` | 唯讀**外部服務**健檢（每週排程自動跑）：政府 API／圖台／圖磚今天還能不能用，含「都計圖台欄位有沒有被改名」。登錄表 `config/api_health.yaml`，說明見 [外部服務每週健檢](../docs/外部服務每週健檢.md) |
 | `case_inventory.py` | 唯讀盤點案件 STATE 與成果存在性，輸出索引；不自動認定結案 |
 | `config_loader.py` | 共用路徑設定；`paths.local.yaml` 可覆蓋 QGIS、外部引擎、NAS／DEM／養殖圖資位置 |

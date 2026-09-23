@@ -2,7 +2,7 @@
 """QGIS 版面組裝：最大化地圖 A4 橫式 ＋ 自動避讓角落疊圖 ＋ 只留圖例的右欄。
 
 必須用 QGIS 內建 python 執行（PowerShell）：
-  & "C:\\Program Files\\QGIS 3.40.12\\bin\\python-qgis-ltr.bat" your_driver.py
+  .\\scripts\\qgis_python.ps1 your_driver.py
 
 角落擺放決策委由 scripts/overlay_placement.py（純幾何、已單元測試）計算；本檔只負責
 把決策落成 QgsLayoutItem。與參考案 大量圖資轉換工具/scripts/make_maps.py 的 build_layout

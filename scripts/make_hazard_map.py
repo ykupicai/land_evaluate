@@ -26,7 +26,7 @@
 （不阻斷本圖其餘內容），並在標題列/console 印出略過原因。
 
 須用 QGIS 內建 python（要 osgeo 解 MVT、要 QGIS 出圖）：
-  & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_hazard_map.py --case <案名> [--county 臺北市]
+  .\\scripts\\qgis_python.ps1 scripts\\make_hazard_map.py --case <案名> [--county 臺北市]
 
 產出：
   <案>/崩塌土石流/*.geojson          各圖層（EPSG:3826，已裁到圖框附近）

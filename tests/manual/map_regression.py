@@ -44,7 +44,7 @@ def main():
     if a.child:
         child(a.phase, a.child, a.candidate_source)
         return
-    from config_loader import load_paths, qgis_python_bat
+    from config_loader import load_paths, qgis_env, qgis_python_bat
     AUDIT.mkdir(parents=True, exist_ok=True)
     if a.phase == 'baseline':
         code = subprocess.check_output(['git', 'show', '6e7573b:scripts/make_maps.py'], cwd=REPO)
@@ -66,8 +66,9 @@ def main():
                                      if a.candidate_source else []), cwd=REPO, stdout=stream,
                                     stderr=subprocess.STDOUT,
                                     # Windows 使用原生 Qt 字型後端；offscreen 會把中文字畫成黑方塊。
-                                    env=(dict(os.environ) if os.name == 'nt' else
-                                         {**os.environ, 'QT_QPA_PLATFORM': 'offscreen'}), timeout=600)
+                                    # 與產線 run_case 同一套環境（隔離 user-site），否則回歸測的不是正式環境。
+                                    env=(qgis_env() if os.name == 'nt' else
+                                         {**qgis_env(), 'QT_QPA_PLATFORM': 'offscreen'}), timeout=600)
         if not csv_path.exists() or csv_path.stat().st_mtime_ns == previous:
             raise RuntimeError(f'未產生新清單：{case}，請看 {log}')
         with csv_path.open(encoding='utf-8-sig', newline='') as stream:

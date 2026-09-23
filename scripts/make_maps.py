@@ -3,7 +3,7 @@
 階段3出圖：02_比對結果.xlsx → 每案場最多 7 張基本 A4 橫式 PNG ＋ 全案 .qgz ＋ 05_出圖清單.xlsx
 
 執行（必須用 QGIS 內建 Python，PowerShell 呼叫）：
-  & "C:\\Program Files\\QGIS 3.40.12\\bin\\python-qgis-ltr.bat" scripts\\make_maps.py \
+  .\\scripts\\qgis_python.ps1 scripts\\make_maps.py \
       [案子名] [--cases 030,004] [--exclude 021,023,038,063,086]
 
 trust-shp 模式（--trust-shp <基地.shp>，spec §5.1）：基地層幾何與屬性直接取自使用者

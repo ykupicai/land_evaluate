@@ -8,7 +8,7 @@
 可與其他主題維持同一比例尺（使用者定案 2026-07-29）。
 
 須用 QGIS 內建 python：
-  & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_locality_map.py `
+  .\\scripts\\qgis_python.ps1 scripts\\make_locality_map.py `
       --joined <基地.shp> --case <案名> [--sites <臨路評估/sites.shp>] [--margin 1500]
 """
 from __future__ import annotations

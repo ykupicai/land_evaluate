@@ -579,8 +579,20 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
 
 - 本機環境：Windows 11；系統 Python 3.14 有 geopandas/pyogrio；QGIS 3.40.12 LTR
   （機器上另裝 3.6~3.24 多版，**一律用 3.40.12**）且接了 MCP（工具名 `mcp__qgis__*`）。
-- **PyQGIS 要用 PowerShell 呼叫**：`& "<QGIS>\bin\python-qgis-ltr.bat" 腳本.py`；
+- **PyQGIS 要用 PowerShell 呼叫**：`.\scripts\qgis_python.ps1 腳本.py`；
   **Git Bash 會因路徑空白失敗**。哪幾支需要 QGIS python 見 `scripts/README.md`。
+- **⚠⚠ 不要直接執行 `python-qgis-ltr.bat`，一律經 `scripts\qgis_python.ps1`**（2026-09-24
+  阿里山案實踩）：Python 的使用者 site-packages 是**依版本號**分資料夾
+  （`%APPDATA%\Python\Python312\site-packages`），不是依安裝位置。本機另有 uv 裝的
+  CPython 3.12，別的專案（openai／speech 那一批）用 `pip --user` 把 **numpy 2.5.3** 裝進去——
+  **QGIS 內建 Python 3.12 讀同一個資料夾**，蓋掉自帶的 1.26.4，`osgeo.gdal_array` 匯入失敗。
+  **症狀極陰**：`nlsc_wmts.build_basemap` 回 None，出圖腳本印一行「底圖取得失敗」後
+  **照樣出圖、回報成功**——只是整張圖沒有正射／電子地圖底圖。
+  已做三層防護：①`scripts/qgis_python.ps1` 設 `PYTHONNOUSERSITE=1` 再呼叫 .bat；
+  ②`run_case._run` 對 QGIS 子程序自動套 `config_loader.qgis_env()`（系統 Python 子程序不動）；
+  ③`doctor.py --qgis` 改驗 **`gdal_array`**（9/16 版只驗 `gdal`，所以當時報全綠卻沒抓到）
+  並另列「user-site 污染」一項。**根治**＝把那個專案改用 venv 後清空該資料夾（跨專案，
+  使用者決定）。⚠ **不要改設全機 `PYTHONNOUSERSITE`**：系統 Python 3.14 與 uv 專案會一起失去 user-site。
 - **出圖時桌面版 QGIS 不要開著同一案子**：會鎖住 gpkg 與 `底圖\*.tif`。
   現象很陰——圖照出、六張都回報成功，但主題色或底圖整片空白，既有 tif 還會被弄壞成
   無 geotransform。不必打斷你的 QGIS：用 `--basemap-dir=<新資料夾>` 或 `--reuse-basemap`

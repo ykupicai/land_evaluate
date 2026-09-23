@@ -9,7 +9,7 @@
 放國土利用調查圖答非所問（使用者定案 2026-07-29）。
 
 須用 QGIS 內建 python 執行：
-  & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\make_env_map.py `
+  .\\scripts\\qgis_python.ps1 scripts\\make_env_map.py `
       --joined <基地.shp> --case <案名> [--env-csv <環境敏感套疊.csv>]
 
 無任何套疊時：不出圖、回傳 exit 0 並印「無套疊」，由簡報端決定不做該頁（使用者定案）。

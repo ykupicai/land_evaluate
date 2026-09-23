@@ -7,6 +7,41 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from run_case import (assessment_followups, execute_steps, find_from_index,
                       from_prereq_errors, plan_steps)
+import run_case as rc  # noqa: E402
+
+
+# ── QGIS 子程序一律隔離 user-site（2026-09-24） ──────────────────────────
+def test_is_qgis_cmd_辨識QGIS啟動器():
+    assert rc._is_qgis_cmd([rc.QGIS_BAT, "x.py"])
+    assert rc._is_qgis_cmd([str(rc.QGIS_BAT).upper(), "x.py"])   # Windows 大小寫不敏感
+    assert not rc._is_qgis_cmd([sys.executable, "x.py"])
+    assert not rc._is_qgis_cmd([])
+
+
+def _capture_run(monkeypatch):
+    seen = {}
+
+    class _R:
+        returncode = 0
+
+    def fake(cmd, cwd=None, env=None):
+        seen["env"] = env
+        return _R()
+    monkeypatch.setattr(rc.subprocess, "run", fake)
+    return seen
+
+
+def test_run_對QGIS子程序帶PYTHONNOUSERSITE(monkeypatch):
+    seen = _capture_run(monkeypatch)
+    assert rc._run([rc.QGIS_BAT, "make_maps.py"], label="t")
+    assert seen["env"]["PYTHONNOUSERSITE"] == "1"
+
+
+def test_run_系統Python子程序維持原環境(monkeypatch):
+    """env=None＝沿用父程序環境；不可一併隔離，系統 Python 的 user-site 不該被動到。"""
+    seen = _capture_run(monkeypatch)
+    assert rc._run([sys.executable, "-c", "pass"], label="t")
+    assert seen["env"] is None
 
 
 def test_assessment_followups_empty_case_lists_common_stages(tmp_path):
@@ -342,7 +377,7 @@ class _FakeProc:
 def _patch_subprocess(monkeypatch, rc, side_effect=None):
     import run_case
 
-    def fake(cmd, cwd=None):
+    def fake(cmd, cwd=None, env=None):   # 簽名比照 subprocess.run；_run 會帶 env（qgis_env）
         if side_effect:
             side_effect()
         return _FakeProc(rc)

@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from config_loader import load_paths, luimap_colortable_path, qgis_python_bat
+from config_loader import load_paths, luimap_colortable_path, qgis_env, qgis_python_bat
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -337,6 +337,14 @@ def digest_fishpv(case_dir: Path) -> None:
 QGIS_CRASH_CODES = (5, 3221225477)
 
 
+def _is_qgis_cmd(cmd) -> bool:
+    """指令的執行檔是否為 QGIS 內建 Python 啟動器（純函式，可單測）。"""
+    if not cmd:
+        return False
+    head = Path(str(cmd[0]))
+    return head.name.lower() == QGIS_BAT.name.lower() or head == QGIS_BAT
+
+
 def _run(cmd, cwd=None, label="", allowed=(0,), crash_artifact=None, fatal=True) -> bool:
     """執行子進程步驟；回傳是否成功。
 
@@ -348,7 +356,11 @@ def _run(cmd, cwd=None, label="", allowed=(0,), crash_artifact=None, fatal=True)
     """
     print(f"\n=== {label or ' '.join(map(str, cmd))} ===", flush=True)
     t0 = time.time()
-    r = subprocess.run([str(c) for c in cmd], cwd=cwd)
+    # QGIS 內建 Python 一律隔離 user-site（見 config_loader.qgis_env）：否則別的專案
+    # pip --user 裝的 numpy 2.x 會蓋掉 QGIS 自帶的 1.x，底圖靜默消失。
+    # 只對 QGIS 子程序套用；系統 Python 的子程序維持原環境。
+    env = qgis_env() if _is_qgis_cmd(cmd) else None
+    r = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env)
     if r.returncode in allowed:
         return True
     if crash_artifact is not None and r.returncode in QGIS_CRASH_CODES:

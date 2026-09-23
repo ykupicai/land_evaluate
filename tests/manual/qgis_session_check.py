@@ -44,11 +44,12 @@ def main():
     if args.child:
         child(args.child, args.source)
         return
-    from config_loader import load_paths, qgis_python_bat
+    from config_loader import load_paths, qgis_env, qgis_python_bat
     for mode in ('normal', 'error'):
         result = subprocess.run([str(qgis_python_bat(load_paths(REPO))), '-X', 'utf8',
                                  str(Path(__file__).resolve()), '--child', mode,
-                                 '--source', str(args.source.resolve())], timeout=60)
+                                 '--source', str(args.source.resolve())],
+                                env=qgis_env(), timeout=60)
         print(f'{mode}: returncode={result.returncode}', flush=True)
         if result.returncode:
             raise SystemExit(result.returncode)

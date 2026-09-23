@@ -28,7 +28,7 @@ r"""坡度分級檢核（開發審議規範總編§16 不可開發區）— **�
      20 m 網格會**平滑掉小尺度陡坡**，細部設計須用更高解析度或實測。
 
 用法（**須用 QGIS 內建 python**，要 osgeo）
-    & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\slope_check.py \\
+    .\\scripts\\qgis_python.ps1 scripts\\slope_check.py \\
         --joined <基地.shp> --out <案>\\坡度分級 [--sitemap <sitemap.csv>] \\
         [--dem <自訂DTM>] [--no-verify]
 輸出：坡度分級.csv／.json、坡度_DEM.tif、坡度_percent.tif、（驗證時）坡度_GT30.tif

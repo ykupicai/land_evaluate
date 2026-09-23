@@ -29,7 +29,7 @@
   50m ≈ 359×343m）差不多大。真正的省時來自上面的案型分流。
 
 用法（★需 QGIS 內建 python，因為要讀本機面圖層與算出圖範圍）：
-  & "<QGIS>\\bin\\python-qgis-ltr.bat" scripts\\nluz_landzone.py --case <案名>
+  .\\scripts\\qgis_python.ps1 scripts\\nluz_landzone.py --case <案名>
     [--limit N]              只處理前 N 筆（試跑/smoke test，建議先用小數字）
     [--neighbors auto|on|off] 是否連鄰地查（預設 auto＝依案型判斷，見上）
     [--skip-neighbors]       （相容舊指令）等同 --neighbors off
