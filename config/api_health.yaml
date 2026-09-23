@@ -1,0 +1,166 @@
+# 外部服務每週健檢的登錄表（scripts/api_health.py 讀本檔）。
+#
+# ⚠ 都市計畫縣市圖台**不在這裡登錄**——那 9 個縣市直接讀 scripts/urbanplan_fetch.py 的
+#   COUNTY／LANDNUM_COUNTY 註冊表，連「registry 對應的欄位是否還在」都一起驗。
+#   在這裡再抄一份 URL 只會分岔：註冊表改了、健檢還在測舊的，等於沒測。
+#
+# 每列欄位：
+#   id        報告與歷史比對的主鍵，改了會被當成新項目（舊項目算「消失」）
+#   名稱      給人看的
+#   影響      這條掛掉時「產線的哪一步會停」——週報上最重要的一欄，決定要不要馬上處理
+#   檢查      json / image / text / python（見 api_health.py 的 PROBES）
+#   url       受測網址（python 型不需要）
+#   必含鍵    json：頂層必須存在的鍵（缺 → FAIL，代表回的不是預期的服務）
+#   必含文字  json/text：回應字串必須包含（例 ArcGIS capabilities 要有 Query）
+#   最小位元組 image：小於此值判 FAIL（NLSC 對不存在的圖層回 0 bytes 空 gif，HTTP 仍 200）
+#   函式      python：api_health.PY_PROBES 裡的鍵
+#   逾時      秒，預設 30
+
+服務:
+  # ── 地籍（產線 ⓪a／⓪a'，斷了整條產線起不來）───────────────────────────
+  - id: moa-cadastre
+    名稱: 農業部地籍圖資（框查／逐筆查）
+    影響: ⓪a 取基地、⓪a' 取周邊地籍全停；fallback 與主路徑同一台主機，救不了
+    檢查: python
+    函式: moa_newest_version
+    逾時: 60
+
+  - id: moi-newold-landno
+    名稱: 內政部新舊地號查詢 API（MOI_API_011）
+    影響: 重測改號的地號查不到現行地號；⓪a 反查與鄰地補正會留白
+    檢查: text
+    url: https://openapi.moi.gov.tw/WEBAPI/LandNewOldQuery/1.0/QueryLandNo
+    必含文字: []
+    逾時: 45
+
+  - id: moi-public-land
+    名稱: 內政部公有土地開放資料（MOI_API_039，權屬）
+    影響: 公私別／管理機關查不到，權屬圖全變「無法判定」
+    檢查: python
+    函式: moi_public_land
+    逾時: 45
+
+  - id: moi-lisp-section
+    名稱: 內政部地段代碼查詢（LISP MMS，段名備援）
+    影響: 段名／段碼對照的線上備援中斷；本機 section_index.csv 仍可用，影響有限
+    檢查: text
+    url: https://lisp.land.moi.gov.tw/MMS/MMSpage.aspx
+    必含文字: ["地段"]
+
+  # ── 環境敏感（產線 ⓪b，正式初篩程序）──────────────────────────────────
+  - id: ngis-token
+    名稱: NGIS 環敏套疊（54 圖層，取 token）
+    影響: ⓪b 環敏套疊停擺，等於整案的環敏初篩做不了
+    檢查: python
+    函式: ngis_token
+    逾時: 60
+
+  - id: eland
+    名稱: 環境敏感地區單一窗口 eland（應免查範圍）
+    影響: 備選① 的應免查口徑取不到；正式查復仍須登入平台
+    檢查: text
+    url: https://eland.nlma.gov.tw/
+    必含文字: []
+    逾時: 45
+
+  # ── 圖磚底圖（產線 ③ 出圖）─────────────────────────────────────────────
+  # 座標取自臺北市內湖一帶 z16 圖磚；NLSC 對不存在的圖層一律回 0 bytes gif 且 HTTP 200，
+  # 故一定要驗位元組數，只看狀態碼會全綠。
+  - id: nlsc-photo2
+    名稱: NLSC 正射影像圖磚 PHOTO2
+    影響: 正射套疊、臨路判定底圖出不來
+    檢查: image
+    url: https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/16/27803/54879
+    最小位元組: 500
+
+  - id: nlsc-emap
+    名稱: NLSC 通用電子地圖圖磚 EMAP
+    影響: 區位圖、電子地圖底圖出不來；路名查證也靠這層
+    檢查: image
+    url: https://wmts.nlsc.gov.tw/wmts/EMAP/default/GoogleMapsCompatible/16/27803/54879
+    最小位元組: 500
+
+  - id: nlsc-luimap
+    名稱: NLSC 國土利用調查圖磚 LUIMAP
+    影響: 國土利用調查圖與 ②c 臨路評估（靠 LUIMAP 分類）全停
+    檢查: image
+    url: https://wmts.nlsc.gov.tw/wmts/LUIMAP/default/GoogleMapsCompatible/16/27803/54879
+    最小位元組: 500
+
+  - id: nlsc-nurban1
+    名稱: NLSC 非都市土地使用分區圖磚 nURBAN1
+    影響: --zoning-wmts 備選路徑失效（預設走向量，影響有限）
+    檢查: image
+    url: https://wmts.nlsc.gov.tw/wmts/nURBAN1/default/GoogleMapsCompatible/16/27803/54879
+    最小位元組: 500
+
+  - id: nlsc-buffer-api
+    名稱: 國土測繪中心環域查詢 API（醫療／文教／鄰避）
+    影響: 200 公尺距離條款的設施環域實算取不到；社福與營區本就須函詢
+    檢查: python
+    函式: nlsc_buffer
+
+  # ── 坡地災害（2026-09-13 打通，交付口徑僅供交叉核對）──────────────────
+  - id: landslide-cloud
+    名稱: 山崩雲 API（順向坡、大規模崩塌、崩塌目錄）
+    影響: 坡地災害檢核與 hazard 圖缺順向坡／崩塌資料
+    檢查: text
+    url: https://landslide.geologycloud.tw/
+    必含文字: []
+    逾時: 45
+
+  - id: ardswc-mvt
+    名稱: 水保署圖磚（土石流潛勢溪流／影響範圍／集水區）
+    影響: 土石流相關圖層取不到
+    檢查: text
+    url: https://gis.ardswc.gov.tw/
+    必含文字: []
+    逾時: 45
+
+  # ── 圖資換版來源（不影響當天出圖，但過期會出錯誤結論）────────────────
+  - id: tgos
+    名稱: TGOS 國家空間資料資產（環敏圖資換版下載）
+    影響: 本機環敏圖資無法更新；過舊圖資曾導致結論方向相反（NR23、BREED47）
+    檢查: text
+    url: https://www.tgos.tw/
+    必含文字: []
+    逾時: 45
+
+  - id: data-gov-tw
+    名稱: 政府資料開放平臺（門牌坐標等）
+    影響: 門牌坐標無法更新年度版本，聚落判定會用到過期門牌
+    檢查: text
+    url: https://data.gov.tw/
+    必含文字: []
+    逾時: 45
+
+  # ── 選用／外部參考 ─────────────────────────────────────────────────────
+  - id: overpass
+    名稱: OSM Overpass API
+    影響: 僅漁電相關 skill 的周邊道路參考；本產線不相依
+    檢查: text
+    url: https://overpass-api.de/api/status
+    必含文字: []
+    逾時: 45
+
+# 已知不納入健檢的主機（避免漂移檢查一直報同一批）：
+#   maps.app.goo.gl   使用者貼的 Google 短網址，非服務相依
+#   mrcc.com          註解引用
+#   maps.nlsc.gov.tw  2026-08-07 查證為死路（無都計圖層），留註解備忘用
+#   easymap.moi.gov.tw / map.moa.gov.tw / cop.moi.gov.tw  文件與規格頁，非執行路徑
+#   landquery.taichung.gov.tw / land-query.tainan.gov.tw / www2.land.pthg.gov.tw /
+#   www.land.tycg.gov.tw / www.land.moi.gov.tw  探勘紀錄中的網址，現行流程未使用
+不檢查主機:
+  - maps.app.goo.gl
+  - mrcc.com
+  - maps.nlsc.gov.tw
+  - easymap.moi.gov.tw
+  - map.moa.gov.tw
+  - cop.moi.gov.tw
+  - landquery.taichung.gov.tw
+  - land-query.tainan.gov.tw
+  - www2.land.pthg.gov.tw
+  - www.land.tycg.gov.tw
+  - www.land.moi.gov.tw
+  - imap
+  - overpass.kumi.systems   # Overpass 的備援鏡像，主站已納入健檢

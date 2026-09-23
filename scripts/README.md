@@ -13,6 +13,7 @@
 | 腳本 | 用途 |
 |---|---|
 | `doctor.py` | 唯讀環境健檢；`--qgis` 驗 GIS 匯入、`--nas` 檢查網路圖資。安裝步驟見 [環境建置與驗證](../docs/環境建置與驗證.md) |
+| `api_health.py` | 唯讀**外部服務**健檢（每週排程自動跑）：政府 API／圖台／圖磚今天還能不能用，含「都計圖台欄位有沒有被改名」。登錄表 `config/api_health.yaml`，說明見 [外部服務每週健檢](../docs/外部服務每週健檢.md) |
 | `case_inventory.py` | 唯讀盤點案件 STATE 與成果存在性，輸出索引；不自動認定結案 |
 | `config_loader.py` | 共用路徑設定；`paths.local.yaml` 可覆蓋 QGIS、外部引擎、NAS／DEM／養殖圖資位置 |
 | `make_maps_cli.py` | `make_maps` 參數解析；獨立於 QGIS，可單元測試 |
