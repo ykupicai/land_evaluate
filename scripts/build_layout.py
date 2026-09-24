@@ -206,14 +206,18 @@ def build_sheet_layout(project, name, layers, legend_layers,
     # 4) 圖例：右下方框（YAML 定案，取代右欄）；依地圖範圍動態過濾、長標籤依「／」換行
     leg = QgsLayoutItemLegend(layout)
     leg.setLinkedMap(m)
+    # ⚠ 圖例清單要改在圖例「自己的」自訂樹上（setAutoUpdateModel(False) 時 QGIS 會
+    #   複製一棵存在圖例內部），**不可另建 QgsLayerTree() 再 setRootGroup 換進去**：
+    #   那樣畫圖時有效，但存 .qgz 時 QGIS 序列化的是圖例內部那棵（空的），重開後圖例
+    #   退回「列出整個專案圖層樹」——多出群組標題、光柵波段，原本挑好的項目不見
+    #   （2026-09-24 阿里山案重開 qgz 實見；內湖案 make_maps 產的 qgz 同樣受害）。
     leg.setAutoUpdateModel(False)
-    root = QgsLayerTree()
-    keep_alive.append(root)
+    root = leg.model().rootGroup()
+    root.removeAllChildren()
     for lyr in legend_layers:
         node = root.addLayer(lyr)
         if lyr.name() in legend_hide_title:
             QgsLegendRenderer.setNodeLegendStyle(node, QgsLegendStyle.Hidden)
-    leg.model().setRootGroup(root)
     # 光柵圖例會自動多一行「Band 1 (Gray)」（波段名）——對讀者毫無意義，又在只有
     # 45mm 寬的右欄白占一行。逐層挑掉該節點（2026-08-04 坡度分段圖實需）。
     for lyr in legend_layers:
