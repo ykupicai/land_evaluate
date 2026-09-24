@@ -850,6 +850,23 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
   同一支 `PublicLandOData` **加了版本段**（`/1.0/...`）就恆回 `CODE=999`——它沒有版本段。
   順帶測出 **`/WEBAPI/` 錯誤碼可用來定位問題**：`312`＝系統名不存在／`404 HTML`＝
   系統存在但介面名錯／`302`＝路由對只是參數錯／`101`＝路徑段數不對。
+  ⚠⚠ **★`openapi.moi.gov.tw` 曾「裝錯憑證」整站連不上，不是 API 下架、也不必換網域**
+  （2026-09-22 `api_health.py` 首跑抓到，09-24 複驗已自行修好）：該主機當時裝的是發給
+  **`openapi.land.moi.gov.tw`**（另一台、回 HTML 網頁不是 API）的憑證，SAN 只有那個名字，
+  造成 **hostname mismatch**，凡是做正常憑證驗證的 client 全部連不上——`public_land.py`
+  （MOI_API_039 權屬）與 `latlon_to_parcel.newold_query`（MOI_API_011 新舊地號）同時掛掉。
+  **兩支都走 urllib＋系統憑證存放區，不受健檢那個 govtls 放寬 strict 的影響**。
+  判斷方法：`ssl` 直連取 peer cert 看 **Subject CN 與 SAN 是不是本主機名**；
+  若關掉主機名驗證後服務照常回資料，那就是**憑證裝錯、服務活著**，等站方換回即可，
+  **不要據此改網域、也不要改端點**。09-24 複驗：CN/SAN 皆為 `openapi.moi.gov.tw`、
+  簽發 TWCA、效期 2025-11-25～2026-11-25，DNS 單一 IP（210.69.87.109）、連 8 次同一張，
+  兩支 API 在**完整憑證驗證**下實測正常（權屬回 133 筆、新舊地號回結構正確 JSON）。
+  ⚠ **絕不可為了繞過它把產線改成 `verify=False`／`check_hostname=False`**——那是安全性
+  降級，且會讓下次真的被換站時完全無感；這類處置一律由使用者裁示。
+  ⚠ 順帶查明（尚未修，使用者 2026-09-24 裁示只記錄不動碼）：`api_health.py` 的
+  `py_moi_public_land` 只數 `RESPONSE[].NATIONAL.PUBLIC`（布袋段 90 筆），而產線
+  `public_land.query_section` **另外還讀 `COUNTY.PUBLIC`（43 筆，合計 133）**——
+  哪天 COUNTY 分支消失，健檢仍會亮綠燈，但權屬圖會靜默漏掉「縣市有」的公有地。
 - **國土測繪中心環域查詢 API**：`api.nlsc.gov.tw/other/MarkBufferAnlys/{ep}/經度/緯度/半徑`，
   免認證。ep：`med` 醫療、`edu` 文教、`dis` 鄰避。
   ⚠️ **`/com` 工商回空字串而非空陣列＝端點碼有問題，不可視為查無**；回 `[]` 才是確實查無。
