@@ -24,7 +24,8 @@ from pathlib import Path
 from qgis.core import (
     Qgis, QgsCoordinateReferenceSystem, QgsFeature, QgsFeatureRequest, QgsFillSymbol,
     QgsGeometry, QgsMarkerSymbol, QgsPalLayerSettings, QgsPointXY, QgsRectangle,
-    QgsTextBufferSettings, QgsTextFormat, QgsVectorLayer, QgsVectorLayerSimpleLabeling,
+    QgsProject, QgsTextBufferSettings, QgsTextFormat, QgsVectorFileWriter, QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtGui import QColor, QFont
 
@@ -45,8 +46,12 @@ class DistrictLayers:
 
 
 def district_layers(case_dir, project, keep_alive: list, extent: QgsRectangle,
-                    title: str = "行政區界", label: bool = True) -> DistrictLayers:
-    """回傳可直接併進 layers／legend 的行政區界圖層組；無檔案時回空的 DistrictLayers。"""
+                    title: str = "行政區界", label: bool = True,
+                    tag: str = "") -> DistrictLayers:
+    """回傳可直接併進 layers／legend 的行政區界圖層組；無檔案時回空的 DistrictLayers。
+
+    `tag`：區名標註層的落地檔名後綴（見 `_persist_labels`）。**逐案場出圖務必給**
+    （make_maps 給案場 ID），否則每個案場的標註層會互相覆寫同一個檔。"""
     out = DistrictLayers()
     shp = Path(case_dir) / "行政區界" / "行政區界.shp"
     if not shp.exists():
@@ -113,7 +118,44 @@ def district_layers(case_dir, project, keep_alive: list, extent: QgsRectangle,
     pal.setFormat(tf)
     pts.setLabeling(QgsVectorLayerSimpleLabeling(pal))
     pts.setLabelsEnabled(True)     # setLabeling 不會自己開啟標註
+    pts = _persist_labels(pts, Path(case_dir), tag)
     project.addMapLayer(pts, False)
     keep_alive.append(pts)
     out.layers.insert(0, pts)      # 標註層放最上層
     return out
+
+
+def _persist_labels(pts: QgsVectorLayer, case_dir: Path, tag: str) -> QgsVectorLayer:
+    """區名標註層落地成實體 gpkg 再讀回；**記憶體層存不進 .qgz**。
+
+    `project.write()` 對 memory provider 只記下 `Point?crs=...` 這串 uri，重開 .qgz
+    時該層是空的——圖上的區名整批消失，與交付 PNG 不一致（與 make_maps 的圖例代理層
+    同一個病，2026-09-24 一併修）。落地失敗一律退回原記憶體層，不阻斷出圖。
+    """
+    try:
+        out_dir = case_dir / "行政區界"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        gpkg = out_dir / (f"區名標註{('_' + tag) if tag else ''}.gpkg")
+        if gpkg.exists():
+            gpkg.unlink()
+        opt = QgsVectorFileWriter.SaveVectorOptions()
+        opt.driverName = "GPKG"
+        opt.layerName = "區名標註"
+        opt.fileEncoding = "UTF-8"
+        opt.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+        res = QgsVectorFileWriter.writeAsVectorFormatV3(
+            pts, str(gpkg), QgsProject.instance().transformContext(), opt)
+        if res[0] != QgsVectorFileWriter.NoError:
+            raise RuntimeError(f"寫入失敗 {res}")
+        lyr = QgsVectorLayer(f"{gpkg}|layername=區名標註", pts.name(), "ogr")
+        if not lyr.isValid():
+            raise RuntimeError(f"讀回失敗 {gpkg}")
+        if not lyr.crs().isValid():
+            lyr.setCrs(QgsCoordinateReferenceSystem(CRS))
+        lyr.setRenderer(pts.renderer().clone())
+        lyr.setLabeling(pts.labeling().clone())
+        lyr.setLabelsEnabled(True)
+        return lyr
+    except Exception as exc:  # noqa: BLE001 — 落地失敗只影響 qgz，不可阻斷出圖
+        print(f"  ⚠ 區名標註層落地失敗（qgz 重開後區名會消失）：{type(exc).__name__}: {exc}")
+        return pts

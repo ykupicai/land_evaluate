@@ -301,6 +301,7 @@ outputs/<日期>_<案名>/
   案場定義/         sitemap.csv（必含「段」欄）、sites.shp
   臨路評估/         成果.xlsx、sites.shp、features.geojson
   圖層.gpkg、底圖/、圖檔_maxmap/、<案名>_maxmap.qgz
+  圖例_maxmap/          圖例代理層落地檔（qgz 存不住記憶體層，見「踩過的坑」）
   國土功能分區.csv、環境敏感套疊.csv／環敏NGIS.csv/.json  ← 平台/API 查得的逐筆資料
   禁止事由檢核.txt/.json、聚落檢核.*、設施環域查詢.*、逐案場統計.json  ← 檢核與統計
   build_deck.py、*.pptx、*.pptx.dump.txt   ← 簡報內容檔與防蓋改鎖指紋
@@ -639,6 +640,28 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
      等工作函式退場（含例外 traceback locals 清理）、清除 project／循環參照後才關閉 QGIS。
      `run_case` 的 maps 步驟不再豁免異常碼；麻豆／七股副本均 returncode 0。
      詳見 `docs/2026-09-17_QGIS收尾修復.md`，勿再把此缺陷直接歸因於 libxml2 或視為無害。
+- **★★ `.qgz` 重開後的圖例／圖層與交付 PNG 不一致（2026-09-24 西湖北安段案實證並修復）**：
+  出圖當下一切正常——PNG 正確、05 清單記「成功」、退出碼 0——**只有把 qgz 在 QGIS 重開
+  才看得到**：使用分區版面的都市計畫色塊整組不見、換成案件群組標題且圖例框溢出圖外，
+  權屬版面整層公私別分色消失只剩紅框（該案五個版面重新匯出後 1.6%~84.5% 不等的畫面不同）。
+  使用者開 qgz 修編時看到的一直不是交付的那張圖。三個成因都是「這東西根本沒被
+  `project.write()` 寫進去」：
+    ① **自訂圖例樹**：`setAutoUpdateModel(False)` 時 QGIS 會在圖例內部複製一棵 layer tree，
+       **不可另建 `QgsLayerTree()` 再 `setRootGroup()` 換進去**（換進去那棵不會被序列化，
+       重開後圖例退回列出整個專案圖層樹）。要在 `leg.model().rootGroup()` 上
+       `removeAllChildren()` 再 `addLayer()`。
+    ② **`memory` provider 的圖層存不進 qgz**（只記下 `memory?geometry=…` 這串 uri）。
+       圖例代理層（都市計畫分區、`--urban-image` 彩繪取樣、國土利用類別）與行政區界的
+       區名標註層一律落地成實體 gpkg 再讀回：`make_maps.persist_legend_layer()`、
+       `district_line._persist_labels()`。⚠ **一個代理層一個檔**，不共用同一個 gpkg 的多張表
+       （同檔多表會踩 `make_table_copies` 記的那個 GDAL 共用連線 crs()/extent() 失效問題）。
+    ③ **沒 `addMapLayer` 的圖層不會被寫進 qgz**：權屬層 `l_own` 當初只 `keep_alive`。
+  ⚠ **新增任何進圖面或圖例的圖層時，兩件事一起檢查：有沒有 `project.addMapLayer`、
+  是不是 memory provider。** 兩者都不會讓出圖失敗，所以沒有其他測試抓得到。
+  驗收工具＝`tests/manual/qgz_legend_check.py`（重開 qgz、每個版面重新匯出、逐像素比對
+  交付 PNG）；錯法已鎖進 `tests/test_qgz_legend_persist.py`。詳 `docs/2026-09-24_qgz圖例修復.md`。
+  ⚠ **既有案件的 qgz 不會自己變好**，要重跑 `make_maps`（`--skip-extract --reuse-basemap`
+  即可，不必重抓圖資；畫面內容不變，已逐像素驗證）。
 - **線圖層標註要設 placement**：`QgsPalLayerSettings` 預設 AroundPoint，線圖層會**完全標不
   出來**。要 `Qgis.LabelPlacement.Curved` ＋ `QgsLabelLineSettings.setPlacementFlags(
   AboveLine|OnLine)`／`setMergeLines(True)`。`make_extra_maps.label_field(..., line=True)`
