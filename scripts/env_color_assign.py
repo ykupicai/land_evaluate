@@ -46,3 +46,18 @@ def assign_layer_colors(resolved: list, palette: list) -> dict:
         used.add(color)
         out[name] = color
     return out
+
+
+def is_full_coverage(cover_area: float, site_area: float, n_hits: int) -> bool:
+    """本層是否改畫 45° 斜線紋理（不用實心填色）。
+
+    規則：本層**實際**覆蓋 ≥99% **且** 還有別的圖層要看（n_hits ≥2）。
+    只有單一命中項時一律給透明填色，否則邊界落在圖框外、畫面近乎全空（湖口案）。
+
+    ⚠ `cover_area` 必須是本層 dissolve 後與基地的**實際交集面積**，不可用 NGIS 清單的
+    單列面積：NGIS 逐面各回一列，圖層被切成好幾塊時每列都 <99%，永遠判不成全覆蓋
+    （2026-09-24 阿里山案：自來水 2 塊、水庫集水區 2 塊、國有林 4 塊，實際都 100%，
+    卻被畫成實心填色、疊成一片糊）。也不可把各列相加——同圖層要素互相重疊時會重複
+    計算（2026-09-13 內湖案捷運禁限建三面重疊，相加 50.3%、實際 36.04%）。
+    """
+    return site_area > 0 and n_hits >= 2 and cover_area >= 0.99 * site_area

@@ -47,7 +47,7 @@ EXPORT_DPI = 300
 
 # 圖層登錄表與解析已抽至 env_registry.py（純模組、可單測；REGISTRY 的自然保留區
 # 1152→1061 順序由 tests/test_env_registry.py 鎖住）。本檔只留 QGIS 出圖端。
-from env_color_assign import assign_layer_colors  # noqa: E402
+from env_color_assign import assign_layer_colors, is_full_coverage  # noqa: E402
 from env_registry import (  # noqa: E402
     DEFAULT_ALPHA, GENERIC_PALETTE, REGISTRY, resolve_layer,
 )
@@ -82,6 +82,19 @@ def hatch_symbol(rgb, angle: float = 45.0, spacing: float = 5.0,
         "color": "%d,%d,%d,255" % tuple(rgb), "width": str(width)}))
     sym.appendSymbolLayer(lp)
     return sym
+
+
+def real_coverage(shp: Path, rule: dict, geom: QgsGeometry, bb: QgsRectangle) -> float:
+    """本層與基地的實際重疊面積：全部要素先 dissolve 再求交集，重疊要素不重複計算。"""
+    lyr = QgsVectorLayer(str(shp), "_cover_probe", "ogr")
+    if not lyr.isValid():
+        return 0.0
+    if not lyr.crs().isValid() and rule.get("crs"):
+        lyr.setCrs(QgsCoordinateReferenceSystem(f"EPSG:{rule['crs']}"))
+    parts = [geom.intersection(f.geometry())
+             for f in lyr.getFeatures(QgsFeatureRequest().setFilterRect(bb))]
+    parts = [p for p in parts if not p.isEmpty()]
+    return QgsGeometry.unaryUnion(parts).area() if parts else 0.0
 
 
 def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPHA,
@@ -213,6 +226,11 @@ def main():
     red = QgsFillSymbol.createSimple({
         "color": "255,255,255,0", "outline_color": "200,0,0,255", "outline_width": "0.9"})
     site.renderer().setSymbol(red)
+    # 基地標地號：地圖出圖版面規範 v2「基地疊粗紅框並標地號」，基本主題圖都有、本圖原本漏了
+    #（多筆基地時看不出哪塊是哪一筆，表格又逐筆列面積，讀者對不起來）。
+    if site.fields().indexFromName("地號") >= 0:
+        from make_extra_maps import label_field  # noqa: PLC0415
+        label_field(site, "地號", size=10)
     project.addMapLayer(site, False)
     keep_alive.append(site)
 
@@ -248,11 +266,17 @@ def main():
             continue
         subs = rule.get("_subs", {})
         title = rule["title"].format(**subs) if "{" in rule["title"] else rule["title"]
-        outline_only = area >= 0.99 * geom_area and len(hits) >= 2
+        # ⚠ 全覆蓋判定要用「本層 dissolve 後的實際覆蓋」，**不可用 hits 的 area**：
+        #   hits 經上方同名去重後只留「最大那一列」，而 NGIS 是逐面各回一列——圖層被切成
+        #   好幾塊時，每塊都 <99%，就永遠判不成全覆蓋（2026-09-24 阿里山案：自來水 2 塊、
+        #   水庫集水區 2 塊、國有林 4 塊，實際都 100%，卻被畫成實心填色、疊成一片糊）。
+        #   也不能改成把各列相加——同圖層要素互相重疊時會重複計算（內湖案捷運禁限建）。
+        cover = real_coverage(shp, rule, geom, bb)
+        outline_only = is_full_coverage(cover, geom_area, len(hits))
         lyr = load_env_layer(shp, rule, title, alpha=a.alpha, outline_only=outline_only,
                              fallback_rgb=layer_colors.get(name, (127, 127, 127)))
         if outline_only:
-            print(f"    （{title} 覆蓋率 {100 * area / geom_area:.1f}% ≥99%，"
+            print(f"    （{title} 覆蓋率 {100 * cover / geom_area:.1f}% ≥99%，"
                   f"改畫 45° 斜線紋理，不用實心填色）")
         if lyr is None:
             print(f"  ⚠ 圖層讀取失敗：{shp}")

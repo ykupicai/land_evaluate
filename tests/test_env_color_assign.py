@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from env_color_assign import assign_layer_colors  # noqa: E402
+from env_color_assign import assign_layer_colors, is_full_coverage  # noqa: E402
 
 PALETTE = [(214, 39, 40), (255, 127, 14), (148, 103, 189), (23, 190, 207),
            (188, 189, 34), (227, 119, 194), (44, 160, 44), (31, 119, 180)]
@@ -51,3 +51,33 @@ def test_色環全被語意色占滿仍能運作不crash():
     resolved.append(("多出來的無色層", "y.shp", {"rgb": None}))
     colors = assign_layer_colors(resolved, PALETTE)
     assert len(colors) == len(PALETTE) + 1
+
+
+# ── 全覆蓋改畫斜線的判定（2026-09-24 阿里山案：圖層切成多塊就判不成全覆蓋） ──────
+SITE = 828_129.93
+
+
+def test_實際覆蓋100_且有其他圖層_改畫斜線():
+    assert is_full_coverage(SITE, SITE, n_hits=8)
+
+
+def test_單一命中項即使100也維持填色():
+    """只有一層時改外框，邊界多半在圖框外、畫面近乎全空（湖口案）。"""
+    assert not is_full_coverage(SITE, SITE, n_hits=1)
+
+
+def test_未達99不改():
+    assert not is_full_coverage(0.95 * SITE, SITE, n_hits=8)   # 森林區 95%
+    assert is_full_coverage(0.99 * SITE, SITE, n_hits=2)       # 門檻含等於
+
+
+def test_要傳實際覆蓋而不是NGIS單列面積():
+    """錯法鎖成斷言：NGIS 自來水回兩列 818,802.20＋9,327.76，最大列只有 98.87%——
+    拿它判定會漏判；實際 dissolve 覆蓋 828,129.93（100%）才是正確輸入。"""
+    rows = [818_802.20, 9_327.76]
+    assert not is_full_coverage(max(rows), SITE, n_hits=8)      # 舊錯法：漏判
+    assert is_full_coverage(SITE, SITE, n_hits=8)               # 正解：實際覆蓋
+
+
+def test_基地面積為零不判全覆蓋():
+    assert not is_full_coverage(0.0, 0.0, n_hits=3)
