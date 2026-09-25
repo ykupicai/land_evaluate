@@ -94,7 +94,6 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsFillSymbol,
     QgsGeometry,
-    QgsLayerTree,
     QgsLayoutExporter,
     QgsLayoutItemLabel,
     QgsLayoutItemLegend,
@@ -221,6 +220,7 @@ BASE_LINE_WIDTH = "0.5"      # 基地線寬（＝預設紅框寬），改黑後�
 # paths.yaml 的 luimap_colortable 可覆寫。
 LUIMAP_COLORTABLE = luimap_colortable_path(REPO_ROOT, _PATHS)
 LUIMAP_SHARE_MIN = 0.005  # 圖例列入門檻（面積佔比）
+LEGEND_DIR = None      # `<案>/圖例{sfx}/`：圖例代理層落地處（見 persist_legend_layer）
 
 
 def _basemap(extent_3826, out_tif, **kw):
@@ -1158,10 +1158,56 @@ def urban_fullname_field(lyr: QgsVectorLayer, candidates: tuple[str, ...],
     return best
 
 
+def persist_legend_layer(mem: QgsVectorLayer, stem: str, keep_alive: list,
+                         warnings: list | None = None) -> QgsVectorLayer:
+    """把「只為了出圖例而造的記憶體層」寫成實體 gpkg 再讀回；**否則 .qgz 存不住它**。
+
+    memory provider 的資料只活在本次 process：`project.write()` 只記下
+    `memory?geometry=Polygon&...` 這串 uri，重開 .qgz 時該層是空的、圖例整格消失
+    （2026-09-24 西湖北安段案實見：使用分區版面的都市計畫色塊全不見）。落地成實體檔
+    之後，這些代理層就跟其他圖層一樣能被 qgz 還原，重開的圖例才與交付 PNG 一致。
+
+    ⚠ **一個代理層一個檔**，不共用同一個 gpkg 的多張表：同一實體檔內不同表格名稱會
+      觸發 GDAL/OGR 共用 SQLite 連線、crs()/extent() 持續讀成空值的問題
+      （成因與實證見 make_table_copies 的 docstring）。
+    落地失敗一律退回原記憶體層並記警告——圖照出（PNG 不受影響），只是 qgz 存不住。
+    """
+    keep_alive.append(mem)
+    if LEGEND_DIR is None:
+        return mem
+    try:
+        LEGEND_DIR.mkdir(parents=True, exist_ok=True)
+        gpkg = LEGEND_DIR / f"{sanitize(stem)}.gpkg"
+        if gpkg.exists():
+            gpkg.unlink()
+        opt = QgsVectorFileWriter.SaveVectorOptions()
+        opt.driverName = "GPKG"
+        opt.layerName = "圖例"
+        opt.fileEncoding = "UTF-8"
+        opt.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+        res = QgsVectorFileWriter.writeAsVectorFormatV3(
+            mem, str(gpkg), QgsProject.instance().transformContext(), opt)
+        if res[0] != QgsVectorFileWriter.NoError:
+            raise RuntimeError(f"寫入失敗 {res}")
+        out = QgsVectorLayer(f"{gpkg}|layername=圖例", mem.name(), "ogr")
+        if not out.isValid():
+            raise RuntimeError(f"讀回失敗 {gpkg}")
+        ensure_gpkg_crs(out)
+        out.setRenderer(mem.renderer().clone())
+        keep_alive.append(out)
+        return out
+    except Exception as exc:  # noqa: BLE001 — 落地失敗不可阻斷出圖
+        if warnings is not None:
+            warnings.append(f"圖例代理層落地失敗（{stem}），"
+                            f"qgz 重開後該圖例會是空的：{type(exc).__name__}: {exc}")
+        return mem
+
+
 def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
                             color_to_names: dict[str, list[str]],
                             keep_alive: list,
-                            zone_field: str = URBAN_ZONE_FIELD) -> QgsVectorLayer | None:
+                            zone_field: str = URBAN_ZONE_FIELD,
+                            tag: str = "", warnings: list | None = None) -> QgsVectorLayer | None:
     """建圖例專用小圖層：案場出圖範圍內實際出現的都市計畫 Color1 → 分區名清單。
     不掛進地圖圖層清單（不渲染），只放進 legend_layers 供圖例面板顯示；
     每類別放 1 個位於 extent 中心的假幾何，確保 setLegendFilterByMapEnabled 不會濾掉它。"""
@@ -1208,8 +1254,7 @@ def urban_zone_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
         geom = QgsGeometry.fromRect(QgsRectangle(cx - half, cy - half, cx + half, cy + half))
         add_feat(lyr, geom, [str(i)])
     lyr.setRenderer(QgsCategorizedSymbolRenderer("cat", cats))
-    keep_alive.append(lyr)
-    return lyr
+    return persist_legend_layer(lyr, f"{tag}_都市計畫分區", keep_alive, warnings)
 
 
 def luimap_legend_categories(features_geojson: Path, colortable_csv: Path,
@@ -1245,7 +1290,8 @@ def luimap_legend_categories(features_geojson: Path, colortable_csv: Path,
 
 def urban_image_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
                              image_tif: str, zone_field: str,
-                             keep_alive: list) -> QgsVectorLayer | None:
+                             keep_alive: list, tag: str = "",
+                             warnings: list | None = None) -> QgsVectorLayer | None:
     """圖例層：分區名 → **從官方分區彩繪圖實地取樣**的顏色（--urban-image 專用）。
 
     為什麼不讀向量的 `Color1`：臺北市圖台對住宅區／商業區整類回 `0,0,0`（黑），
@@ -1298,8 +1344,7 @@ def urban_image_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
         add_feat(lyr, QgsGeometry.fromRect(QgsRectangle(
             cx - half, cy - half, cx + half, cy + half)), [str(i)])
     lyr.setRenderer(QgsCategorizedSymbolRenderer("cat", cats))
-    keep_alive.append(lyr)
-    return lyr
+    return persist_legend_layer(lyr, f"{tag}_都市計畫分區_彩繪取樣", keep_alive, warnings)
 
 
 def road_status_color(status: str) -> tuple:
@@ -1428,14 +1473,18 @@ def build_layout(project: QgsProject, name: str, title: str, layers: list,
     # 圖例
     leg = QgsLayoutItemLegend(layout)
     leg.setLinkedMap(m)
+    # ⚠ 圖例清單要改在圖例「自己的」自訂樹上（setAutoUpdateModel(False) 時 QGIS 會
+    #   複製一棵存在圖例內部），**不可另建 QgsLayerTree() 再 setRootGroup 換進去**：
+    #   那樣畫圖時有效，但存 .qgz 時 QGIS 序列化的是圖例內部那棵（空的），重開後圖例
+    #   退回「列出整個專案圖層樹」——多出群組標題、光柵波段，原本挑好的項目不見
+    #   （2026-09-24 西湖北安段案重開 qgz 實見；與 build_layout.build_sheet_layout 同病同修）。
     leg.setAutoUpdateModel(False)
-    root = QgsLayerTree()
-    keep_alive.append(root)
+    root = leg.model().rootGroup()
+    root.removeAllChildren()
     for lyr in legend_layers:
         node = root.addLayer(lyr)
         if lyr.name() in legend_hide_title:
             QgsLegendRenderer.setNodeLegendStyle(node, QgsLegendStyle.Hidden)
-    leg.model().setRootGroup(root)
     leg.setLegendFilterByMapEnabled(True)
     leg.setTitle("圖例")
     try:
@@ -1588,7 +1637,7 @@ def main() -> None:
 def _run_maps(start_qgis) -> None:
     global WRITE_QGZ, MATERIALIZE, REUSE_BASEMAP, BASEMAP_DIR, SHOW_LOC_PARCEL, ZONING_WMTS
     global NO_LANDNO_THEMES, PARCEL_LINE_THEMES, NO_NEIGHBOR_THEMES, BASE_LINE_THEMES
-    global URBAN_SHP_OVERRIDE, URBAN_IMAGE_COUNTY
+    global URBAN_SHP_OVERRIDE, URBAN_IMAGE_COUNTY, LEGEND_DIR
     from make_maps_cli import parse_args
     a = parse_args(sys.argv[1:])
     case_name, only, exclude = a.case_name, a.cases, a.exclude
@@ -1609,6 +1658,8 @@ def _run_maps(start_qgis) -> None:
     sfx = "_maxmap" if layout_mode == "maxmap" else ""
     img_dir = out_dir / f"圖檔{sfx}"
     img_dir.mkdir(parents=True, exist_ok=True)
+    # 圖例代理層的落地處；不設就退回記憶體層（圖照出、但 qgz 存不住圖例）
+    LEGEND_DIR = out_dir / f"圖例{sfx}"
     gpkg = out_dir / "圖層.gpkg"          # 抽取結果共用，不隨版面而異
     qgz = out_dir / f"{case_name}{sfx}.qgz"
     out05 = out_dir / f"05_出圖清單{sfx}.xlsx"
@@ -1917,7 +1968,8 @@ def _run_maps(start_qgis) -> None:
                       f" → 略過 {'、'.join(sorted(skip_by_mix))}", flush=True)
             urban_legend_lyr = (urban_zone_legend_layer(urban_lyr_zoning, c["extent"],
                                                         color_to_names, keep_alive,
-                                                        zone_field=urban_legend_field)
+                                                        zone_field=urban_legend_field,
+                                                        tag=cid, warnings=warnings)
                                 if is_urban else None)
             if urban_legend_lyr is not None:
                 # 必須註冊進專案，圖例面板才能解析並顯示都市計畫分區節點
@@ -1936,6 +1988,10 @@ def _run_maps(start_qgis) -> None:
                     outline="70,70,70,255", outline_w="0.3",
                     alpha=ownership_style.neighbour_alpha(0.55))
                 keep_alive.append(l_own)
+                # ⚠ 必須註冊進專案，否則 project.write() 不會把它寫進 .qgz——重開後
+                #   權屬版面只剩基地紅框與地號，公私別分色整層不見（2026-09-24 實見；
+                #   與圖例代理層同一類病：沒進 project 的圖層，qgz 存不住）。
+                project.addMapLayer(l_own, False)
             except KeyError:
                 l_own = None      # 舊 gpkg 無公私別欄 → 主題迴圈記失敗並指路重抽
 
@@ -2111,7 +2167,8 @@ def _run_maps(start_qgis) -> None:
                             add_feat(plyr, QgsGeometry.fromRect(QgsRectangle(
                                 cx - half, cy - half, cx + half, cy + half)), [str(i)])
                         plyr.setRenderer(QgsCategorizedSymbolRenderer("cat", rcats))
-                        keep_alive.append(plyr)
+                        plyr = persist_legend_layer(plyr, f"{cid}_國土利用類別",
+                                                    keep_alive, warnings)
                         project.addMapLayer(plyr, False)
                         luimap_legend_lyr = plyr
                 except Exception as exc:  # noqa: BLE001
@@ -2237,7 +2294,7 @@ def _run_maps(start_qgis) -> None:
                 try:
                     _plyr = urban_image_legend_layer(
                         urban_lyr_zoning, c["extent"], urban_image_rl.source(),
-                        urban_legend_field, keep_alive)
+                        urban_legend_field, keep_alive, tag=cid, warnings=warnings)
                     if _plyr is not None:
                         project.addMapLayer(_plyr, False)
                         urban_legend_lyr = _plyr
@@ -2312,7 +2369,8 @@ def _run_maps(start_qgis) -> None:
 
             # 行政區界：`<案>/行政區界/行政區界.shp` 存在就**每張主題圖都畫**
             # （基地橫跨兩個行政區時才有意義；沒跑過 district_fetch.py 的案子回空、行為不變）
-            dist = district_line.district_layers(out_dir, project, keep_alive, c["extent"])
+            dist = district_line.district_layers(out_dir, project, keep_alive, c["extent"],
+                                                 tag=cid)
             if dist:
                 print(f"  [{cid}] 行政區界：{'、'.join(dict.fromkeys(dist.names))}", flush=True)
 

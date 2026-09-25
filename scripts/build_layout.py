@@ -30,7 +30,6 @@ LEGEND_INSET_MM = 5.0
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsGeometry,
-    QgsLayerTree,
     QgsLayoutItem,
     QgsLayoutItemLabel,
     QgsLayoutItemLegend,
