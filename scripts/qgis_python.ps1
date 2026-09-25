@@ -6,8 +6,9 @@
 #
 # 為什麼不能直接呼叫 python-qgis-ltr.bat（2026-09-24 阿里山案實踩）：
 #   Python 的使用者 site-packages 依「版本號」分資料夾（%APPDATA%\Python\Python312），
-#   不是依安裝位置。本機另有 uv 裝的 CPython 3.12，別的專案用 pip --user 把 numpy 2.x
-#   裝進那裡——QGIS 內建的 Python 3.12 也會讀同一個資料夾，蓋掉 QGIS 自帶的 numpy 1.x，
+#   不是依安裝位置。別的專案直接拿 QGIS 的 python.exe 跑 pip install（寫不進 Program
+#   Files，pip 自動改 --user），把 numpy 2.x 裝進那裡（2026-09-22 實例）——QGIS 內建的
+#   Python 3.12 讀同一個資料夾、且排在自帶之前，蓋掉 QGIS 自帶的 numpy 1.x，
 #   osgeo.gdal_array 匯入失敗，所有正射／電子地圖底圖「靜默消失」（出圖照樣回報成功）。
 #   PYTHONNOUSERSITE=1 只作用於本次呼叫，不動全機設定、也不動那個專案的套件。
 #

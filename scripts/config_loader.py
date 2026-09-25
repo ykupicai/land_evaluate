@@ -56,8 +56,9 @@ def qgis_env(base: dict | None = None) -> dict:
 
     ⚠ 為什麼一定要（2026-09-24 阿里山案實踩）：Python 的 user-site 是**依版本號**
     分資料夾（`%APPDATA%\\Python\\Python312\\site-packages`），不是依安裝位置。
-    本機另有一支 uv 裝的 CPython 3.12，別的專案用 `pip install --user` 裝了
-    numpy 2.5.3 進去——**QGIS 內建的 Python 3.12 也會讀同一個資料夾**，於是蓋掉
+    別的專案直接拿 QGIS 的 python.exe 跑 `pip install`（Program Files 寫不進去，
+    pip 自動改 `--user`），把 numpy 2.5.3 裝進這個資料夾（2026-09-22 實例）——
+    **QGIS 內建的 Python 3.12 讀它、且排在自帶 site-packages 之前**，於是蓋掉
     QGIS 自帶的 numpy 1.26.4，`osgeo.gdal_array` 匯入即失敗。
     症狀非常陰：`nlsc_wmts.build_basemap` 讀不到圖磚、回 None，出圖腳本印一行
     「底圖取得失敗」後**照樣出圖、回報成功**——只是整張圖少了正射／電子地圖底圖。

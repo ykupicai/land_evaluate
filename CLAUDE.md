@@ -584,16 +584,35 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
   **Git Bash 會因路徑空白失敗**。哪幾支需要 QGIS python 見 `scripts/README.md`。
 - **⚠⚠ 不要直接執行 `python-qgis-ltr.bat`，一律經 `scripts\qgis_python.ps1`**（2026-09-24
   阿里山案實踩）：Python 的使用者 site-packages 是**依版本號**分資料夾
-  （`%APPDATA%\Python\Python312\site-packages`），不是依安裝位置。本機另有 uv 裝的
-  CPython 3.12，別的專案（openai／speech 那一批）用 `pip --user` 把 **numpy 2.5.3** 裝進去——
-  **QGIS 內建 Python 3.12 讀同一個資料夾**，蓋掉自帶的 1.26.4，`osgeo.gdal_array` 匯入失敗。
+  （`%APPDATA%\Python\Python312\site-packages`），不是依安裝位置；**QGIS 內建 Python 3.12
+  讀這個資料夾、且排在自帶 site-packages 之前**。裡面一出現 numpy 2.x 就蓋掉自帶的 1.26.4，
+  `osgeo.gdal_array` 匯入失敗。
   **症狀極陰**：`nlsc_wmts.build_basemap` 回 None，出圖腳本印一行「底圖取得失敗」後
-  **照樣出圖、回報成功**——只是整張圖沒有正射／電子地圖底圖。
-  已做三層防護：①`scripts/qgis_python.ps1` 設 `PYTHONNOUSERSITE=1` 再呼叫 .bat；
+  **照樣出圖、回報成功**——只是整張圖沒有正射／電子地圖底圖。桌面版 QGIS 則是一開就跳
+  `'NoneType' object has no attribute 'write'`（numpy 匯入失敗、GUI 沒有 stderr 又炸一次），
+  所有 import numpy 的外掛（LecoS、luimap_processing、SCP、fishpv…）一起壞。
+  **★成因已查明（2026-09-25 更正；原寫「openai／speech 那一批裝的」是錯的）**：2026-09-22
+  **農再彙整專案的子代理直接拿 QGIS 的 `apps\Python312\python.exe` 跑 `pip install mapclassify`**
+  ——Program Files 寫不進去，pip 自動改成 `--user`，連帶把 numpy 2.5.3／scipy 1.18.1／
+  networkx 裝進上述資料夾（它自己下一步就看到 NumPy 1.x/2.x 相容錯誤、geopandas 崩潰）。
+  2026-06-26 的對話紀錄列過該資料夾，當時**沒有** numpy／scipy，可作佐證；openai／speech
+  那批（2025-11-24）與本事件無關。
+  **已根治（2026-09-25）**：從該資料夾移除 numpy／scipy／networkx／mapclassify／jenkspy
+  （農再彙整那邊改用系統 Python 3.14，mapclassify 本就已裝、jenkspy 已補），重驗 QGIS 原生
+  環境 numpy 1.26.4／gdal_array／sklearn SVC 皆正常、`doctor --qgis` 的 user-site 污染轉 OK。
+  ⚠ **防再犯＝任何專案都不可對 QGIS 的 python.exe 跑 `pip install`**（會靜默落到共用
+  user-site）；GIS 套件一律裝在系統 Python 3.14 或該專案自己的 venv。
+  三層防護仍保留：①`scripts/qgis_python.ps1` 設 `PYTHONNOUSERSITE=1` 再呼叫 .bat；
   ②`run_case._run` 對 QGIS 子程序自動套 `config_loader.qgis_env()`（系統 Python 子程序不動）；
   ③`doctor.py --qgis` 改驗 **`gdal_array`**（9/16 版只驗 `gdal`，所以當時報全綠卻沒抓到）
-  並另列「user-site 污染」一項。**根治**＝把那個專案改用 venv 後清空該資料夾（跨專案，
-  使用者決定）。⚠ **不要改設全機 `PYTHONNOUSERSITE`**：系統 Python 3.14 與 uv 專案會一起失去 user-site。
+  並另列「user-site 污染」一項。⚠ 這三層**只蓋產線腳本、蓋不到桌面版 QGIS**；桌面版另有
+  第四層：`%APPDATA%\QGIS\QGIS3\profiles\default\python\startup.py`（啟動時先從 QGIS 自帶
+  site-packages 預載 numpy／scipy 卡位，再把 sys.path 原樣放回）。
+  ⚠ **桌面版不要用 `PYTHONNOUSERSITE=1`／把 user-site 移出 sys.path**（兩種都實測過）：
+  user-site 裡有 QGIS 沒有的 sklearn（SCP 的 SVM）與 openai（QChatGPT），更陰的是 QGIS 自帶的
+  `pydantic` 與自帶 `pydantic_core` 版本對不上（`cannot import name 'validate_core_schema'`），
+  一直靠 user-site 那份較新的 `pydantic_core` 在補——拿掉 user-site 反而把 QChatGPT 弄壞。
+  ⚠ **不要改設全機 `PYTHONNOUSERSITE`**：系統 Python 3.14 與 uv 專案會一起失去 user-site。
 - **出圖時桌面版 QGIS 不要開著同一案子**：會鎖住 gpkg 與 `底圖\*.tif`。
   現象很陰——圖照出、六張都回報成功，但主題色或底圖整片空白，既有 tif 還會被弄壞成
   無 geotransform。不必打斷你的 QGIS：用 `--basemap-dir=<新資料夾>` 或 `--reuse-basemap`
