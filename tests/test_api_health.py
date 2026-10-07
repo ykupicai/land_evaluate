@@ -232,3 +232,101 @@ def test_沒有變化時不寫桌面紙條(tmp_path, monkeypatch):
 @pytest.mark.parametrize("status,expect", [("FAIL", 0), ("WARN", 1), ("SKIP", 2), ("OK", 3)])
 def test_排序讓壞掉的排最前(status, expect):
     assert ah.STATUS_ORDER[status] == expect
+
+
+# ── 2026-10-07 code review：python 型探測要驗到產線真正會壞的地方 ──────────────
+def _fake_module(monkeypatch, name, **attrs):
+    import types
+    m = types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(m, k, v)
+    monkeypatch.setitem(sys.modules, name, m)
+
+
+def _pl_raw(national, county):
+    return {"STATUS": 1, "RESPONSE": [{
+        "NATIONAL": {"PUBLIC": [{}] * national} if national is not None else None,
+        "COUNTY": {"PUBLIC": [{}] * county} if county is not None else None}]}
+
+
+def _with_real_branch_counts(monkeypatch, raw):
+    import public_land
+    _fake_module(monkeypatch, "public_land",
+                 fetch_section_raw=lambda *a, **k: raw,
+                 branch_counts=public_land.branch_counts)
+
+
+def test_權屬COUNTY分支消失判FAIL(monkeypatch):
+    """★ 錯法：只數 NATIONAL（90 筆）→ 綠燈。正解：COUNTY 分支 0 筆就是產線會漏縣市有地。"""
+    _with_real_branch_counts(monkeypatch, _pl_raw(90, None))
+    status, detail = ah.py_moi_public_land(None, {})
+    assert status == "FAIL" and "COUNTY" in detail
+
+
+def test_權屬筆數掉到門檻以下判FAIL(monkeypatch):
+    _with_real_branch_counts(monkeypatch, _pl_raw(5, 3))
+    assert ah.py_moi_public_land(None, {})[0] == "FAIL"
+
+
+def test_權屬兩分支齊全且達門檻判OK(monkeypatch):
+    _with_real_branch_counts(monkeypatch, _pl_raw(90, 43))
+    status, detail = ah.py_moi_public_land(None, {})
+    assert status == "OK" and "133" in detail
+
+
+def test_權屬STATUS非1判FAIL(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("API 回 STATUS=0 MESSAGE=x")
+    _fake_module(monkeypatch, "public_land", fetch_section_raw=boom, branch_counts=lambda j: {})
+    assert ah.py_moi_public_land(None, {})[0] == "FAIL"
+
+
+def test_新舊地號查無判FAIL(monkeypatch):
+    """★ 錯法：GET 回 200（參數格式錯誤）→ OK。正解：已知樣本查不到新地號就是壞了。"""
+    _fake_module(monkeypatch, "latlon_to_parcel", newold_query=lambda *a, **k: None)
+    assert ah.py_moi_newold(None, {})[0] == "FAIL"
+
+
+def test_新舊地號回錯結果判FAIL(monkeypatch):
+    _fake_module(monkeypatch, "latlon_to_parcel",
+                 newold_query=lambda *a, **k: ("9999", "00010000"))
+    assert ah.py_moi_newold(None, {})[0] == "FAIL"
+
+
+def test_新舊地號已知樣本正確判OK(monkeypatch):
+    _fake_module(monkeypatch, "latlon_to_parcel",
+                 newold_query=lambda *a, **k: ("4438", "03140000"))
+    assert ah.py_moi_newold(None, {})[0] == "OK"
+
+
+def test_地籍版次有但Tiled服務壞判FAIL(monkeypatch):
+    """★ 錯法：只驗版次清單 → 綠燈。正解：Tiled 框查服務不可用就是 ⓪a′ 全停。"""
+    def boom(*a, **k):
+        raise RuntimeError("版次 115Aug 的地籍服務沒有任何圖層")
+    _fake_module(monkeypatch, "moa_parcel_query", newest_version=lambda: "115Aug",
+                 polygon_layers=boom, count_envelope=lambda *a, **k: 1)
+    status, detail = ah.py_moa_newest_version(None, {})
+    assert status == "FAIL" and "115Aug" in detail
+
+
+def test_地籍測試框回0筆判FAIL(monkeypatch):
+    _fake_module(monkeypatch, "moa_parcel_query", newest_version=lambda: "115Jun",
+                 polygon_layers=lambda v: [(1, "Taiwan")], count_envelope=lambda *a, **k: 0)
+    assert ah.py_moa_newest_version(None, {})[0] == "FAIL"
+
+
+def test_地籍正常判OK(monkeypatch):
+    _fake_module(monkeypatch, "moa_parcel_query", newest_version=lambda: "115Jun",
+                 polygon_layers=lambda v: [(0, "Penghu"), (1, "Taiwan")],
+                 count_envelope=lambda *a, **k: 3)
+    assert ah.py_moa_newest_version(None, {})[0] == "OK"
+
+
+def test_新舊地號登錄為python型():
+    import yaml
+    reg = yaml.safe_load((Path(__file__).resolve().parent.parent / "config" / "api_health.yaml")
+                         .read_text(encoding="utf-8"))
+    rows = [r for r in reg["服務"] if r["id"] == "moi-newold-landno"] if isinstance(reg, dict) and "服務" in reg \
+        else [r for r in (reg if isinstance(reg, list) else next(v for v in reg.values() if isinstance(v, list)))
+              if r.get("id") == "moi-newold-landno"]
+    assert rows and rows[0]["檢查"] == "python" and rows[0]["函式"] in ah.PY_PROBES

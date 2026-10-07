@@ -28,9 +28,9 @@
   - id: moi-newold-landno
     名稱: 內政部新舊地號查詢 API（MOI_API_011）
     影響: 重測改號的地號查不到現行地號；⓪a 反查與鄰地補正會留白
-    檢查: text
+    檢查: python
+    函式: moi_newold
     url: https://openapi.moi.gov.tw/WEBAPI/LandNewOldQuery/1.0/QueryLandNo
-    必含文字: []
     逾時: 45
 
   - id: moi-public-land

@@ -73,9 +73,14 @@ def _g(d: dict, *names):
     return None
 
 
-def query_section(city: str, town: str, sec: str, unit: str | None = None,
-                  timeout: int = 90) -> list[dict]:
-    """查一個段的全部公有地。給 unit 走 QueryByUnit，否則走 QueryByTown。"""
+def fetch_section_raw(city: str, town: str, sec: str, unit: str | None = None,
+                      timeout: int = 90) -> dict:
+    """查一個段，回 API 原始 JSON（已驗 STATUS==1）。給 unit 走 QueryByUnit，否則走 QueryByTown。
+
+    抽出來給 `api_health.py` 直接呼叫——健檢要能看到 NATIONAL／COUNTY 各分支的筆數，
+    而且必須與產線走**同一段 HTTP 程式**（urllib＋系統憑證存放區；2026-10-07 code review
+    查出健檢用 requests 另組憑證鏈，兩邊對同一主機的 TLS 結果不同）。
+    """
     if unit:
         path, body = "/QueryByUnit", [{"UNIT": unit, "SEC": sec}]
     else:
@@ -89,8 +94,25 @@ def query_section(city: str, town: str, sec: str, unit: str | None = None,
         raise RuntimeError(f"HTTP {e.code}：{e.read().decode('utf-8', 'replace')[:200]}")
     if j.get("STATUS") != 1:
         raise RuntimeError(f"API 回 STATUS={j.get('STATUS')} MESSAGE={j.get('MESSAGE')}")
+    return j
+
+
+def branch_counts(j: dict) -> dict:
+    """原始 JSON 各權屬分支（NATIONAL／PROVINCE／COUNTY／VILLAGE…）的公有地筆數。"""
+    counts: dict = {}
+    for grp in j.get("RESPONSE") or []:
+        for k, v in grp.items():
+            if isinstance(v, dict) and ("PUBLIC" in v or "public" in v):
+                counts[k] = counts.get(k, 0) + len(v.get("PUBLIC") or v.get("public") or [])
+    return counts
+
+
+def query_section(city: str, town: str, sec: str, unit: str | None = None,
+                  timeout: int = 90) -> list[dict]:
+    """查一個段的全部公有地（所有權屬分支合併）。"""
+    j = fetch_section_raw(city, town, sec, unit, timeout)
     out = []
-    # ⚠ 結構比規格多一層：RESPONSE[i].NATIONAL.PUBLIC[]
+    # ⚠ 結構比規格多一層：RESPONSE[i].NATIONAL.PUBLIC[]（另有 COUNTY 等分支，要全部走過）
     for grp in j.get("RESPONSE") or []:
         for v in grp.values():
             if isinstance(v, dict) and ("PUBLIC" in v or "public" in v):

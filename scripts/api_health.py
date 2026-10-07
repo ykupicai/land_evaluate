@@ -154,15 +154,30 @@ PROBES = {"json": probe_json, "image": probe_image, "text": probe_text, "python"
 
 
 # ── python 型探測：直接呼叫產線實際使用的那支函式 ─────────────────────────
+# 地籍探測的測試框：高雄彌陀安港段587（2026-10 已知有宗地）。框內 0 筆＝Query 壞了。
+MOA_TEST_BOX = (171730.0, 2521695.0, 171790.0, 2521755.0)
+
+
 def py_moa_newest_version(session, spec):
-    """農業部地籍：版次寫在服務名稱裡（..._Tiled_115Jun），解不出來整條產線起不來。"""
-    from config_loader import skill_path
-    sys.path.insert(0, str(skill_path("cadastre-check", "scripts")))
-    import moa  # noqa: PLC0415
-    ver = moa.newest_version()
+    """農業部地籍：版次清單＋**實際打 Tiled 框查服務**（⓪a′ 主路徑）。
+
+    2026-10-07 code review 修：原本只驗 newest_version() 拿得到版次，漏掉 CLAUDE.md 點名
+    最可能的情境——版次清單已出現新版、但 CadastralMap_Tiled_<版次> 還沒建好或改名，
+    此時健檢綠燈、框查全停。改為直接呼叫產線 moa_parcel_query 的 polygon_layers 與
+    count_envelope（同一段 HTTP 程式、同一份 token）。
+    """
+    import moa_parcel_query as mpq  # noqa: PLC0415
+    ver = mpq.newest_version()
     if not ver:
         return "FAIL", "取不到現行版次（newest_version 回空值）"
-    return "OK", f"現行版次 {ver}"
+    try:
+        layers = mpq.polygon_layers(ver)
+        n = mpq.count_envelope(*MOA_TEST_BOX, version=ver)
+    except Exception as exc:  # noqa: BLE001
+        return "FAIL", f"版次 {ver} 的 Tiled 框查服務不可用：{str(exc)[:150]}"
+    if n <= 0:
+        return "FAIL", f"版次 {ver}：測試框回 0 筆（已知有宗地），Query 可能已壞"
+    return "OK", f"現行版次 {ver}；Tiled 服務 {len(layers)} 層、測試框回 {n} 筆"
 
 
 def py_ngis_token(session, spec):
@@ -176,24 +191,47 @@ def py_ngis_token(session, spec):
     return "OK", f"token 正常，二級圖層 {len(layers)} 層"
 
 
+# 布袋鎮 1410 段 2026-08 實測：國有 90＋縣市有 43＝133 筆。低於此門檻即視為資料或結構異常。
+PUBLIC_LAND_MIN_TOTAL = 120
+
+
 def py_moi_public_land(session, spec):
-    """權屬：以嘉義縣布袋鎮 1410 段實測（該段已知有 133 筆公有地，回 0 筆就是不對）。"""
-    resp, _ = _fetch(session, "https://openapi.moi.gov.tw/WEBAPI/PublicLandOData/QueryByTown",
-                     spec.get("逾時", 45), method="POST",
-                     json=[{"CITY": "Q", "TOWN": "03", "SEC": "1410"}])
-    if resp.status_code != 200:
-        return "FAIL", f"HTTP {resp.status_code}"
+    """權屬：直接呼叫產線 public_land.fetch_section_raw（同一段 urllib 程式）。
+
+    2026-10-07 code review 修：原本只數 NATIONAL.PUBLIC（90 筆），產線 query_section 卻
+    會走遍每個分支（含 COUNTY 縣市有 43 筆）；COUNTY 分支消失時健檢仍綠燈、權屬圖卻漏掉
+    縣市有公有地。另原本沒驗 STATUS、門檻只有 >0。
+    """
+    import public_land  # noqa: PLC0415
     try:
-        data = _loads(resp.text)
-    except ValueError:
-        return "FAIL", "回應不是 JSON"
-    # 結構比規格多一層：RESPONSE[i].NATIONAL.PUBLIC[]，且欄位名是全大寫
-    rows = []
-    for item in data.get("RESPONSE") or []:
-        rows += ((item.get("NATIONAL") or {}).get("PUBLIC") or [])
-    if not rows:
-        return "FAIL", "回 0 筆；已知該段有公有地，結構或參數可能已變更"
-    return "OK", f"嘉義縣布袋鎮 1410 段回 {len(rows)} 筆公有地"
+        j = public_land.fetch_section_raw("Q", "03", "1410", timeout=spec.get("逾時", 45))
+    except Exception as exc:  # noqa: BLE001
+        return "FAIL", f"查詢失敗：{str(exc)[:150]}"
+    counts = public_land.branch_counts(j)
+    total = sum(counts.values())
+    missing = [k for k in ("NATIONAL", "COUNTY") if not counts.get(k)]
+    if missing:
+        return "FAIL", f"分支 {missing} 回 0 筆（現有 {counts}）；產線權屬會靜默漏掉該類公有地"
+    if total < PUBLIC_LAND_MIN_TOTAL:
+        return "FAIL", f"只回 {total} 筆（門檻 {PUBLIC_LAND_MIN_TOTAL}，已知 133）：{counts}"
+    return "OK", f"嘉義縣布袋鎮 1410 段回 {total} 筆公有地（{counts}）"
+
+
+def py_moi_newold(session, spec):
+    """新舊地號（MOI_API_011）：直接呼叫產線 latlon_to_parcel.newold_query，以已知樣本驗結構。
+
+    樣本＝臺南麻豆 港子尾段11（事務所 DF、段碼 4311）→ 重測後客子寮段314（段碼 4438）。
+    2026-10-07 code review 修：原本設成 text 型送 GET，對方回「參數格式錯誤」照樣判 OK；
+    路由改名回 404 也只判 WARN、不留紙條。
+    """
+    import latlon_to_parcel  # noqa: PLC0415
+    got = latlon_to_parcel.newold_query("DF", "4311", "00110000", "N",
+                                        timeout=spec.get("逾時", 45))
+    if got is None:
+        return "FAIL", "已知樣本（港子尾段11）查無新地號：API 下架、改路由或結構變更"
+    if got != ("4438", "03140000"):
+        return "FAIL", f"已知樣本回 {got}，預期 ('4438', '03140000')；結構可能變更"
+    return "OK", "已知樣本 港子尾段11 → 客子寮段314 正確"
 
 
 def py_nlsc_buffer(session, spec):
@@ -212,7 +250,8 @@ def py_nlsc_buffer(session, spec):
 
 
 PY_PROBES = {"moa_newest_version": py_moa_newest_version, "ngis_token": py_ngis_token,
-             "moi_public_land": py_moi_public_land, "nlsc_buffer": py_nlsc_buffer}
+             "moi_public_land": py_moi_public_land, "moi_newold": py_moi_newold,
+             "nlsc_buffer": py_nlsc_buffer}
 
 
 # ── 都市計畫縣市圖台：直接驗註冊表對應的欄位還在不在 ───────────────────────

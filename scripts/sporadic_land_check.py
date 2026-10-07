@@ -13,6 +13,9 @@
   · 聚合實作屬 B 類：周邊框查宗地中，**非鄉村區**且使類屬六類農業用地
     （農牧／養殖／水利／林業／生態保護／國土保安；與 greenbelt_ratio.AG_KINDS 同一份）者，
     以 0.3m 容差相接建連通分量，取含基地者＝所在連續農業用地。
+  · ★ **水利用地預設當隔絕要素、不併入口袋**（2026-10-07 code review 修正）：§35 第二款、
+    §35-1 第一、三款都把「水溝」列為隔絕要素，若把水利用地併進口袋，被水溝隔開的基地會被
+    算成大片農地而誤判不符。`--water-as-agri` 可回到舊算法（敏感度分析）。
   · ⚠ 都市計畫**農業區**不是隔絕要素（§35-1 第一款的隔絕要素是都市計畫住宅、商業、工業區）；
     框查屬性只有「都計／非都計」，分區別一律列「待查」。
   · ⚠ §35 的前提是**毗鄰甲種、丙種建築用地**（或國宅等特目用地）——只毗鄰鄉村區**乙種**
@@ -30,7 +33,7 @@
 
 用法（系統 Python）：
   python -X utf8 scripts/sporadic_land_check.py --case outputs/<案>
-      [--buffer 250] [--frame <既有框查.gpkg>] [--water-barrier] [--out-dir <資料夾>]
+      [--buffer 250] [--frame <既有框查.gpkg>] [--water-as-agri] [--out-dir <資料夾>]
 輸出：<out>/零星土地檢核.json／.txt、<out>/cadastre/農地口袋.gpkg、
       <out>/cadastre/周邊<N>m_框查.gpkg（線上框查快取，可用 --frame 重用）
 """
@@ -214,11 +217,11 @@ def per_neighbor_contacts(outline, nb: gpd.GeoDataFrame):
 
 
 # ------------------------------------------------------------------ 聚合
-def build_pocket(base_geoms, frame: gpd.GeoDataFrame, water_barrier: bool = False):
+def build_pocket(base_geoms, frame: gpd.GeoDataFrame, water_barrier: bool = True):
     """回 (口袋成員在 frame 的 index 集合)。base_geoms 為種子（不論其使類）。
 
-    frame 須已排除基地自身。`water_barrier=True` 時把水利用地當隔絕要素（不聚合）——
-    僅供敏感度分析，預設依判準登記表把水利用地算六類農業用地。
+    frame 須已排除基地自身。`water_barrier=True`（預設）把水利用地當隔絕要素、不聚合——
+    §35 第二款、§35-1 第一、三款明列「水溝」為隔絕要素；False 僅供敏感度分析。
     """
     ok = [is_agri(r) and not (water_barrier and r["使類"] == "水利用地")
           for _, r in frame.iterrows()]
@@ -337,7 +340,10 @@ def judge(base: dict, pocket: dict) -> dict:
     a1, a1t = area_test(pa, AREA_012, True)
     lb = "（框內下限）" if pocket.get("面積為下限值") else ""
     a1t += lb
-    k35_1 = (_worst(s1, a1), f"建築用地包圍比例 {sh(['建築用地']):.0%}；口袋 {a1t}")
+    # §35Ⅳ：包圍之「各種建築用地」須為 78.04.03 前編定者 → 資料上無從確認，符合者一律降待查
+    k35_1 = (_worst(s1, a1, PEND),
+             f"建築用地包圍比例 {sh(['建築用地']):.0%}；口袋 {a1t}；"
+             "包圍之建築用地須為 78.04.03 前編定（§35Ⅳ）須查")
 
     s2 = share_test(sh(["交通用地", "水利用地", "建築用地"]),
                     sh(["交通用地", "水利用地", "建築用地", "特定目的事業用地", "未登記土地"]))
@@ -365,9 +371,11 @@ def judge(base: dict, pocket: dict) -> dict:
     iso1 = ["鄉村區", "交通用地", "水利用地", "建築用地"]
     s1b = share_test(sh(iso1), sh(iso1 + ["特定目的事業用地", "都市計畫區", "未登記土地"]))
     base_agri = adj.get("農業用地", 0.0)
-    k351_1 = (_worst(s1b, a1),
+    # §35-1Ⅲ 準用 §35Ⅲ、Ⅳ：道路水溝平均寬≥4m、建築用地與道路水溝須 78.04.03 前編定 → 符合者降待查
+    k351_1 = (_worst(s1b, a1, PEND),
               f"口袋外圍隔絕比例 {sh(iso1):.0%}；口袋 {a1t}；"
-              f"基地本身外圍緊鄰農業用地 {base_agri:.1f} m")
+              f"基地本身外圍緊鄰農業用地 {base_agri:.1f} m；"
+              "道路水溝平均寬≥4m、78.04.03 前編定（§35-1Ⅲ 準用 §35Ⅲ、Ⅳ）須查")
     vs = sh(["鄉村區"])
     s2b = OK if vs >= 0.70 else (PEND if vs >= 0.45 else NG)
     k351_2 = (_worst(s2b, a1, PEND if s2b == OK else OK),
@@ -402,7 +410,7 @@ def _article(pre, items) -> dict:
 
 # ------------------------------------------------------------------ 主流程
 def analyze(base: gpd.GeoDataFrame, frame: gpd.GeoDataFrame, envelope,
-            water_barrier: bool = False) -> dict:
+            water_barrier: bool = True) -> dict:
     """純計算（不打網路、不寫檔），測試直接呼叫。回結果 dict（含 `_` 開頭的幾何）。"""
     if base.crs is not None and base.crs.to_epsg() != 3826:
         base = base.to_crs(3826)
@@ -554,7 +562,7 @@ def to_text(res: dict, meta: dict) -> str:
         f"{k} {v:.1f} m" for k, v in p["外圍接觸_m"].items() if v > 0)
        + (f"、無鄰地 {p['外圍無鄰地_m']:.1f} m" if p["外圍無鄰地_m"] >= MIN_EDGE else ""))
     pr(f"  觸及查詢框邊：{'是' if p['觸及查詢框邊'] else '否'}"
-       + ("；水利用地視為隔絕（敏感度分析）" if p["水利用地視為隔絕"] else ""))
+       + ("" if p["水利用地視為隔絕"] else "；水利用地併入口袋（敏感度分析，非預設）"))
     for k in ("§35", "§35-1"):
         a = j[k]
         pr("")
@@ -630,8 +638,10 @@ def main(argv=None):
                     help="口袋觸框時自動加倍外擴的上限（m，預設 1000）")
     ap.add_argument("--frame", help="重用既有框查成果（gpkg/shp），不連線、不自動外擴")
     ap.add_argument("--version", help="地籍版次（省略＝最新）")
+    ap.add_argument("--water-as-agri", action="store_true",
+                    help="敏感度分析：水利用地併入口袋（預設把水利用地當水溝隔絕要素）")
     ap.add_argument("--water-barrier", action="store_true",
-                    help="敏感度分析：水利用地視為隔絕、不聚合（預設依判準聚合）")
+                    help="（相容舊旗標，已是預設值）")
     ap.add_argument("--out-dir", help="輸出資料夾（預設＝--case）")
     a = ap.parse_args(argv)
 
@@ -656,7 +666,7 @@ def main(argv=None):
         src = f"重用 {a.frame}"
         frame = normalize_frame(raw)
         print(f"  框查宗地 {len(frame)} 筆（{src}）")
-        res = analyze(base, frame, env, a.water_barrier)
+        res = analyze(base, frame, env, not a.water_as_agri)
     else:
         # ★ 口袋觸框且面積下限仍可能低於最大門檻（0.5 公頃）時自動加倍外擴重查——
         #   彌陀案教訓：250m 框內的「49 筆 4.38 公頃」其實被框切斷，外擴 800m 時已達 83 公頃。
@@ -670,7 +680,7 @@ def main(argv=None):
             src = f"農業部地籍框查（快取 {cache}）"
             frame = normalize_frame(raw)
             print(f"  框查宗地 {len(frame)} 筆")
-            res = analyze(base, frame, env, a.water_barrier)
+            res = analyze(base, frame, env, not a.water_as_agri)
             p = res["所在連續農業用地"]
             if not (p["觸及查詢框邊"] and p["登記面積_m2"] <= AREA_05
                     and buf < a.max_buffer):

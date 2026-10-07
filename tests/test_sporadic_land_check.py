@@ -6,6 +6,9 @@
      即使被建築用地完全包圍、面積極小，§35 仍「不符」（彌陀案實例，這是最容易犯的錯）。
   2. 聚合：非鄉村區之六類農業用地、0.3m 容差相接；鄉村區內的農牧用地、交通用地、
      都市計畫區、相距 >0.3m 者都不併入；面積用登記面積。
+     ★ 水利用地預設當水溝隔絕要素、不併入（§35 第二款、§35-1 第一三款明列水溝）。
+  7. §35Ⅳ（§35-1Ⅲ 準用）的 78.04.03 前編定、道路水溝寬 4m 資料上查不到 →
+     §35 第一款、§35-1 第一款判「符合」時一律降為「待查」。
   3. 平均寬度＝面積／最小外接矩形長邊。
   4. 角碰不算毗鄰。
   5. 口袋被查詢框切斷時必須標「下限值」，不可把框內筆數當成整塊面積交付。
@@ -68,7 +71,9 @@ def test_jia_building_land_satisfies_s35_premise():
     res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(ring("一般農業區", "甲種建築用地")), ENV)
     s35 = res["判定"]["§35"]
     assert s35["前提"]["判定"] == slc.OK
-    assert s35["各款"]["一"]["判定"] == slc.OK      # 建築用地包圍、≤0.12 公頃
+    # ★ 錯法：直接判 OK。包圍之建築用地須 78.04.03 前編定（§35Ⅳ）資料上查不到 → 待查
+    assert s35["各款"]["一"]["判定"] == slc.PEND
+    assert "78.04.03" in s35["各款"]["一"]["說明"]
     assert s35["初判"] == "可能符合"
 
 
@@ -91,8 +96,8 @@ def test_corner_touch_is_not_adjacency():
 def test_pocket_aggregation_rules():
     rows = [
         ("A1", "一般農業區", "農牧用地", box(10.2, 0, 30, 10)),   # 髮絲縫 0.2m → 併入
-        ("A2", "一般農業區", "水利用地", box(30, 0, 32, 10)),      # 水利用地屬六類 → 併入
-        ("A3", "一般農業區", "養殖用地", box(32, 0, 50, 10)),      # 經 A2 相接 → 併入
+        ("A2", "一般農業區", "水利用地", box(30, 0, 32, 10)),      # 水利用地＝水溝隔絕 → 不併
+        ("A3", "一般農業區", "養殖用地", box(32, 0, 50, 10)),      # 被 A2 隔開 → 不併
         ("G1", "一般農業區", "農牧用地", box(0, 10.5, 10, 20)),    # 相距 0.5m → 不併
         ("V1", "鄉村區", "農牧用地", box(-10, 0, 0, 10)),           # 鄉村區內農牧 → 不併
         ("R1", "一般農業區", "交通用地", box(0, -4, 50, 0)),        # 道路 → 不併、且隔斷
@@ -101,14 +106,18 @@ def test_pocket_aggregation_rules():
     ]
     res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), ENV)
     members = set(res["_geom"]["members"]["地號"])
-    assert members == {"A1", "A2", "A3"}
+    assert members == {"A1"}
     p = res["所在連續農業用地"]
-    assert p["筆數"] == 4
-    assert p["登記面積_m2"] == pytest.approx(100 + 19.8 * 10 + 20 + 180, abs=0.01)
-    assert p["外圍接觸_m"]["交通用地"] > 49
-    assert p["外圍接觸_m"]["都市計畫區"] > 9
+    assert p["筆數"] == 2
+    assert p["登記面積_m2"] == pytest.approx(100 + 19.8 * 10, abs=0.01)
+    assert p["外圍接觸_m"]["水利用地"] > 9
+    assert p["外圍接觸_m"]["交通用地"] > 29        # 口袋 x 0~30（水溝擋住 A3）
     assert p["外圍接觸_m"]["鄉村區"] > 9
     assert not p["觸及查詢框邊"]
+    # 敏感度分析（水利用地併入）才會連到 A3 與都市計畫區
+    res2 = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), ENV, water_barrier=False)
+    assert set(res2["_geom"]["members"]["地號"]) == {"A1", "A2", "A3"}
+    assert res2["所在連續農業用地"]["外圍接觸_m"]["都市計畫區"] > 9
 
 
 def test_water_barrier_sensitivity():
@@ -116,6 +125,27 @@ def test_water_barrier_sensitivity():
             ("A2", "一般農業區", "農牧用地", box(12, 0, 40, 10))]
     assert res_members(rows, False) == {"A1", "A2"}
     assert res_members(rows, True) == set()
+    # 預設＝水利用地當隔絕
+    res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), ENV)
+    assert set(res["_geom"]["members"]["地號"]) == set()
+
+
+def test_ditch_isolates_base_for_s35_1_item1():
+    """★ code review 錯法重現：西鄉村區、南北道路、東側 4m 水溝外為大片農地。
+    舊算法把水溝併進口袋 → 口袋 2 萬㎡、§35-1 第一款「不符」。正解：水溝是隔絕要素，
+    口袋只剩基地本身；但 4m 寬與 78.04.03 前編定查不到 → 「待查」而非「符合」。"""
+    rows = [("V", "鄉村區", "乙種建築用地", box(-10, -4, 0, 14)),
+            ("RS", "一般農業區", "交通用地", box(0, -4, 10, 0)),
+            ("RN", "一般農業區", "交通用地", box(0, 10, 10, 14)),
+            ("D", "一般農業區", "水利用地", box(10, -4, 14, 14)),
+            ("F", "一般農業區", "農牧用地", box(14, -100, 214, 100))]
+    res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), ENV)
+    assert res["所在連續農業用地"]["登記面積_m2"] == pytest.approx(100)
+    item1 = res["判定"]["§35-1"]["各款"]["一"]
+    assert item1["判定"] == slc.PEND
+    assert "4m" in item1["說明"] and "78.04.03" in item1["說明"]
+    old = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), ENV, water_barrier=False)
+    assert old["判定"]["§35-1"]["各款"]["一"]["判定"] == slc.NG
 
 
 def res_members(rows, wb):
