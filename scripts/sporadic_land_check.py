@@ -197,6 +197,23 @@ def rect_dims(geom) -> tuple[float, float]:
     return max(a, b), min(a, b)
 
 
+def strip_width(geom) -> float:
+    """平均寬度＝與基地「等面積、等周長」之矩形的短邊：w=(P/2−√((P/2)²−4A))/2。
+
+    2026-10-07 code review 修：原用「面積／最小外接矩形長邊」，L 形、彎曲的狹長地會被
+    高估（寬 8m 的 L 形算成 15m，第四款誤判不符）。矩形時兩法相同；判別式為負（近圓形、
+    不可能是狹長地）時退回面積／外接矩形長邊。
+    """
+    a, half = float(geom.area), float(geom.length) / 2.0
+    disc = half * half - 4.0 * a
+    if a <= 0:
+        return 0.0
+    if disc < 0:
+        L, _ = rect_dims(geom)
+        return a / L if L else 0.0
+    return (half - math.sqrt(disc)) / 2.0
+
+
 def contact_len(line, geoms) -> float:
     """line 落在 geoms 各自外擴 TOL 範圍內的長度（先聯集，避免重複計算）。"""
     if not geoms:
@@ -298,26 +315,33 @@ def judge(base: dict, pocket: dict) -> dict:
     pa = pocket["登記面積_m2"]
     ba = base["登記面積_m2"]
     adj = base["緊鄰類別_m"]
-    adj_types = base["緊鄰使類_m"]
+    adj_max = base.get("緊鄰使類_單筆最長_m", base["緊鄰使類_m"])
 
     def sh(cats):
         return _share(pc, P, cats)
 
     def adjacent(*types):
-        return sum(v for k, v in adj_types.items() if k in types) >= MIN_EDGE
+        # 2026-10-07 code review 修：原本把多筆鄰地接觸長度加總，兩個對角各角碰 0.6m 會被
+        # 加成 1.2m 而判「毗鄰」。改為**任一筆鄰地本身**的共同邊界達 MIN_EDGE 才算。
+        return any(adj_max.get(k, 0.0) >= MIN_EDGE for k in types)
 
-    # ---- 款5（兩條同文）
-    same = adj_types.get(base["使類"], 0.0) >= MIN_EDGE if base["使類"] else False
+    # ---- 款5（兩條同文）——基地多種使類時逐類比對；使類空白則無從判斷（待查）
+    btypes = base.get("_使類清單") or ([base["使類"]] if base["使類"] else [])
+    same_t = [t for t in btypes if adj_max.get(t, 0.0) >= MIN_EDGE]
     a5, a5txt = area_test(ba, AREA_0012, True)
-    if same:
-        k5 = (NG, f"基地 {a5txt}；且鄰接相同使用地類別（{base['使類']} "
-                  f"{adj_types.get(base['使類'], 0):.1f} m）")
+    if same_t:
+        k5 = (NG, f"基地 {a5txt}；且鄰接相同使用地類別（"
+                  + "、".join(f"{t} {adj_max[t]:.1f} m" for t in same_t) + "）")
+    elif not btypes:
+        k5 = (_worst(a5, PEND), f"基地 {a5txt}；基地使類空白，無從判斷鄰接有無相同類別")
     else:
         k5 = (a5, f"基地 {a5txt}；鄰接無相同使用地類別")
 
     # ---- 款4（兩條同文）
     w = base["平均寬度_m"]
-    if w <= WIDTH_10:
+    if base.get("不相連塊數", 1) > 1:
+        k4 = (PEND, f"基地分成 {base['不相連塊數']} 塊不相連，平均寬度無意義——請逐塊檢核")
+    elif w <= WIDTH_10:
         k4 = (PEND, f"平均寬度 {w:.2f} m ≤ 10 m；對邊是否為建築用地／道路水溝等、"
                     "變更後是否妨礙鄰近農業生產環境須人工確認")
     else:
@@ -340,6 +364,9 @@ def judge(base: dict, pocket: dict) -> dict:
     a1, a1t = area_test(pa, AREA_012, True)
     lb = "（框內下限）" if pocket.get("面積為下限值") else ""
     a1t += lb
+    # 2026-10-07 code review 修：口袋被查詢框切斷時，框內面積 ≤ 門檻不代表實際 ≤ 門檻
+    if lb and a1 == OK:
+        a1 = PEND
     # §35Ⅳ：包圍之「各種建築用地」須為 78.04.03 前編定者 → 資料上無從確認，符合者一律降待查
     k35_1 = (_worst(s1, a1, PEND),
              f"建築用地包圍比例 {sh(['建築用地']):.0%}；口袋 {a1t}；"
@@ -384,6 +411,8 @@ def judge(base: dict, pocket: dict) -> dict:
     s3b = share_test(sh(iso3), sh(iso3 + ["特定目的事業用地", "未登記土地", "其他"]))
     a3, a3t = area_test(pa, AREA_05, False)
     a3t += lb
+    if lb and a3 == OK:
+        a3 = PEND
     k351_3 = (_worst(s3b, a3, PEND if s3b == OK else OK),
               f"口袋外圍鄉村區＋道路水溝比例 {sh(iso3):.0%}"
               "（機關學校軍事用地、自然界線須另認定）；口袋 " + a3t)
@@ -423,7 +452,8 @@ def analyze(base: gpd.GeoDataFrame, frame: gpd.GeoDataFrame, envelope,
     # ---- 基地本身
     b_reg = sum(reg_area(r, g) for (_, r), g in zip(base.iterrows(), bgeoms))
     L, S = rect_dims(bu)
-    width = bu.area / L if L else 0.0
+    width = strip_width(bu)
+    n_parts = len(bu.geoms) if bu.geom_type == "MultiPolygon" else 1
     b_contacts = per_neighbor_contacts(bu, nb)
     adj_rows = []
     for j, ln, _seg in sorted(b_contacts, key=lambda t: -t[1]):
@@ -433,24 +463,29 @@ def analyze(base: gpd.GeoDataFrame, frame: gpd.GeoDataFrame, envelope,
                          "都計區": r["都計區"], "共同邊界_m": round(ln, 2),
                          "角碰": ln < MIN_EDGE})
     adj_types: dict[str, float] = {}
+    adj_types_max: dict[str, float] = {}   # 單筆鄰地最長共同邊界（判「毗鄰」用）
     for j, ln, _seg in b_contacts:
         k = nb.iloc[j]["使類"] or ("都市計畫區" if nb.iloc[j]["都計區"] == "都計" else "（空白）")
         adj_types[k] = adj_types.get(k, 0.0) + ln
+        adj_types_max[k] = max(adj_types_max.get(k, 0.0), ln)
     b_cat = _cat_lengths(bu, nb, [j for j, _, _ in b_contacts])
     base_types = [t for t in base["使類"] if _s(t)] if "使類" in base.columns else []
     base_res = {
         "地號": [f"{_s(r.get('段'))}{_s(r.get('地號'))}" for _, r in base.iterrows()],
         "筆數": len(base),
         "使類": base_types[0] if len(set(base_types)) == 1 else "／".join(sorted(set(base_types))),
+        "_使類清單": sorted(set(base_types)),
         "登記面積_m2": round(b_reg, 2),
         "圖面積_m2": round(bu.area, 2),
         "外接矩形長邊_m": round(L, 2),
         "外接矩形短邊_m": round(S, 2),
         "平均寬度_m": round(width, 2),
-        "_平均寬度口徑": "圖面積／最小外接矩形長邊（同一幾何口徑）",
+        "_平均寬度口徑": "與基地等面積、等周長之矩形短邊（L 形／彎曲狹長地亦適用）",
+        "不相連塊數": n_parts,
         "周長_m": round(bu.boundary.length, 2),
         "緊鄰宗地": adj_rows,
         "緊鄰使類_m": {k: round(v, 2) for k, v in sorted(adj_types.items(), key=lambda t: -t[1])},
+        "緊鄰使類_單筆最長_m": {k: round(v, 2) for k, v in adj_types_max.items()},
         "緊鄰類別_m": {k: round(v, 2) for k, v in b_cat.items() if not k.startswith("_")},
         "無鄰地接觸_m": round(b_cat["_無宗地"], 2),
     }
@@ -488,6 +523,9 @@ def analyze(base: gpd.GeoDataFrame, frame: gpd.GeoDataFrame, envelope,
         else:
             warns.append("所在連續農業用地被查詢框切斷，面積為框內下限值且未超過 0.5 公頃，"
                          "結論可能翻轉——請加大 --buffer／--max-buffer 重跑")
+    if n_parts > 1:
+        warns.append(f"基地分成 {n_parts} 塊不相連：口袋會把各塊合併計算、平均寬度無意義。"
+                     "§35／§35-1 應逐塊（或以相連範圍）檢核")
     if base_res["無鄰地接觸_m"] >= MIN_EDGE:
         warns.append(f"基地邊界有 {base_res['無鄰地接觸_m']:.1f} m 未接觸任何框查宗地"
                      "（髮絲縫以外的缺口，可能為未登錄地或資料缺漏），請目視確認")
@@ -629,6 +667,18 @@ def fetch_frame(env, version=None):
     return mpq.drop_internal(gdf), ver
 
 
+def frame_buffer_of(raw, path: str):
+    """快取框查當初的外擴距離（m）：欄位 `_查詢外擴_m` 優先，其次檔名「周邊<N>m」；都沒有回 None。"""
+    import re  # noqa: PLC0415
+    if "_查詢外擴_m" in raw.columns and len(raw):
+        try:
+            return float(raw["_查詢外擴_m"].iloc[0])
+        except (TypeError, ValueError):
+            pass
+    m = re.search(r"周邊(\d+(?:\.\d+)?)m", os.path.basename(path))
+    return float(m.group(1)) if m else None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="零星土地檢核（管制規則 §35、§35-1）＋農地口袋聚合")
     ap.add_argument("--case", required=True, help="案件資料夾（讀 cadastre/基地.shp）")
@@ -643,6 +693,8 @@ def main(argv=None):
     ap.add_argument("--water-barrier", action="store_true",
                     help="（相容舊旗標，已是預設值）")
     ap.add_argument("--out-dir", help="輸出資料夾（預設＝--case）")
+    ap.add_argument("--allow-multipart", action="store_true",
+                    help="基地不相連時仍合併計算（預設中止，請逐塊或以相連範圍執行）")
     a = ap.parse_args(argv)
 
     case = os.path.abspath(a.case)
@@ -653,8 +705,12 @@ def main(argv=None):
         base = base.set_crs(3826)
     elif base.crs.to_epsg() != 3826:
         base = base.to_crs(3826)
+    parts = close_union(list(base.geometry))
+    if parts.geom_type == "MultiPolygon" and not a.allow_multipart:
+        print(f"✖ 基地分成 {len(parts.geoms)} 塊不相連：口袋會被合併計算、平均寬度無意義。"
+              "請以 --base 指定相連範圍逐塊執行，或確認後加 --allow-multipart", file=sys.stderr)
+        return 2
     x1, y1, x2, y2 = base.total_bounds
-    env = box(x1 - a.buffer, y1 - a.buffer, x2 + a.buffer, y2 + a.buffer)
 
     os.makedirs(os.path.join(out, "cadastre"), exist_ok=True)
     buf = a.buffer
@@ -662,10 +718,24 @@ def main(argv=None):
         raw = gpd.read_file(a.frame, engine="pyogrio")
         ver = _s(raw["_version"].iloc[0]) if "_version" in raw.columns and len(raw) else \
             (_s(raw["版次"].iloc[0]) if "版次" in raw.columns and len(raw) else "")
-        # 觸框判定用的框＝基地外擴 --buffer；重用快取時請給與當初相同的 --buffer
-        src = f"重用 {a.frame}"
+        # 2026-10-07 code review 修：觸框判定必須用快取「當初」的外擴距離，不是命令列 --buffer
+        # （250m 快取配 --buffer 500 → 被切斷的口袋判成未觸框）。來源：快取欄位 > 檔名「周邊Nm」。
+        cached = frame_buffer_of(raw, a.frame)
+        if cached is None:
+            print(f"✖ 無法得知 {a.frame} 當初的查詢外擴距離（無 _查詢外擴_m 欄、檔名也非「周邊Nm」），"
+                  "觸框判定會不準；請改用線上框查", file=sys.stderr)
+            return 2
+        if abs(cached - a.buffer) > 0.5 and a.buffer != 250.0:
+            print(f"✖ --buffer {a.buffer:.0f} 與快取的查詢外擴 {cached:.0f} m 不一致", file=sys.stderr)
+            return 2
+        buf = cached
+        src = f"重用 {a.frame}（查詢外擴 {buf:.0f} m）"
         frame = normalize_frame(raw)
         print(f"  框查宗地 {len(frame)} 筆（{src}）")
+        if not len(frame):
+            print("✖ 框查快取 0 筆，無法判定", file=sys.stderr)
+            return 2
+        env = box(x1 - buf, y1 - buf, x2 + buf, y2 + buf)
         res = analyze(base, frame, env, not a.water_as_agri)
     else:
         # ★ 口袋觸框且面積下限仍可能低於最大門檻（0.5 公頃）時自動加倍外擴重查——
@@ -675,6 +745,11 @@ def main(argv=None):
             env = box(x1 - buf, y1 - buf, x2 + buf, y2 + buf)
             print(f"框查：基地外擴 {buf:.0f} m …")
             raw, ver = fetch_frame(env, a.version)
+            if not len(raw):
+                # 服務異常回空資料時，第五款會誤判「鄰接無相同類別」→ 直接中止
+                print("✖ 框查回 0 筆（服務可能異常），無法判定", file=sys.stderr)
+                return 2
+            raw["_查詢外擴_m"] = float(buf)
             cache = os.path.join(out, "cadastre", f"周邊{buf:.0f}m_框查.gpkg")
             raw.to_file(cache, driver="GPKG", engine="pyogrio")
             src = f"農業部地籍框查（快取 {cache}）"
@@ -704,8 +779,8 @@ def main(argv=None):
         f.write(txt)
     print(txt)
     print(f"→ {os.path.join(out, '零星土地檢核.json')}／.txt、{gp}")
-    return payload
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

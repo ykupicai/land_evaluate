@@ -344,8 +344,9 @@ PowerShell，不用Bash）手動整理成NAS的標準結構：
    近期慣例是`YYYYMMDD_地名_案件成果`，該規則文件目前未涵蓋這桶，先比照最近
    precedent案例）。
 2. **兩桶內層結構相同**：`00_案件索引`（`STATE_產線進度與案件事實.md`＝改名的
-   STATE.md＋`整理紀錄.md`）、`01_原始資料`、`02_GIS工作`（外層放qgz+gpkg、
-   `shp/`子夾放向量資料、`空照及其他/`子夾放底圖tif不含`_tilecache`）、
+   STATE.md＋`整理紀錄.md`）、`01_原始資料`、`02_GIS工作`（外層放qgz＋**qgz 引用的
+   檔維持原相對配置**——`圖層_讀取_*.gpkg`、`底圖\001_*.tif`、`臨路評估\`、`圖例_maxmap\`，
+   見第 4 點；其餘向量放`shp/`、未被 qgz 引用的底圖 tif 放`空照及其他/`，皆不含`_tilecache`）、
    `03_評估成果`（簡報pptx+QA pdf+圖檔_maxmap扁平化+檢核json/txt）。
 3. **產線工作檔不入案**（使用者裁示，兩案precedent一致）：`build_deck.py`、
    `05_出圖清單_maxmap.*`、`sites_status.csv`、pptx防蓋改鎖

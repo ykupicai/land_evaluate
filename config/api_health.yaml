@@ -59,8 +59,10 @@
     名稱: 環境敏感地區單一窗口 eland（應免查範圍）
     影響: 備選① 的應免查口徑取不到；正式查復仍須登入平台
     檢查: text
-    url: https://eland.nlma.gov.tw/
-    必含文字: []
+    # 2026-10-07：改打產線 update_exempt.py 實際用的頁面，並驗防偽 token 還在（POST 匯出要用）
+    url: https://eland.nlma.gov.tw/seportal/Web_SEData
+    API: true
+    必含文字: ["__RequestVerificationToken"]
     逾時: 45
 
   # ── 圖磚底圖（產線 ③ 出圖）─────────────────────────────────────────────
@@ -104,16 +106,20 @@
   - id: landslide-cloud
     名稱: 山崩雲 API（順向坡、大規模崩塌、崩塌目錄）
     影響: 坡地災害檢核與 hazard 圖缺順向坡／崩塌資料
-    檢查: text
-    url: https://landslide.geologycloud.tw/
-    必含文字: []
+    檢查: json
+    # 2026-10-07：改打產線 make_hazard_map.py 的 lsdata 端點（基隆市山崩與地滑，limit=1）
+    url: https://landslide.geologycloud.tw/map/api/opendata/lsdata/geologicalsensitiveareas?filename=%E5%9F%BA%E9%9A%86%E5%B8%82&coordinate=TWD97&filetype=json&limit=1
+    必含鍵: ["type", "features"]
     逾時: 45
 
   - id: ardswc-mvt
     名稱: 水保署圖磚（土石流潛勢溪流／影響範圍／集水區）
     影響: 土石流相關圖層取不到
     檢查: text
-    url: https://gis.ardswc.gov.tw/
+    # 2026-10-07：改打產線用的 MVT 圖磚；空磚回 200（產線視為正常），圖層不存在回 404 → FAIL
+    url: https://gis.ardswc.gov.tw/api/ardswc/vectortiles/shp/landslide/16/28042/54925.pbf
+    referer: https://gis.ardswc.gov.tw/
+    API: true
     必含文字: []
     逾時: 45
 
@@ -122,16 +128,21 @@
     名稱: TGOS 國家空間資料資產（環敏圖資換版下載）
     影響: 本機環敏圖資無法更新；過舊圖資曾導致結論方向相反（NR23、BREED47）
     檢查: text
-    url: https://www.tgos.tw/
+    # 2026-10-07：改以 HEAD 驗 tgos_fetch.py 登錄的下載檔還在（不下載內容）
+    url: https://www.tgos.tw:443/MDE/VirtualDir_TC/Product/4fbee0f6-e2e2-4deb-93f3-eeefa6659d81/自然保留區1152_SHP.zip
+    method: HEAD
+    API: true
+    必含類型: zip
     必含文字: []
     逾時: 45
 
   - id: data-gov-tw
     名稱: 政府資料開放平臺（門牌坐標等）
     影響: 門牌坐標無法更新年度版本，聚落判定會用到過期門牌
-    檢查: text
-    url: https://data.gov.tw/
-    必含文字: []
+    檢查: json
+    # 2026-10-07：改打產線 settlement_check.py 用的 v2 API（臺南門牌坐標 dataset 120044）
+    url: https://data.gov.tw/api/v2/rest/dataset/120044
+    必含鍵: ["success", "result"]
     逾時: 45
 
   # ── 選用／外部參考 ─────────────────────────────────────────────────────

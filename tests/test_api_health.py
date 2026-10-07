@@ -330,3 +330,96 @@ def test_新舊地號登錄為python型():
         else [r for r in (reg if isinstance(reg, list) else next(v for v in reg.values() if isinstance(v, list)))
               if r.get("id") == "moi-newold-landno"]
     assert rows and rows[0]["檢查"] == "python" and rows[0]["函式"] in ah.PY_PROBES
+
+
+# ── 2026-10-07 code review #12～#15 ──────────────────────────────────────────
+def _up_spec(**kw):
+    spec = {"檢查": "_urbanplan", "url": "x", "_base": "https://h/s/MapServer/0",
+            "_proxy": None, "_proxy_encode": False, "fields": ["使用分區"]}
+    spec.update(kw)
+    return spec
+
+
+def _up_session(layer_body, count_body):
+    return FakeSession(lambda url: FakeResp(200, count_body) if "returnCountOnly" in url
+                       else FakeResp(200, layer_body))
+
+
+def test_欄名改掉但別名留著判FAIL():
+    """★ 錯法：name∪alias 比對 → 綠燈。產線 attributes 只用 name 當 key。"""
+    body = json.dumps({"name": "L", "fields": [{"name": "NEWNAME", "alias": "使用分區"}]}).encode()
+    status, detail, _ = ah.probe_urbanplan(_up_session(body, b'{"count": 5}'), _up_spec())
+    assert status == "FAIL" and "使用分區" in detail
+
+
+def test_圖層不支援Query判FAIL():
+    body = json.dumps({"name": "L", "capabilities": "Map",
+                       "fields": [{"name": "使用分區"}]}).encode()
+    status, detail, _ = ah.probe_urbanplan(_up_session(body, b'{"count": 5}'), _up_spec())
+    assert status == "FAIL" and "Query" in detail
+
+
+def test_圖層筆數查詢回0判FAIL():
+    body = json.dumps({"name": "L", "capabilities": "Map,Query",
+                       "fields": [{"name": "使用分區"}]}).encode()
+    status, _, _ = ah.probe_urbanplan(_up_session(body, b'{"count": 0}'), _up_spec())
+    assert status == "FAIL"
+
+
+def test_圖層與筆數查詢都正常判OK且走代理編碼():
+    body = json.dumps({"name": "L", "capabilities": "Map,Query",
+                       "fields": [{"name": "使用分區"}]}).encode()
+    sess = _up_session(body, b'{"count": 17336}')
+    spec = _up_spec(_proxy="https://p/proxy.ashx?", _proxy_encode=True)
+    status, detail, _ = ah.probe_urbanplan(sess, spec)
+    assert status == "OK" and "17,336" in detail
+    # 臺南型代理：目標網址必須 URL 編碼後接在代理後面（與產線 _proxied 一致）
+    assert all(c[1].startswith("https://p/proxy.ashx?https%3A%2F%2Fh") for c in sess.calls)
+
+
+def test_臺南細部計畫層也有健檢項():
+    ids = {s["id"] for s in ah.urbanplan_specs()}
+    assert "urbanplan-臺南市-細計" in ids
+
+
+def test_API型端點回4xx判FAIL而非WARN():
+    spec = {"檢查": "text", "url": "x", "API": True, "必含文字": []}
+    assert _run(spec, FakeResp(404, b"{}"))[0] == "FAIL"
+    spec2 = {"檢查": "text", "url": "x", "必含文字": []}
+    assert _run(spec2, FakeResp(404, b"{}"))[0] == "WARN"
+
+
+def test_必含類型不符判FAIL():
+    spec = {"檢查": "text", "url": "x", "method": "HEAD", "必含類型": "zip", "必含文字": []}
+    assert _run(spec, FakeResp(200, b"", headers={"Content-Type": "text/html"}))[0] == "FAIL"
+    assert _run(spec, FakeResp(200, b"", headers={"Content-Type": "application/zip"}))[0] == "OK"
+
+
+def test_NGIS一級圖層不足判FAIL(monkeypatch):
+    _fake_module(monkeypatch, "ngis", fetch_token=lambda: "T",
+                 list_layers=lambda tok, level: [1] * (3 if level == "一級" else 29))
+    monkeypatch.setattr(ah, "skill_path", lambda *a: Path("."), raising=False)
+    import config_loader
+    monkeypatch.setattr(config_loader, "skill_path", lambda *a: Path("."))
+    status, detail = ah.py_ngis_token(None, {})
+    assert status == "FAIL" and "一級 3" in detail
+
+
+def test_地號反查型查無分區判FAIL(monkeypatch):
+    _fake_module(monkeypatch, "urbanplan_fetch",
+                 query_by_landno=lambda *a: ([], [], []))
+    status, _ = ah.py_urbanplan_landno(None, {"county": "宜蘭縣", "sect": "宜興段", "landno": "1"})
+    assert status == "FAIL"
+
+
+def test_only不寫報告(monkeypatch, tmp_path):
+    called = []
+    monkeypatch.setattr(ah, "run", lambda only=None: [{"id": "x", "狀態": "OK", "名稱": "x",
+                                                       "說明": "", "影響": "", "秒": 0.0}])
+    monkeypatch.setattr(ah, "write_report", lambda *a, **k: called.append(1) or ("p", "t"))
+    monkeypatch.setattr(ah, "previous", lambda: (None, {}))
+    monkeypatch.setattr(ah, "alert", lambda *a, **k: None)   # 不碰真實桌面
+    ah.main(["--only", "x"])
+    assert not called
+    ah.main(["--only", "x", "--write-report"])
+    assert called

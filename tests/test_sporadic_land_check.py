@@ -242,3 +242,62 @@ def test_caveat_on_every_article():
     res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(ring("鄉村區", "乙種建築用地")), ENV)
     for k in ("§35", "§35-1"):
         assert res["判定"][k]["備註"] == slc.CAVEAT
+
+
+# ---------------------------------------------------------------- 6. code review #7～#11（2026-10-07）
+def test_lower_bound_area_never_passes():
+    """★ 錯法：口袋被框切斷、框內面積 ≤0.12 公頃 → 面積判 OK。正解：下限不能當符合。"""
+    env = box(-5, -5, 30, 30)                      # 小框，讓口袋必然觸框
+    rows = [("A1", "一般農業區", "農牧用地", box(10, 0, 100, 10))] + ring("鄉村區", "乙種建築用地")[:1]
+    res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), env)
+    assert res["所在連續農業用地"]["面積為下限值"]
+    item3 = res["判定"]["§35-1"]["各款"]["三"]
+    assert item3["判定"] != slc.OK
+
+
+def test_two_corner_touches_do_not_sum_to_adjacency():
+    """★ 錯法：兩個對角各角碰甲建（各約 0.6m）加總 1.2m → 判毗鄰。正解：逐筆判。"""
+    rows = [("J1", "一般農業區", "甲種建築用地", box(10, 10, 20, 20)),
+            ("J2", "一般農業區", "甲種建築用地", box(-10, -10, 0, 0))]
+    res = slc.analyze(base_of(box(0, 0, 10, 10)), frame(rows), ENV)
+    assert res["判定"]["§35"]["前提"]["判定"] == slc.NG
+
+
+def test_l_shaped_strip_width():
+    """★ 錯法：寬 8m 的 L 形狹長地用「面積／外接矩形長邊」算成 15m。正解：約 8m。"""
+    from shapely.ops import unary_union
+    g = unary_union([box(0, 0, 50, 8), box(0, 0, 8, 50)])
+    res = slc.analyze(base_of(g), frame([]), ENV)
+    assert res["基地"]["平均寬度_m"] == pytest.approx(8, abs=0.2)
+    assert res["判定"]["§35"]["各款"]["四"]["判定"] == slc.PEND
+
+
+def test_disconnected_base_flags_item4_and_warns():
+    res = slc.analyze(base_of(box(0, 0, 10, 10), box(50, 0, 60, 10)), frame([]), ENV)
+    assert res["基地"]["不相連塊數"] == 2
+    assert res["判定"]["§35"]["各款"]["四"]["判定"] == slc.PEND
+    assert any("不相連" in w for w in res["警告"])
+
+
+def test_item5_multi_landuse_compares_each_type():
+    """★ 錯法：基地含農牧＋養殖時組成「農牧用地／養殖用地」去查表 → 永遠判無相同類別。"""
+    b = base_of(box(0, 0, 5, 10), box(5, 0, 10, 10))
+    b.loc[1, "使類"] = "養殖用地"
+    rows = [("A", "一般農業區", "養殖用地", box(10, 0, 20, 10))]
+    res = slc.analyze(b, frame(rows), ENV)
+    assert res["判定"]["§35"]["各款"]["五"]["判定"] == slc.NG
+
+
+def test_item5_blank_landuse_is_pending():
+    b = base_of(box(0, 0, 10, 10))
+    b.loc[0, "使類"] = None
+    res = slc.analyze(b, frame([]), ENV)
+    assert res["判定"]["§35"]["各款"]["五"]["判定"] == slc.PEND
+
+
+def test_frame_buffer_from_cache_column_and_filename():
+    raw = gpd.GeoDataFrame([{"_查詢外擴_m": 500.0}], geometry=[box(0, 0, 1, 1)], crs="EPSG:3826")
+    assert slc.frame_buffer_of(raw, "x.gpkg") == 500.0
+    raw2 = gpd.GeoDataFrame([{"a": 1}], geometry=[box(0, 0, 1, 1)], crs="EPSG:3826")
+    assert slc.frame_buffer_of(raw2, r"C:\x\周邊250m_框查.gpkg") == 250.0
+    assert slc.frame_buffer_of(raw2, "random.gpkg") is None

@@ -129,12 +129,19 @@ def probe_image(session, spec):
 
 def probe_text(session, spec):
     timeout = spec.get("逾時", DEFAULT_TIMEOUT)
-    resp, secs = _fetch(session, spec["url"], timeout, spec.get("referer"))
+    resp, secs = _fetch(session, spec["url"], timeout, spec.get("referer"),
+                        method=spec.get("method", "GET"))
     if resp.status_code >= 500:
         return "FAIL", f"HTTP {resp.status_code}（伺服器端錯誤）", secs
     if resp.status_code >= 400:
-        # 405/404 代表站在、只是這個 method/路徑不吃；對「站是否活著」而言算通
+        # 2026-10-07 code review 修：url 是「產線實際打的端點」（API 型）時，4xx＝路由改名或
+        # 下架，必須 FAIL（只判 WARN 不會留紙條）。只驗站台首頁者才維持 WARN。
+        if spec.get("API"):
+            return "FAIL", f"HTTP {resp.status_code}（產線使用的端點不存在或拒絕；可能改路由／下架）", secs
         return "WARN", f"HTTP {resp.status_code}（站台有回應，但此路徑非預期用法）", secs
+    want_ct = spec.get("必含類型")
+    if want_ct and want_ct not in (resp.headers.get("Content-Type") or ""):
+        return "FAIL", f"Content-Type 是 {resp.headers.get('Content-Type')}，不是預期的 {want_ct}", secs
     for want in spec.get("必含文字") or []:
         if want not in resp.text:
             return "FAIL", f"頁面未含「{want}」；可能被導到錯誤頁", secs
@@ -180,6 +187,10 @@ def py_moa_newest_version(session, spec):
     return "OK", f"現行版次 {ver}；Tiled 服務 {len(layers)} 層、測試框回 {n} 筆"
 
 
+# 2026-08 實測一級 25、二級 29 層；低於此門檻即視為圖層清單異常（容許少量增減）
+NGIS_MIN = {"一級": 20, "二級": 25}
+
+
 def py_ngis_token(session, spec):
     from config_loader import skill_path
     sys.path.insert(0, str(skill_path("ngis-sensitive", "scripts")))
@@ -187,8 +198,13 @@ def py_ngis_token(session, spec):
     token = ngis.fetch_token()
     if not token:
         return "FAIL", "取不到 token"
-    layers = ngis.list_layers(token, level="二級")
-    return "OK", f"token 正常，二級圖層 {len(layers)} 層"
+    # 2026-10-07 code review 修：產線一級（25）、二級（29）都用，原本只驗二級且 0 層也判 OK
+    l1 = ngis.list_layers(token, level="一級")
+    l2 = ngis.list_layers(token, level="二級")
+    if len(l1) < NGIS_MIN["一級"] or len(l2) < NGIS_MIN["二級"]:
+        return "FAIL", (f"圖層數不足：一級 {len(l1)}（門檻 {NGIS_MIN['一級']}）、"
+                        f"二級 {len(l2)}（門檻 {NGIS_MIN['二級']}）；環敏套疊會漏項")
+    return "OK", f"token 正常，一級 {len(l1)} 層、二級 {len(l2)} 層"
 
 
 # 布袋鎮 1410 段 2026-08 實測：國有 90＋縣市有 43＝133 筆。低於此門檻即視為資料或結構異常。
@@ -249,14 +265,41 @@ def py_nlsc_buffer(session, spec):
     return "OK", f"醫療環域回 {len(data)} 筆"
 
 
+def py_urbanplan_landno(session, spec):
+    """地號反查型都市計畫圖台（宜蘭縣、新竹市）：直接呼叫產線 query_by_landno 查已知地號。
+
+    2026-10-07 code review 修：原本只 GET 圖台 HTML 頁面，新竹市的 token API 與查詢 API
+    都沒驗到。樣本：宜蘭縣宜蘭市宜興段 1（河川區）、新竹市東門段一小段 1（機關用地）。
+    """
+    import urbanplan_fetch as up  # noqa: PLC0415
+    try:
+        rows, _g, _raw = up.query_by_landno(spec["county"], spec.get("town", ""),
+                                            spec["sect"], [spec["landno"]])
+    except BaseException as exc:  # noqa: BLE001 — query_by_landno 以 SystemExit 回報失敗
+        return "FAIL", f"查詢失敗：{str(exc)[:150]}"
+    if not rows or not rows[0].get("ZONE"):
+        return "FAIL", f"已知地號 {spec['sect']}{spec['landno']} 查無分區：API 或結構可能變更"
+    return "OK", f"已知地號 {spec['sect']}{spec['landno']} → {rows[0]['ZONE']}"
+
+
 PY_PROBES = {"moa_newest_version": py_moa_newest_version, "ngis_token": py_ngis_token,
              "moi_public_land": py_moi_public_land, "moi_newold": py_moi_newold,
+             "urbanplan_landno": py_urbanplan_landno,
              "nlsc_buffer": py_nlsc_buffer}
 
 
 # ── 都市計畫縣市圖台：直接驗註冊表對應的欄位還在不在 ───────────────────────
+LANDNO_SAMPLES = {"宜蘭縣": {"town": "宜蘭市", "sect": "宜興段", "landno": "1"},
+                  "新竹市": {"town": "", "sect": "東門段一小段", "landno": "1"}}
+
+
 def urbanplan_specs():
-    """由 urbanplan_fetch 的註冊表產生探測項；不另抄一份 URL，才不會與產線分岔。"""
+    """由 urbanplan_fetch 的註冊表產生探測項；不另抄一份 URL，才不會與產線分岔。
+
+    2026-10-07 code review 修：①代理網址改用產線 `up._proxied()`（臺南代理要先 URL 編碼，
+    原本自己拼沒編碼，兩邊送出的請求不同）②臺南細部計畫層 query_fallback 也驗 ③除了圖層
+    資訊，還實際跑一次 returnCountOnly 查詢 ④地號反查型改成實際查一筆已知地號。
+    """
     try:
         import urbanplan_fetch as up  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
@@ -265,42 +308,48 @@ def urbanplan_specs():
                  "_error": f"import 失敗：{exc}"}]
     specs = []
     for county, cfg in up.COUNTY.items():
-        query = cfg.get("query") or ""
-        base = query.rsplit("/query", 1)[0]
-        # 有代理的縣市（高雄、花蓮）直連會被要求 token；產線本來就走代理，健檢比照，
-        # 否則會一直報「Token Required」這種與實際可用性無關的假紅燈。
-        target = base + "?f=json"
-        if cfg.get("proxy"):
-            target = cfg["proxy"] + target
-        specs.append({
-            "id": f"urbanplan-{county}",
-            "名稱": f"都市計畫圖台 {county}",
-            "影響": f"Ⓤ {county} 退回本機 2019 粗版 shp，道路截角與分區精度下降",
-            "檢查": "_urbanplan",
-            "url": target,
-            "referer": cfg.get("referer"),
-            # 須 token 的縣市（新北）：token 是從一支靜態 JS 用 regex 抓的，對方改版就會
-            # 靜默失效——這正是每週最值得驗的一條，故健檢比照產線先抓 token 再打服務。
-            "token_url": cfg.get("token_url"),
-            "token_regex": cfg.get("token_regex"),
-            "unstable": bool(cfg.get("unstable")),
-            "fields": [v for v in (cfg.get("fields") or {}).values() if v],
-            "逾時": 45,
-        })
-    for county in getattr(up, "LANDNUM_COUNTY", {}):
-        specs.append({
-            "id": f"urbanplan-{county}",
-            "名稱": f"都市計畫圖台 {county}（地號反查型）",
-            "影響": f"Ⓤ {county} 退回本機 2019 粗版 shp",
-            "檢查": "text",
-            # 這兩個縣市是自訂 API（POST、要 token／參數），健檢只驗「站台活著」；
-            # referer 指的是圖台頁面，比裸網域根目錄更能代表服務是否還在。
-            "url": getattr(up, "LANDNUM_COUNTY")[county].get("referer")
-                   or getattr(up, "LANDNUM_COUNTY")[county].get("base") or "",
-            "必含文字": [],
-            "逾時": 45,
-        })
+        for key, suffix, label in (("query", "", ""), ("query_fallback", "-細計", "（細部計畫層）")):
+            query = cfg.get(key) or ""
+            if not query:
+                continue
+            base = query.rsplit("/query", 1)[0]
+            specs.append({
+                "id": f"urbanplan-{county}{suffix}",
+                "名稱": f"都市計畫圖台 {county}{label}",
+                "影響": f"Ⓤ {county} 退回本機 2019 粗版 shp，道路截角與分區精度下降",
+                "檢查": "_urbanplan",
+                "url": up._proxied(cfg, base + "?f=json"),
+                "_base": base,
+                "_proxy": cfg.get("proxy"),
+                "_proxy_encode": bool(cfg.get("proxy_encode")),
+                "referer": cfg.get("referer"),
+                # 須 token 的縣市（新北）：token 從靜態 JS 用 regex 抓，對方改版就會靜默失效
+                "token_url": cfg.get("token_url"),
+                "token_regex": cfg.get("token_regex"),
+                "unstable": bool(cfg.get("unstable")),
+                "fields": [v for v in (cfg.get("fields") or {}).values() if v],
+                # 新北筆數查詢實測 17~40 秒（2026-10-07），45 秒逾時會誤判
+                "逾時": 90,
+            })
+    for county, cfg in getattr(up, "LANDNUM_COUNTY", {}).items():
+        sample = LANDNO_SAMPLES.get(county)
+        spec = {"id": f"urbanplan-{county}", "名稱": f"都市計畫圖台 {county}（地號反查型）",
+                "影響": f"Ⓤ {county} 退回本機 2019 粗版 shp",
+                "url": cfg.get("base") or cfg.get("referer") or "", "逾時": 60}
+        if sample:
+            spec.update(檢查="python", 函式="urbanplan_landno", county=county, **sample)
+        else:
+            spec.update(檢查="_error", _error=f"{county} 未設健檢樣本地號（LANDNO_SAMPLES）")
+        specs.append(spec)
     return [s for s in specs if s.get("url")]
+
+
+def _up_url(spec, path, token=""):
+    """與產線同一套代理規則組出網址（token 放進目標網址再交給代理）。"""
+    import urbanplan_fetch as up  # noqa: PLC0415
+    target = spec["_base"] + path + (f"&token={token}" if token else "")
+    return up._proxied({"proxy": spec.get("_proxy"), "proxy_encode": spec.get("_proxy_encode")},
+                       target)
 
 
 def probe_urbanplan(session, spec):
@@ -308,14 +357,16 @@ def probe_urbanplan(session, spec):
     if spec.get("unstable"):
         return "SKIP", "註冊表標 unstable（已知不穩定，產線本來就退回本機 shp）", 0.0
     timeout = spec.get("逾時", 45)
-    url = spec["url"]
+    token = ""
     if spec.get("token_url") and spec.get("token_regex"):
         page, _ = _fetch(session, spec["token_url"], timeout, spec.get("referer"))
         found = re.search(spec["token_regex"], page.text)
         if not found:
             return ("FAIL", "取不到 token：token_regex 在該頁抓不到值（對方改版了，"
                             "產線會靜默退回本機 shp）", 0.0)
-        url += "&token=" + found.group(1)
+        token = found.group(1)
+    url = _up_url(spec, "?f=json", token) if spec.get("_base") else spec["url"] + (
+        f"&token={token}" if token else "")
     resp, secs = _fetch(session, url, timeout, spec.get("referer"))
     if resp.status_code != 200:
         return "FAIL", f"HTTP {resp.status_code}", secs
@@ -328,11 +379,27 @@ def probe_urbanplan(session, spec):
         return "FAIL", f"服務回錯誤：{data['error']}", secs
     if "fields" not in data:
         return "FAIL", "回應沒有 fields（圖層可能已下架或改編號）", secs
-    have = {f.get("name") for f in data["fields"]} | {f.get("alias") for f in data["fields"]}
+    # 2026-10-07 code review 修：只比對真實欄名——產線 attributes 以 name 為 key，
+    # 原本連 alias 一起認，欄名改掉、別名留著時健檢綠燈、產線欄位全變空值。
+    have = {f.get("name") for f in data["fields"]}
     missing = [f for f in spec.get("fields") or [] if f not in have]
     if missing:
         return "FAIL", f"圖層在，但註冊表對應的欄位不見了：{missing}（欄位改名會靜默出錯）", secs
+    caps = data.get("capabilities")
+    if caps is not None and "Query" not in caps:
+        return "FAIL", f"圖層 capabilities 不含 Query（{caps}）：產線無法查詢", secs
     name = data.get("name", "?")
+    if spec.get("_base"):
+        cresp, csecs = _fetch(session, _up_url(spec, "/query?where=1%3D1&returnCountOnly=true&f=json",
+                                               token), timeout, spec.get("referer"))
+        secs += csecs
+        try:
+            cnt = int(_loads(cresp.text).get("count") or 0)
+        except (ValueError, TypeError, AttributeError):
+            return "FAIL", f"筆數查詢回應異常（HTTP {cresp.status_code}）", secs
+        if cnt <= 0:
+            return "FAIL", "筆數查詢回 0 筆：圖層在但查詢無資料", secs
+        return "OK", f"圖層「{name}」，{len(spec.get('fields') or [])} 個欄位齊全、查詢 {cnt:,} 筆", secs
     return "OK", f"圖層「{name}」，{len(spec.get('fields') or [])} 個對應欄位齊全", secs
 
 
@@ -545,7 +612,13 @@ def main(argv=None):
     ap.add_argument("--only", help="只跑指定 id，逗號分隔")
     ap.add_argument("--json", action="store_true", help="只輸出 JSON")
     ap.add_argument("--no-report", action="store_true", help="不寫報告檔")
+    ap.add_argument("--write-report", action="store_true",
+                    help="搭配 --only 時仍寫報告（預設不寫，避免部分結果成為下週比較基準）")
     args = ap.parse_args(argv)
+    # 2026-10-07 code review 修：--only 只跑部分項目，若照常寫 JSON 與最新報告，下週比較時
+    # 未跑的項目會被當成「新增」或漏報「已復原」。
+    if args.only and not args.write_report:
+        args.no_report = True
 
     rows = run(only=args.only.split(",") if args.only else None)
     prev_name, before = previous()
