@@ -55,7 +55,7 @@ __all__ = [
 # 字型：思源宋體家族（襯線），取代舊 v1 的微軟正黑體。
 FONT = "思源宋體"                    # 內文/表格預設（沿用變數名 FONT 以相容各案 build_deck）
 FONT_HEAVY = "思源宋體 Heavy"        # 頁首主標、封面案名
-FONT_SEMI = "思源宋體 SemiBold"      # 頁首副標
+FONT_SEMI = "思源宋體 Medium"        # 頁首副標（2026-09-13 字型三級分工改 Medium；變數名沿用以相容各案 build_deck）
 BLACK = RGBColor(0, 0, 0)
 RED = RGBColor(0xC0, 0, 0)            # 缺圖警告等
 TOPIC = RGBColor(0xA6, 0x51, 0x49)   # 頁首副標（磚紅，YAML section_topic_label.default）
@@ -205,7 +205,7 @@ def bullets(slide, l, t, w, items, size=12, h=None):
 
 
 def _retype(box, name):
-    """把 box 內所有 run 的字型改為 name（tb() 預設用 FONT，頁首/封面需改 Heavy/SemiBold）。"""
+    """把 box 內所有 run 的字型改為 name（tb() 預設用 FONT，頁首/封面需改 Heavy/Medium）。"""
     for p in box.text_frame.paragraphs:
         for r in p.runs:
             r.font.name = name
@@ -214,7 +214,7 @@ def _retype(box, name):
 
 def header(slide, main, sub, page, chapter=None):
     """頁首（YAML header_bar 定案）：[章節數字]＋灰綠色條＋思源宋體 Heavy 主標(44pt)
-    ＋磚紅 SemiBold 副標(28pt)＋黑分隔線(0.75pt)＋右上頁碼。
+    ＋磚紅 Medium 副標(28pt)＋黑分隔線(0.75pt)＋右上頁碼。
 
     chapter：僅「一級主題轉換」的章首頁才給（壹/貳/參…）；同章子頁不重複顯示章節字，
     只換副標（YAML writing_conventions 末條）。留白時只畫色條＋主標，維持識別。"""
@@ -233,7 +233,7 @@ def header(slide, main, sub, page, chapter=None):
             True, BLACK)
     mt.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
     _retype(mt, FONT_HEAVY)
-    # 副標（SemiBold 28pt 磚紅，緊接主標右側）
+    # 副標（Medium 28pt 磚紅，緊接主標右側）
     if sub:
         sub_l_in = min(1.13 + 0.62 * len(main) + 0.18, 8.6)
         avail_in = 13.0 - sub_l_in
