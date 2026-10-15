@@ -130,8 +130,10 @@ def main():
     txt = "\n".join(log)
     print(txt)
     out_dir = a.out or os.path.dirname(os.path.dirname(os.path.abspath(a.joined)))
-    io.open(os.path.join(out_dir, "設施環域查詢.txt"), "w", encoding="utf-8").write(txt)
-    io.open(os.path.join(out_dir, "設施環域查詢.json"), "w", encoding="utf-8").write(
+    # --out 給子資料夾而它還不存在時，原本查完才在寫檔處 FileNotFoundError（2026-10-06 基隆案實踩）
+    os.makedirs(out_dir, exist_ok=True)
+    io.open(os.path.join(out_dir, "設施環域查詢.txt"), "w", encoding="utf-8", newline="\n").write(txt)
+    io.open(os.path.join(out_dir, "設施環域查詢.json"), "w", encoding="utf-8", newline="\n").write(
         json.dumps(res, ensure_ascii=False, indent=1))
     print(f"\n→ {os.path.join(out_dir, '設施環域查詢.txt')} / .json")
     return 0
