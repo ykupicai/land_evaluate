@@ -29,9 +29,10 @@ REPO_ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 from qgis.core import (  # noqa: E402
-    QgsApplication, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
+    Qgis, QgsApplication, QgsCategorizedSymbolRenderer, QgsCoordinateReferenceSystem,
     QgsFeatureRequest, QgsFillSymbol, QgsGeometry, QgsLayoutExporter,
-    QgsLinePatternFillSymbolLayer, QgsLineSymbol, QgsProject, QgsRasterLayer,
+    QgsLinePatternFillSymbolLayer, QgsLineSymbol, QgsMarkerSymbol,
+    QgsPointPatternFillSymbolLayer, QgsProject, QgsRasterLayer,
     QgsRectangle, QgsRendererCategory, QgsSimpleFillSymbolLayer, QgsUnitTypes,
     QgsVectorLayer,
 )
@@ -97,8 +98,82 @@ def real_coverage(shp: Path, rule: dict, geom: QgsGeometry, bb: QgsRectangle) ->
     return QgsGeometry.unaryUnion(parts).area() if parts else 0.0
 
 
+# ★全覆蓋層紋理依序換「樣式」（2026-10-20 使用者指正，阿里山案）：五個全覆蓋層都畫
+#   45° 斜線時線條平行疊在一起分不出；只換角度仍是一片線網。改為斜線／圓點／方塊／
+#   三角／交叉點／反斜線／十字／橫線輪替，點類各自錯開偏移，避免不同層的點疊在同一處。
+#   每項：("line", 角度) 或 ("point", 標記形狀, 是否實心)
+FILL_PATTERNS = (
+    ("line", 45.0), ("point", "circle", True), ("point", "square", False),
+    ("point", "triangle", True), ("line", 135.0), ("point", "cross2", True),
+    ("point", "diamond", False), ("line", 0.0),
+)
+HATCH_ANGLES = tuple(p[1] for p in FILL_PATTERNS if p[0] == "line")   # 相容舊引用
+
+
+# 點紋各層的格內位置（以網格間距的比例表示）：5 個點紋層落在方格四角＋中心，
+# 兩兩中心距 ≥0.35×間距（18mm 時 6.4mm），遠大於標記 2.2mm，保證不同層的點不會疊在同一處。
+# 間距 18mm：使用者兩度要求放寬（12mm 時畫面仍滿，2026-10-20）。
+POINT_SPACING = 18.0
+POINT_SLOTS = ((0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5), (0.25, 0.25))
+
+
+def pattern_symbol(rgb, idx: int, spacing: float = POINT_SPACING,
+                   legend: bool = False) -> QgsFillSymbol:
+    """第 idx 個全覆蓋層的紋理填色（透明底＋同色外框＋線紋或點紋）。
+
+    legend=True：圖例小方格用的較密版本（間距 3.5mm、以方格自身為原點），
+    圖面那份 12mm 間距在約 8mm 寬的方格內常常一個點都看不到。
+    """
+    kind = FILL_PATTERNS[idx % len(FILL_PATTERNS)]
+    if kind[0] == "line":
+        return hatch_symbol(rgb, angle=kind[1])   # 線紋維持 5mm：拉寬後圖例小方格內看不到線
+    _, shape, solid = kind
+    # 本層是第幾個點紋（只數點紋），決定落在網格的哪個位置
+    n_pt = sum(1 for p in (FILL_PATTERNS * (idx // len(FILL_PATTERNS) + 1))[:idx] if p[0] == "point")
+    fx, fy = POINT_SLOTS[n_pt % len(POINT_SLOTS)]
+    sx, sy = fx * spacing, fy * spacing
+    sym = QgsFillSymbol()
+    base = QgsSimpleFillSymbolLayer()
+    base.setColor(QColor(0, 0, 0, 0))
+    base.setStrokeColor(QColor(*rgb))
+    base.setStrokeWidth(0.5)
+    sym.changeSymbolLayer(0, base)
+    pp = QgsPointPatternFillSymbolLayer()
+    pp.setDistanceX(spacing); pp.setDistanceY(spacing)
+    pp.setDistanceXUnit(QgsUnitTypes.RenderMillimeters)
+    pp.setDistanceYUnit(QgsUnitTypes.RenderMillimeters)
+    if legend:
+        # 圖例方格約 8×4mm：橫向 3.5mm 一顆、縱向只排一列並置中，點才不會被方格邊切半
+        sx, sy = 1.75, 2.0
+        pp.setDistanceX(3.5); pp.setDistanceY(20.0)
+        pp.setDisplacementX(0); pp.setDisplacementY(0)
+        pp.setDisplacementXUnit(QgsUnitTypes.RenderMillimeters)
+    else:
+        pp.setDisplacementX(0); pp.setDisplacementY(0)  # 規則方格，位置才算得準
+        # ⚠ 網格原點要對齊「畫面」而非各圖層要素外框，否則各層網格起點不同，偏移量失去意義
+        pp.setCoordinateReference(Qgis.SymbolCoordinateReference.Viewport)
+    pp.setOffsetX(sx); pp.setOffsetY(sy)
+    pp.setOffsetXUnit(QgsUnitTypes.RenderMillimeters)
+    pp.setOffsetYUnit(QgsUnitTypes.RenderMillimeters)
+    col = "%d,%d,%d,255" % tuple(rgb)
+    pp.setSubSymbol(QgsMarkerSymbol.createSimple({
+        "name": shape, "size": "1.6" if legend else "2.2", "size_unit": "MM",
+        "color": col if solid else "0,0,0,0",
+        "outline_color": col, "outline_width": "0.35", "outline_width_unit": "MM"}))
+    sym.appendSymbolLayer(pp)
+    return sym
+
+# 圖例只留項目名稱：去掉 NGIS 圖層名前的環敏編號（「1-23-1-1國有林事業區」→「國有林事業區」）
+_CODE_PREFIX = re.compile(r"^\s*\d+(?:-\d+)+\s*")
+
+
+def strip_env_code(name: str) -> str:
+    return _CODE_PREFIX.sub("", name) or name
+
+
 def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPHA,
-                   outline_only: bool = False, fallback_rgb: tuple = (127, 127, 127)):
+                   outline_only: bool = False, fallback_rgb: tuple = (127, 127, 127),
+                   pattern_idx: int = 0):
     lyr = QgsVectorLayer(str(shp), name, "ogr")
     if not lyr.isValid():
         return None
@@ -117,7 +192,7 @@ def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPH
                       key=lambda v: list(colors).index(v) if v in colors else 99)
         for v in vals:
             rgb = colors.get(v, base)
-            sym = hatch_symbol(rgb) if outline_only else QgsFillSymbol.createSimple({
+            sym = pattern_symbol(rgb, pattern_idx) if outline_only else QgsFillSymbol.createSimple({
                 "color": "%d,%d,%d,%d" % (rgb + (int(alpha * 255),)),
                 "outline_color": "%d,%d,%d,255" % rgb,
                 "outline_width": "0.15", "outline_style": "solid"})
@@ -125,12 +200,14 @@ def load_env_layer(shp: Path, rule: dict, name: str, alpha: float = DEFAULT_ALPH
         lyr.setRenderer(QgsCategorizedSymbolRenderer(fld, cats))
     else:
         dark = tuple(int(c * 0.6) for c in base)   # 外框用同色調暗版，維持可區辨
-        sym = hatch_symbol(base) if outline_only else QgsFillSymbol.createSimple({
+        sym = pattern_symbol(base, pattern_idx) if outline_only else QgsFillSymbol.createSimple({
             "color": "%d,%d,%d,%d" % (base + (int(alpha * 255),)),
             "outline_color": "%d,%d,%d,255" % dark,
             "outline_width": "0.3", "outline_style": "solid"})
         lyr.setRenderer(lyr.renderer().__class__(sym) if False else lyr.renderer())
         lyr.renderer().setSymbol(sym)
+        if outline_only and FILL_PATTERNS[pattern_idx % len(FILL_PATTERNS)][0] == "point":
+            sheet.LEGEND_SYMBOLS[lyr.id()] = pattern_symbol(base, pattern_idx, legend=True)
     return lyr
 
 
@@ -258,6 +335,7 @@ def main():
     resolved = [(name, *resolve_layer(name, county, case_dir=out_dir)) for name, _ in hits]
     layer_colors = assign_layer_colors(resolved, GENERIC_PALETTE)
     env_layers, legend_layers, notes, stats = [], [], [], []
+    n_hatch = 0
     for name, area in hits:
         shp, rule = next((s, r) for n, s, r in resolved if n == name)
         if shp is None:
@@ -265,7 +343,8 @@ def main():
             notes.append(f"{name}（本機無對應圖資）")
             continue
         subs = rule.get("_subs", {})
-        title = rule["title"].format(**subs) if "{" in rule["title"] else rule["title"]
+        title = strip_env_code(
+            rule["title"].format(**subs) if "{" in rule["title"] else rule["title"])
         # ⚠ 全覆蓋判定要用「本層 dissolve 後的實際覆蓋」，**不可用 hits 的 area**：
         #   hits 經上方同名去重後只留「最大那一列」，而 NGIS 是逐面各回一列——圖層被切成
         #   好幾塊時，每塊都 <99%，就永遠判不成全覆蓋（2026-09-24 阿里山案：自來水 2 塊、
@@ -273,11 +352,13 @@ def main():
         #   也不能改成把各列相加——同圖層要素互相重疊時會重複計算（內湖案捷運禁限建）。
         cover = real_coverage(shp, rule, geom, bb)
         outline_only = is_full_coverage(cover, geom_area, len(hits))
+        n_hatch += int(outline_only)
         lyr = load_env_layer(shp, rule, title, alpha=a.alpha, outline_only=outline_only,
-                             fallback_rgb=layer_colors.get(name, (127, 127, 127)))
+                             fallback_rgb=layer_colors.get(name, (127, 127, 127)),
+                             pattern_idx=n_hatch - 1)
         if outline_only:
             print(f"    （{title} 覆蓋率 {100 * cover / geom_area:.1f}% ≥99%，"
-                  f"改畫 45° 斜線紋理，不用實心填色）")
+                  f"改畫紋理「{FILL_PATTERNS[(n_hatch - 1) % len(FILL_PATTERNS)][1]}」，不用實心填色）")
         if lyr is None:
             print(f"  ⚠ 圖層讀取失敗：{shp}")
             continue

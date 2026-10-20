@@ -18,7 +18,7 @@ def parse_args(argv=None):
     for name in ('cases', 'themes'):
         parser.add_argument('--' + name, type=comma_set)
     for name in ('exclude', 'base-line-themes', 'no-neighbor-themes',
-                 'no-landno-themes', 'parcel-line-themes'):
+                 'no-landno-themes', 'parcel-line-themes', 'area-label-themes'):
         parser.add_argument('--' + name, type=comma_set, default=set())
     for name in ('trust-shp', 'sitemap', 'basemap-dir', 'urban-shp'):
         parser.add_argument('--' + name)

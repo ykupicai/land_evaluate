@@ -26,6 +26,8 @@ import overlay_placement as op
 
 # 圖例鎖右下、離圖框邊界的內縮距（使用者定案 2026-08-19：5mm；有別於其他疊圖的 3mm）
 LEGEND_INSET_MM = 5.0
+# 圖例專用符號登錄表 {圖層 id: QgsSymbol}；呼叫端（如 make_env_map）登錄，build_sheet_layout 套用
+LEGEND_SYMBOLS: dict = {}
 
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -231,6 +233,15 @@ def build_sheet_layout(project, name, layers, legend_layers,
         if 0 < len(keep_idx) < len(nodes):
             QgsMapLayerLegendUtils.setLegendNodeOrder(node, keep_idx)
             leg.model().refreshLayerLegend(node)
+    # 圖例另用的符號（{圖層 id: QgsSymbol}，呼叫端登錄）：圖面紋理間距大於圖例小方格時，
+    #   方格內看不到任何點（2026-10-20 阿里山環敏圖：點紋 12mm、方格只有約 8mm），
+    #   改用同樣式、較密的符號畫圖例。存成圖層樹節點屬性，qgz 重開仍在。
+    for lid, lsym in LEGEND_SYMBOLS.items():
+        node = root.findLayer(lid)
+        if node is None:
+            continue
+        QgsMapLayerLegendUtils.setLegendNodeCustomSymbol(node, 0, lsym)
+        leg.model().refreshLayerLegend(node)
     leg.setLegendFilterByMapEnabled(True)
     leg.setTitle("圖例")
     try:

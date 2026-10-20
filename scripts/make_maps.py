@@ -1158,6 +1158,116 @@ def urban_fullname_field(lyr: QgsVectorLayer, candidates: tuple[str, ...],
     return best
 
 
+def registered_area_index(shp_path) -> dict:
+    """trust-shp 的 {地號: 登記面積}（僅取有正值者；地號重複者剔除，避免跨段同號誤配）。"""
+    out, dup = {}, set()
+    if not shp_path:
+        return out
+    lyr = QgsVectorLayer(str(shp_path), "_area_idx", "ogr")
+    if not lyr.isValid():
+        return out
+    names = lyr.fields().names()
+    f_no = next((n for n in ("地號", "20251201_4") if n in names), None)
+    f_ar = next((n for n in ("登面積", "登記面積") if n in names), None)
+    if not f_no or not f_ar:
+        return out
+    for f in lyr.getFeatures():
+        k = str(f[f_no]).strip()
+        try:
+            v = float(f[f_ar])
+        except (TypeError, ValueError):
+            continue
+        if k in out:
+            dup.add(k)
+        if v > 0:
+            out[k] = v
+    for k in dup:
+        out.pop(k, None)
+    return out
+
+
+def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) -> list:
+    """案場基地面積標註：[(點, 文字), …]。逐筆取登記面積、取不到才退回圖面積（登記面積優先）。
+
+    案場由多塊分離的基地組成時（如合併案場 A1＋A2），**每塊各標自己的面積、不標加總**
+    （2026-10-20 使用者定案）；標註點取該塊的「最遠離邊界點」，細長基地也落在最寬處。
+    """
+    parts = [g for g in (geom.asGeometryCollection() if geom.isMultipart() else [geom])
+             if g.area() > 1.0]
+    idx_no = l_red.fields().indexFromName("地號")
+    feats = list(l_red.getFeatures())
+    out = []
+    for part in parts:
+        total, n_geo, n = 0.0, 0, 0
+        for f in feats:
+            g = f.geometry()
+            if g.intersection(part).area() < 0.5:          # 只算落在這一塊的宗地
+                continue
+            n += 1
+            k = str(f[idx_no]).strip() if idx_no >= 0 else ""
+            if k in reg_idx:
+                total += reg_idx[k]
+            else:
+                total += g.area()
+                n_geo += 1
+        txt = f"基地面積\n{total:,.2f} ㎡\n（{total / 10000:.4f} 公頃）"
+        if n_geo:
+            txt += "\n（含圖面積計算）" if n_geo < n else "\n（圖面積）"
+        out.append((part.poleOfInaccessibility(0.5)[0].asPoint(), txt))
+    return out
+
+
+def area_label_layer(labels: list, stem: str, keep_alive: list,
+                     warnings: list | None = None) -> QgsVectorLayer:
+    """在基地上標「基地面積」的點層（不畫符號、只標字）。落地成 gpkg，qgz 才存得住。"""
+    from qgis.core import (QgsFeature, QgsField, QgsPalLayerSettings, QgsTextBufferSettings,
+                           QgsTextFormat, QgsVectorLayerSimpleLabeling)
+    from qgis.PyQt.QtCore import QVariant
+    from qgis.PyQt.QtGui import QFont
+    mem = QgsVectorLayer(f"Point?crs={CRS_3826}", "基地面積", "memory")
+    mem.dataProvider().addAttributes([QgsField("txt", QVariant.String)])
+    mem.updateFields()
+    fts = []
+    for pt, text in labels:
+        ft = QgsFeature(mem.fields())
+        ft.setGeometry(QgsGeometry.fromPointXY(pt))
+        ft["txt"] = text
+        fts.append(ft)
+    mem.dataProvider().addFeatures(fts)
+    mem.updateExtents()
+    lyr = persist_legend_layer(mem, f"基地面積_{stem}", keep_alive, warnings)
+    sym = lyr.renderer().symbol()
+    sym.setOpacity(0.0)                                   # 只要字，不要點
+    pal = QgsPalLayerSettings()
+    pal.fieldName = "txt"
+    pal.placement = Qgis.LabelPlacement.OverPoint
+    fmt = QgsTextFormat()
+    fnt = QFont(FONT_NAME if "FONT_NAME" in globals() else "Microsoft JhengHei")
+    fnt.setBold(True)
+    fmt.setFont(fnt)
+    fmt.setSize(11)
+    fmt.setColor(QColor(200, 0, 0))
+    buf = QgsTextBufferSettings()
+    buf.setEnabled(True)
+    buf.setSize(1.2)
+    buf.setColor(QColor(255, 255, 255))
+    fmt.setBuffer(buf)
+    pal.setFormat(fmt)
+    pal.multilineAlign = Qgis.LabelMultiLineAlignment.Center
+    # ⚠ 一定要顯示：預設碰到地號等其他標註會被 PAL 靜默丟掉（2026-10-20 阿里山 B1 實見）
+    pal.priority = 10
+    ps = pal.placementSettings()
+    ps.setOverlapHandling(Qgis.LabelOverlapHandling.AllowOverlapIfRequired)
+    ps.setAllowDegradedPlacement(True)
+    pal.setPlacementSettings(ps)
+    obs = pal.obstacleSettings()
+    obs.setIsObstacle(False)                              # 不擋地號標註（否則地號會被擠掉）
+    pal.setObstacleSettings(obs)
+    lyr.setLabeling(QgsVectorLayerSimpleLabeling(pal))
+    lyr.setLabelsEnabled(True)
+    return lyr
+
+
 def persist_legend_layer(mem: QgsVectorLayer, stem: str, keep_alive: list,
                          warnings: list | None = None) -> QgsVectorLayer:
     """把「只為了出圖例而造的記憶體層」寫成實體 gpkg 再讀回；**否則 .qgz 存不住它**。
@@ -1649,6 +1759,8 @@ def _run_maps(start_qgis) -> None:
     URBAN_SHP_OVERRIDE, URBAN_IMAGE_COUNTY = a.urban_shp, a.urban_image
     BASE_LINE_THEMES, NO_NEIGHBOR_THEMES = a.base_line_themes, a.no_neighbor_themes
     NO_LANDNO_THEMES, PARCEL_LINE_THEMES = a.no_landno_themes, a.parcel_line_themes
+    AREA_LABEL_THEMES = a.area_label_themes        # 在這些主題的基地上標「基地面積」
+    REG_AREA = registered_area_index(a.trust_shp) if AREA_LABEL_THEMES else {}
     themes = list(THEMES[:4] if a.basic else THEMES)
     if a.themes:
         themes = [theme for theme in themes if theme in a.themes]
@@ -2374,8 +2486,22 @@ def _run_maps(start_qgis) -> None:
             if dist:
                 print(f"  [{cid}] 行政區界：{'、'.join(dict.fromkeys(dist.names))}", flush=True)
 
+            area_lyr = None
+            if AREA_LABEL_THEMES & set(themes):
+                try:
+                    _g = (mm_ctx[0] if mm_ctx else
+                          QgsGeometry.unaryUnion([f.geometry() for f in l_red.getFeatures()]))
+                    _labels = site_area_labels(l_red, REG_AREA, _g)
+                    area_lyr = area_label_layer(_labels, cid, keep_alive, warnings)
+                    project.addMapLayer(area_lyr, False)
+                    print(f"  [{cid}] 基地面積標註：" + "、".join(
+                        t.splitlines()[1] for _, t in _labels), flush=True)
+                except Exception as exc:  # noqa: BLE001 — 標註失敗不阻斷出圖
+                    warnings.append(f"{cid} 基地面積標註失敗：{type(exc).__name__}: {exc}")
             for theme in themes:
                 layers, leg_layers, hide, note, overlay = theme_defs[theme]
+                if area_lyr is not None and theme in AREA_LABEL_THEMES:
+                    layers = [area_lyr] + list(layers)    # 最上層；不進圖例
                 if theme in NO_NEIGHBOR_THEMES:      # 不畫周邊地籍界線，只留基地框
                     layers = [x for x in layers if x is not l_gray]
                 if dist:
