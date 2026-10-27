@@ -71,7 +71,7 @@ def test_attribute_missing_field_flags_not_silent():
 
 
 def test_note_type_prints_remark_not_missing_layer():
-    """note 型（社福設施_臺南市.yaml 實錯，2026-08-06 後壁案重跑發現）：純敘述提醒，
+    """note 型（社福設施.yaml 實錯，2026-08-06 後壁案重跑發現）：純敘述提醒，
     不該落到通用 overlay 分支印成「找不到圖層檔案」——那看起來像資料缺失，
     實際上該條款根本沒有可套疊的圖資，是型別沒被引擎認得。"""
     item = {"id": "n", "名稱": "3年內設立期限", "條號": "§z", "類型": "note",

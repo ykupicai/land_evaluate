@@ -33,3 +33,17 @@ def test_cli_golden_and_geometry_partition(case, tmp_path, monkeypatch):
     assert belt.area >= 0.3 * base.area - 0.01
     assert belt.intersection(inner).area < 0.01
     assert belt.union(inner).symmetric_difference(base).area < 0.01
+
+
+def test_parts_of_flattens_geometry_collection():
+    """make_valid(差集) 會回 GeometryCollection（面＋零面積線殘渣）；舊版 parts_of 只拆
+    MultiPolygon，GeometryCollection 整包傳給 min_interior_angle 取 .exterior 即崩
+    （2026-10-19 湖口成功段長照案 --shape minimal 實踩）。"""
+    from shapely.geometry import GeometryCollection, LineString, Polygon
+    sq = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    tri = Polygon([(20, 0), (30, 0), (20, 10)])
+    gc = GeometryCollection([sq, LineString([(0, 0), (5, 5)]), GeometryCollection([tri])])
+    parts = gb.parts_of(gc)
+    assert len(parts) == 2 and all(p.geom_type == 'Polygon' for p in parts)
+    assert gb.min_interior_angle(gc) == pytest.approx(45.0, abs=0.01)
+    assert gb.parts_of(LineString([(0, 0), (1, 1)])) == []

@@ -49,9 +49,21 @@ AG_KINDS = ("農牧用地", "養殖用地", "水利用地", "林業用地", "生
 
 
 def parts_of(geom):
-    if geom.is_empty:
+    """拆成 Polygon 清單。
+
+    ⚠ make_valid(差集) 可能回 GeometryCollection（面＋零面積的線、點殘渣），舊版只拆
+      MultiPolygon，GeometryCollection 會整包往下傳，min_interior_angle 取 .exterior 即崩
+      （2026-10-19 湖口成功段長照案 --shape minimal 實踩）。一律遞迴攤平、只留面。"""
+    if geom is None or geom.is_empty:
         return []
-    return list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    if geom.geom_type == "Polygon":
+        return [geom]
+    if hasattr(geom, "geoms"):
+        out = []
+        for g in geom.geoms:
+            out.extend(parts_of(g))
+        return out
+    return []                                    # 線、點等零面積殘渣不算綠帶的一部分
 
 
 def min_interior_angle(geom, exclude=None, tol=2.0):
