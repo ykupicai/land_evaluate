@@ -1186,6 +1186,9 @@ def registered_area_index(shp_path) -> dict:
     return out
 
 
+AREA_LABEL_MAX_PARTS = 6   # 分離塊數超過此值改標合計（見 site_area_labels）
+
+
 def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) -> list:
     """案場基地面積標註：[(點, 文字), …]。逐筆取登記面積、取不到才退回圖面積（登記面積優先）。
 
@@ -1194,6 +1197,13 @@ def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) ->
     """
     parts = [g for g in (geom.asGeometryCollection() if geom.isMultipart() else [geom])
              if g.area() > 1.0]
+    # 分離的塊數太多（> AREA_LABEL_MAX_PARTS）時逐塊標會疊成一片看不清（2026-10-22 基隆友二東段
+    # 65 筆分 35 塊實見）→ 只在最大那塊標一個合計，並寫明處數；各塊面積交給分塊圖／表格
+    n_total_parts = len(parts)
+    total_mode = n_total_parts > AREA_LABEL_MAX_PARTS
+    if total_mode:
+        big = max(parts, key=lambda g: g.area())
+        parts = [QgsGeometry.unaryUnion(parts)]
     idx_no = l_red.fields().indexFromName("地號")
     feats = list(l_red.getFeatures())
     out = []
@@ -1213,6 +1223,10 @@ def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) ->
         txt = f"基地面積\n{total:,.2f} ㎡\n（{total / 10000:.4f} 公頃）"
         if n_geo:
             txt += "\n（含圖面積計算）" if n_geo < n else "\n（圖面積）"
+        if total_mode:
+            txt = txt.replace("基地面積", f"基地面積合計（{n_total_parts}處）", 1)
+            out.append((big.poleOfInaccessibility(0.5)[0].asPoint(), txt))
+            continue
         out.append((part.poleOfInaccessibility(0.5)[0].asPoint(), txt))
     return out
 
