@@ -120,6 +120,120 @@ def query_section(city: str, town: str, sec: str, unit: str | None = None,
     return out
 
 
+def _default_control_candidates(office: str, exclude: str, limit: int = 3) -> list[str]:
+    """同事務所的其他段碼（取自 config/section_index.csv，小段碼前 2 碼＝事務所碼）。
+    讀不到一律回空清單，不阻斷。"""
+    try:
+        import csv
+        import os
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "config", "section_index.csv")
+        out: list[str] = []
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                code = str(r.get("小段碼") or "")
+                sec = str(r.get("段碼") or "").strip()
+                if code[:2].upper() == str(office).upper() and sec and sec != exclude \
+                        and sec not in out:
+                    out.append(sec)
+        return out[:limit]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def query_rosters(pairs, fetch=None, candidates=None, say=print):
+    """以 (事務所碼, 段碼) 為單位查公有土地名冊，並區分「查詢失敗」與「查詢成功 0 筆」。
+
+    回 (idx, have_roster, status)：
+      idx          {(office, sec, 正規化地號): (公私別, 所有權人, 管理者, 所有權人數)}
+      have_roster  有實際公有地資料（可據以推論「未列＝私有」）的 {(office, sec)}
+      status       {(office, sec): {"state","n","control","message"}}
+        state：ok／failed／empty_confirmed（0 筆，同事務所對照段有資料→API 正常、
+               該段名冊可能尚未更新，重測改號後常見）／empty_suspect（0 筆且對照段也 0 筆
+               或查詢失敗→可能服務異常）／empty_unverified（0 筆且找不到對照段）
+
+    ⚠ 0 筆一律不推論為私有：該段不進 have_roster，權屬欄留空（顯示「無法判定」）。
+    fetch／candidates 供測試注入（預設 query_section／_default_control_candidates）。
+    """
+    fetch = fetch or query_section
+    candidates = candidates or _default_control_candidates
+    idx: dict = {}
+    status: dict = {}
+    counts: dict = {}
+    for office, sec in pairs:
+        try:
+            recs = fetch(None, None, sec, unit=office)
+        except Exception as e:  # noqa: BLE001
+            msg = (f"⚠ 權屬查詢失敗（事務所 {office}／段 {sec}：{type(e).__name__}），"
+                   "該段權屬欄留空")
+            status[(office, sec)] = {"state": "failed", "n": None, "control": None,
+                                     "message": msg}
+            say("  " + msg)
+            continue
+        counts[(office, sec)] = len(recs)
+        for rw in recs:
+            os_ = owners(rw)
+            if os_:
+                o = os_[0]
+                idx[(office, sec, norm_no(_g(rw, "No") or ""))] = (
+                    o["公私別"], o["所有權人"], o["管理者"], len(os_))
+        if recs:
+            status[(office, sec)] = {"state": "ok", "n": len(recs), "control": None,
+                                     "message": f"事務所 {office}／段 {sec} 公有土地名冊 {len(recs)} 筆"}
+            say(f"  權屬：{status[(office, sec)]['message']}")
+
+    for (office, sec), n in counts.items():
+        if n:
+            continue
+        # 對照組：先用同批已有資料的同事務所他段，再查 section_index 的同事務所他段
+        ctrl = next(((s, counts[(o, s)]) for (o, s) in counts
+                     if o == office and s != sec and counts[(o, s)]), None)
+        ctrl_failed = False
+        if ctrl is None:
+            for cs in candidates(office, sec):
+                try:
+                    cn_ = len(fetch(None, None, cs, unit=office))
+                except Exception:  # noqa: BLE001
+                    ctrl_failed = True
+                    continue
+                if cn_:
+                    ctrl = (cs, cn_)
+                    break
+        head = f"事務所 {office}／段 {sec} 公有土地名冊查詢成功但 0 筆"
+        if ctrl:
+            st, msg = "empty_confirmed", (
+                f"⚠ {head}；同事務所對照段 {ctrl[0]} 有 {ctrl[1]} 筆 → API 運作正常，"
+                "該段名冊可能尚未更新（重測改號後新段碼常見）。權屬欄留空、"
+                "**不可推論為私有**，請改以謄本或 TCDGIS 覆核。")
+        elif ctrl_failed:
+            st, msg = "empty_suspect", (
+                f"⚠ {head}；對照段查詢失敗 → 無法排除服務異常。權屬欄留空、不可推論為私有。")
+        else:
+            st, msg = "empty_unverified", (
+                f"⚠ {head}；找不到有資料的同事務所對照段 → 無法判斷是名冊未更新或服務異常。"
+                "權屬欄留空、不可推論為私有。")
+        status[(office, sec)] = {"state": st, "n": 0, "control": ctrl, "message": msg}
+        say("  " + msg)
+
+    have_roster = {(o, s) for (o, s, _n) in idx}
+    return idx, have_roster, status
+
+
+def roster_summary(status: dict) -> str:
+    """給結尾訊息用：區分「查詢失敗」與「查詢成功 0 筆」。"""
+    if not status:
+        return ""
+    failed = [k for k, v in status.items() if v["state"] == "failed"]
+    empty = [k for k, v in status.items() if v["state"].startswith("empty")]
+    parts = []
+    if failed:
+        parts.append("查詢失敗：" + "、".join(f"{o}/{s}" for o, s in failed))
+    if empty:
+        parts.append("查詢成功但名冊 0 筆（未必代表私有，可能名冊尚未更新）："
+                     + "、".join(f"{o}/{s}" for o, s in empty))
+    return "；".join(parts)
+
+
 def owners(rec: dict) -> list[dict]:
     """攤平所有權人（OWNER 是陣列，一筆地可有多人）。"""
     ow = rec.get("OWNER") or rec.get("Owner") or []

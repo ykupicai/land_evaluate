@@ -210,14 +210,7 @@ def main():
         for _, r in t.iterrows():
             sid = r["site_id"]
             out.setdefault(sid, {})
-            out[sid].update({
-                "臨路狀態": r.get("臨路狀態"),
-                "鄰接路寬中位數_m": round(float(r["鄰接路寬中位數_m"]), 2)
-                if "鄰接路寬中位數_m" in t.columns else None,
-                "陸域_m2": round(float(r["陸域面積_m2"]), 0),
-                "水域_m2": round(float(r["水域面積_m2"]), 0),
-                "主要地形": r.get("主要地形"),
-            })
+            out[sid].update(road_row_stats(r))
 
     out["_面積口徑"] = ("面積_m2／公頃／公有面積_m2 採**登記面積優先**（逐筆取登記面積，"
                        "未登記地該筆退回圖面積），基準見各案場「面積基準」欄；"
@@ -235,6 +228,43 @@ def main():
         for k, v in d.items():
             print(f"  {k} = {v}")
     print("\n→", p)
+
+
+def _num(v, nd):
+    """可轉成有限數值就回 round 後數值；否則回 (None, 原字串)。NaN/空白視為缺值 (None, None)。"""
+    if v is None:
+        return None, None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None, None
+        try:
+            f = float(s.replace(",", ""))
+        except ValueError:
+            return None, s
+    else:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None, str(v)
+    if f != f or f in (float("inf"), float("-inf")):
+        return None, None
+    return round(f, nd), None
+
+
+def road_row_stats(r) -> dict:
+    """臨路成果.xlsx 一列 → 統計鍵。人工覆核可能把路寬／面積改成文字（如「須重測（原值
+    含鐵路）」），不可 float() 當掉讓整份 逐案場統計.json 寫不出來：可轉數值就回數值，
+    否則保留原字串並另記「<欄>備註」；欄位缺漏以 .get 取，缺漏回 None。"""
+    out = {"臨路狀態": r.get("臨路狀態"), "主要地形": r.get("主要地形")}
+    for src, dst, nd in (("鄰接路寬中位數_m", "鄰接路寬中位數_m", 2),
+                         ("陸域面積_m2", "陸域_m2", 0),
+                         ("水域面積_m2", "水域_m2", 0)):
+        val, note = _num(r.get(src), nd)
+        out[dst] = note if note is not None else val
+        if note is not None:
+            out[dst + "備註"] = f"原欄位「{src}」為文字，未轉數值，須人工確認"
+    return out
 
 
 if __name__ == "__main__":

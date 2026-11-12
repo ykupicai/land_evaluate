@@ -381,25 +381,13 @@ def attach_ownership(gdf, quiet: bool = False):
 
     pairs = sorted({(str(o), str(s)) for o, s in zip(gdf["_office"], gdf["_sec"])
                     if str(o).strip() and str(s).strip()})
-    idx: dict[tuple, tuple] = {}
-    for office, sec in pairs:
-        try:
-            recs = PL.query_section(None, None, sec, unit=office)
-        except Exception as e:  # noqa: BLE001
-            if not quiet:
-                print(f"  ⚠ 權屬查詢失敗（事務所 {office}／段 {sec}："
-                      f"{type(e).__name__}），該段權屬欄留空")
-            continue
-        for rw in recs:
-            os_ = PL.owners(rw)
-            if os_:
-                o = os_[0]
-                idx[(office, sec, PL.norm_no(PL._g(rw, "No") or ""))] = (
-                    o["公私別"], o["所有權人"], o["管理者"])
-        if not quiet:
-            print(f"  權屬：事務所 {office}／段 {sec} 公有土地名冊 {len(recs)} 筆")
-
-    have_roster = {(o, s) for (o, s, _n) in idx}
+    # 「查詢成功 0 筆」與「查詢失敗」分開處理並做對照組（2026-11 基隆案：重測後新段碼
+    # 名冊 0 筆，舊段有 324 筆）；0 筆的段不進 have_roster，權屬留空、不推論為私有。
+    def _say(line):
+        if not quiet or "⚠" in line:
+            print(line)
+    idx3, have_roster, status = PL.query_rosters(pairs, say=_say)
+    idx = {k: v[:3] for k, v in idx3.items()}
     pri, onm, omg = [], [], []
     for _, r in gdf.iterrows():
         key = (str(r["_office"]), str(r["_sec"]), str(r["地號"]))
@@ -412,6 +400,10 @@ def attach_ownership(gdf, quiet: bool = False):
             pri.append("私(推論)"); onm.append(""); omg.append("")
     gdf = gdf.copy()
     gdf["公私別"], gdf["所有權"], gdf["管理者"] = pri, onm, omg
+    try:
+        gdf.attrs["roster_status"] = {f"{o}/{s}": v["state"] for (o, s), v in status.items()}
+    except Exception:  # noqa: BLE001
+        pass
     return gdf
 
 

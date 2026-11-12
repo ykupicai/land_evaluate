@@ -273,6 +273,146 @@ def frame_coverage(frames, gdf, su) -> dict:
     return out
 
 
+# ── 基地自身 vs 鄰地的辨識（純函式，可單測）──────────────────────────────
+SELF_COVER = 0.98    # 被基地幾何涵蓋達此比例視為「整筆在基地內」
+SELF_MIN_OV = 0.02   # 與基地重疊低於此比例視為不重疊（浮點／界線誤差）
+RESIDUAL_MIN_AREA = 1.0   # 殘餘碎片小於此面積（㎡）丟棄
+
+
+def _norm_key(seg, landno):
+    from shp_trust_utils import norm_seg, normalize_landno
+    return (norm_seg(seg), normalize_landno(landno))
+
+
+def base_keys_from_site(site) -> set:
+    """由基地圖層取出 {(正規化段, 正規化地號)}；現行地號與「原地號」（重測改號前）都收。
+    欄位找不到（段或地號）回空集合＝無法以地號辨識，呼叫端退回舊的幾何判定。"""
+    from shp_trust_utils import F_LANDNO, F_SEG
+    cols = list(getattr(site, "columns", []))
+    lc = next((c for c in F_LANDNO if c in cols), None)
+    sc = next((c for c in F_SEG if c in cols), None)
+    if lc is None or sc is None:
+        return set()
+    keys = set()
+    for _, r in site.iterrows():
+        k = _norm_key(r.get(sc), r.get(lc))
+        if k[1]:
+            keys.add(k)
+        if "原地號" in cols:
+            k2 = _norm_key(r.get(sc), r.get("原地號"))
+            if k2[1]:
+                keys.add(k2)
+    return keys
+
+
+def is_base_self(geom, landno, base_nos=None, base_geoms=None) -> bool:
+    """地號（含段）沒命中時的輔助判斷：此宗地是不是基地自身（段名異體字／重測改號／舊制段名所致）。
+    (a) 只比正規化地號（忽略段名）且該地號也出現在基地；(b) 與某一筆基地宗地幾何 IoU>=0.98。"""
+    from shp_trust_utils import normalize_landno
+    if base_nos and normalize_landno(landno) in base_nos:
+        return True
+    if base_geoms is not None and geom is not None and not geom.is_empty:
+        for bg in base_geoms:
+            if bg is None or bg.is_empty:
+                continue
+            try:
+                u = geom.union(bg).area
+                if u > 0 and geom.intersection(bg).area / u >= SELF_COVER:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def classify_self(ov: float, keyed: bool, selfid: bool = False) -> str:
+    """單筆宗地與基地的關係。ov＝該宗地被基地聯集覆蓋的比例（0~1）。
+    keyed＝地號（含段）與基地逐筆比對命中；selfid＝地號沒命中但輔助判斷（is_base_self）確為基地自身。
+      self       基地自身且整筆在基地內 → 剔除
+      contained  非基地自身卻被基地幾何涵蓋 ≥98% → 保留並警告（基地內含他人裡地）
+      partial    地號命中基地且部分重疊 → 改取基地外殘餘（geometry.difference）
+      neighbor   不重疊／地號未命中的小重疊 → 原樣保留
+    地號未命中且 ov 介於 0.5~0.98 者沿用修前幾何規則（視為基地自身剔除），不冒險改變輸出。
+    """
+    if ov >= SELF_COVER:
+        return "self" if (keyed or selfid) else "contained"
+    if keyed:
+        return "partial" if ov > SELF_MIN_OV else "neighbor"
+    return "self" if ov >= 0.5 else "neighbor"
+
+
+def split_self_neighbors(gdf, su, base_keys=None, say=print, base_geoms=None):
+    """把線上框查結果中的「基地自身」剔除，並處理與基地部分重疊／被基地包住的宗地。
+
+    舊作法『與基地重疊 ≥ 自身 50% 就整筆剔除』有兩種錯（2026-11 審查）：
+      ① 農業部圖形把小宗地整筆包在基地大宗地內（萬里案 128 在 128-9 內）→ 被當基地剔除、
+         鄰地消失；② 申請範圍只占母地號一部分（--joined 給切片）→ 占 ≥50% 母地號整筆剔除而
+         殘餘地消失，<50% 整筆留下與基地重疊。
+    新作法：優先以（段＋地號）與基地逐筆比對辨識基地自身；base_keys 為空或完全對不上任何
+    一筆（地號口徑不同，如重測改號未帶原地號）→ 退回舊幾何判定（ov≥0.5 剔除），不冒險。
+    部分重疊者改 difference(基地聯集).buffer(0)，丟 <1 ㎡ 碎片，保留原屬性並加欄
+    「殘餘」＝「申請範圍外」（只在有殘餘列時才新增欄，無此情形輸出與舊版相同）。
+    回 (gdf_out, report)；report＝{"self":[地號],"contained":[地號],"partial":[地號],"legacy":bool}。
+    """
+    rep = {"self": [], "contained": [], "partial": [], "legacy": False}
+    if gdf is None or len(gdf) == 0:
+        return gdf, rep
+    gdf = gdf.reset_index(drop=True)
+    area = gdf.geometry.area.replace(0, 1)
+    ov = (gdf.geometry.intersection(su).area / area).tolist()
+    nos = gdf["地號"].tolist() if "地號" in gdf.columns else [""] * len(gdf)
+    segs = gdf["段"].tolist() if "段" in gdf.columns else [""] * len(gdf)
+    keyed = [bool(base_keys) and _norm_key(sg, no) in base_keys for sg, no in zip(segs, nos)]
+    base_nos = {k[1] for k in (base_keys or ())}
+    if not base_keys or not any(keyed):
+        rep["legacy"] = True
+        if base_keys:
+            say("  ⚠ 基地地號與框查結果逐筆對不上（可能重測改號），退回幾何重疊判定（≥50% 視為基地）")
+        keep = [i for i, o in enumerate(ov) if o < 0.5]
+        rep["self"] = [nos[i] for i in range(len(gdf)) if ov[i] >= 0.5]
+        return gdf.iloc[keep].reset_index(drop=True), rep
+
+    idxs, geoms, resid = [], [], []
+    for i in range(len(gdf)):
+        g = gdf.geometry.iloc[i]
+        selfid = (ov[i] >= SELF_COVER and not keyed[i]
+                  and is_base_self(g, nos[i], base_nos, base_geoms))
+        kind = classify_self(ov[i], keyed[i], selfid)
+        if kind == "self":
+            rep["self"].append(nos[i])
+            continue
+        if kind == "contained":
+            rep["contained"].append(nos[i])
+        elif kind == "partial":
+            g2 = g.difference(su).buffer(0)
+            if g2.is_empty or g2.area < RESIDUAL_MIN_AREA:
+                rep["self"].append(nos[i])   # 殘餘不足 1 ㎡ ＝ 實質整筆在基地內
+                continue
+            if g2.geom_type == "MultiPolygon":
+                g2 = type(g2)([p for p in g2.geoms if p.area >= RESIDUAL_MIN_AREA])
+            g = g2
+            rep["partial"].append(nos[i])
+        idxs.append(i)
+        geoms.append(g)
+        resid.append("申請範圍外" if kind == "partial" else "")
+    if rep["contained"]:
+        say(f"  ⚠ 基地內含他人裡地（非基地地號但被基地幾何涵蓋 ≥98%，已保留為鄰地）："
+            f"{'、'.join(rep['contained'])}——請覆核是否為圖形包覆或真實裡地")
+    if rep["partial"]:
+        say(f"  申請範圍只占部分宗地，已改取基地外殘餘（殘餘＝申請範圍外）："
+            f"{'、'.join(rep['partial'])}")
+    out = gdf.iloc[idxs].copy()
+    out["geometry"] = gpd.GeoSeries(geoms, index=out.index, crs=gdf.crs)
+    out = out.set_geometry("geometry").reset_index(drop=True)
+    if rep["partial"]:
+        out["殘餘"] = resid
+        if "圖面積" in out.columns:   # 殘餘列的圖面積＝殘餘幾何面積（登面積保留原值）
+            out["圖面積"] = [
+                round(gm.area, 2) if r else a
+                for gm, r, a in zip(out.geometry, resid, out["圖面積"])]
+    return out, rep
+
+
+
 def discover_online(joined: str, buffer_m: float, version: str | None = None,
                     no_owner: bool = False, sitemap: str | None = None):
     """★現行主路徑：出圖框直接向農業部框查，回 (gdf, region, frames, su)。
@@ -295,12 +435,18 @@ def discover_online(joined: str, buffer_m: float, version: str | None = None,
                                 "或服務異常")
     # 排除基地自身：與基地重疊達自身 50% 以上視為同一宗地。★用幾何不用地號字串——
     # 重測改號、異體字、段名變更都會讓字串比對失效（本專案反覆踩過的坑）。
-    ov = gdf.geometry.intersection(su).area / gdf.geometry.area.replace(0, 1)
-    gdf = gdf[ov < 0.5].reset_index(drop=True)
+    # （2026-11 審查修正）改以地號逐筆辨識基地自身，並處理包覆／部分重疊，見 split_self_neighbors。
+    gdf, _rep = split_self_neighbors(gdf, su, base_keys_from_site(site),
+                                     base_geoms=list(site.geometry))
     if not no_owner:
         gdf = mpq.attach_ownership(gdf)
     assert site is not None
     return gdf, region, frames, su
+
+
+def cadastre_fmt_landno(cadlib, r) -> str:
+    """快照一列 -> 地號字串（母-子），與 discover 組群用同一寫法。"""
+    return cadlib.format_landno(f"{int(r['宗地母']):04d}{int(r['宗地子']):04d}")
 
 
 def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, object, object]:
@@ -338,7 +484,22 @@ def discover(joined: str, buffer_m: float, county: str | None) -> tuple[dict, ob
             _current_town(county or "", str(t or "").strip())
             for t in sur_all["鄉鎮"]]
     sur_all["_ov"] = sur_all.geometry.intersection(su).area / sur_all.geometry.area.replace(0, 1)
-    sur = sur_all[sur_all["_ov"] < 0.5]
+    # （2026-11 審查修正）與框查路徑同一套辨識：以（段＋地號）比對基地自身，只剔除「基地自身且
+    # 整筆在基地內」；被基地包住的他人宗地／部分重疊者仍送查（殘餘幾何在線上回填後由
+    # run_local 以 split_self_neighbors 處理）。地號對不上時退回舊的 ov>=0.5 幾何判定。
+    _bk = base_keys_from_site(site)
+    _cl = [cadastre_fmt_landno(cadlib, r) for _, r in sur_all.iterrows()]
+    _kd = [bool(_bk) and _norm_key(_section_name(r["段"], r["小段"]), ln) in _bk
+           for (_, r), ln in zip(sur_all.iterrows(), _cl)]
+    if _bk and any(_kd):
+        _bn = {k[1] for k in _bk}
+        _bg = list(site.geometry)
+        _drop = [classify_self(o, k, (o >= SELF_COVER and not k
+                                       and is_base_self(g, ln, _bn, _bg))) == "self"
+                 for o, k, g, ln in zip(sur_all["_ov"], _kd, sur_all.geometry, _cl)]
+        sur = sur_all[[not d for d in _drop]]
+    else:
+        sur = sur_all[sur_all["_ov"] < 0.5]
 
     gap_check_ring = su.buffer(GAP_CHECK_M)
     near = sur_all[sur_all.geometry.intersects(gap_check_ring)]
@@ -488,6 +649,13 @@ def run_local(a):
                   ensure_ascii=False, indent=1)
 
     _out_shp, merged = fetch_all(groups, a.out, a.name)
+    try:
+        merged, _rep = split_self_neighbors(merged, su, base_keys_from_site(_site),
+                                            base_geoms=list(_site.geometry))
+        if _rep["partial"] or _rep["contained"] or _rep["self"]:
+            _out_shp = _safe_to_file(mpq.drop_internal(merged), _out_shp)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ 基地自身／殘餘處理失敗（{type(e).__name__}: {e}），沿用回填原結果")
     info = {"資料來源": "本機快照候選＋逐筆線上回填（fallback，受限於 Ver 111年2月 快照）"}
     return merged, su, frames, info
 

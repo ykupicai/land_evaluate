@@ -109,26 +109,20 @@ def cmd_fetch(a):
     # 權屬：以**段**為單位查一次公有土地名冊，再以地號 join。
     # 用 QueryByUnit（事務所2碼＋段4碼）而非 QueryByTown——api 回傳有 office/sec，
     # 但沒有鄉鎮 2 碼，走事務所這條剛好對得上，少一次代碼轉換。
-    own_idx, own_msg = {}, None
+    # 依每筆宗地各自的 (事務所, 段碼) 分組查名冊；「查詢成功 0 筆」與「查詢失敗」分開報，
+    # 0 筆時做同事務所對照組，且**不推論為私有**（public_land.query_rosters）。
+    own_idx, have_roster, own_status = {}, set(), {}
     if not a.no_owner:
-        p0 = next((rec["parcel"] for rec in r["records"] if rec["ok"] and rec["parcel"]),
-                  None)
-        if p0:
+        pairs = sorted({(str(rec["parcel"].get("office") or ""), str(rec["parcel"].get("sec") or ""))
+                        for rec in r["records"] if rec["ok"] and rec["parcel"]
+                        and rec["parcel"].get("office") and rec["parcel"].get("sec")})
+        if pairs:
             try:
                 import public_land as PL
-                rows = PL.query_section(None, None, p0["sec"], unit=p0["office"])
-                for rw in rows:
-                    os_ = PL.owners(rw)
-                    if os_:
-                        o = os_[0]
-                        own_idx[PL.norm_no(PL._g(rw, "No") or "")] = (
-                            o["公私別"], o["所有權人"], o["管理者"], len(os_))
-                own_msg = (f"公有土地名冊 {len(rows)} 筆"
-                           f"（事務所 {p0['office']}／段 {p0['sec']}）")
+                print("權屬來源：")
+                own_idx, have_roster, own_status = PL.query_rosters(pairs)
             except Exception as e:  # noqa: BLE001
-                own_msg = f"⚠ 權屬查詢失敗（{type(e).__name__}: {e}），權屬欄留空"
-    if own_msg:
-        print(f"權屬來源：{own_msg}")
+                print(f"權屬來源：⚠ 權屬查詢失敗（{type(e).__name__}: {e}），權屬欄留空")
 
     import geopandas as gpd
     from shapely.geometry import shape
@@ -152,10 +146,16 @@ def cmd_fetch(a):
         unreg = is_unregistered(p["landno"])
         # 權屬：命中公有土地名冊＝公有；未命中＝私有（**反面推論**，關鍵筆數請覆核）。
         # 未登記土地本來就不在該名冊，故不下私有的判斷。
-        ow = own_idx.get(p["landno"])
+        _pair = (str(p.get("office") or ""), str(p.get("sec") or ""))
+        try:
+            import public_land as _PLn
+            _no = _PLn.norm_no(p["landno"])
+        except Exception:  # noqa: BLE001
+            _no = p["landno"]
+        ow = own_idx.get((_pair[0], _pair[1], _no))
         if ow:
             pri, onm, omgr = ow[0], ow[1], ow[2]
-        elif unreg or not own_idx:
+        elif unreg or _pair not in have_roster:
             pri = onm = omgr = ""
         else:
             pri, onm, omgr = "私(推論)", "", ""
@@ -218,7 +218,7 @@ def cmd_fetch(a):
               "未登錄土地**，getLandInfo 對兩者回傳同樣是空白、無法區分（2026-08-06 已更正"
               "先前「一律當都市土地」的錯誤原則）——身分待另查都市計畫圖資或地政資料，"
               "交付文件不可逕行寫定為都市土地。")
-    if own_idx:
+    if have_roster:
         n_pub = sum(1 for x in rows if x["公私別"] and "推論" not in x["公私別"])
         print(f"\n權屬：公有 {n_pub} 筆（含所有權人與管理者）、"
               f"其餘以「未列於公有土地名冊」推論為私有。")
@@ -227,7 +227,18 @@ def cmd_fetch(a):
         print("  ⚠ 管理機關可能是改制前舊名（實測回「行政院農業委員會農田水利署」，"
               "現行為「農業部農田水利署」）——交付文字請用現行名稱。")
     else:
-        print("\n⚠ 未取得權屬（--no-owner 或查詢失敗）：寫因應手段前必須另查。")
+        if a.no_owner:
+            why = "--no-owner"
+        else:
+            import public_land as _PL2
+            why = _PL2.roster_summary(own_status) or "查詢失敗"
+        print(f"\n⚠ 未取得權屬（{why}）：權屬欄留空（圖上顯示無法判定），"
+              "寫因應手段前必須另查。")
+    if have_roster and own_status:
+        import public_land as _PL3
+        _s = _PL3.roster_summary(own_status)
+        if _s:
+            print(f"  ⚠ 部分段的權屬未取得（{_s}）：該段宗地權屬欄留空、未推論為私有。")
     return 1 if bad else 0
 
 
