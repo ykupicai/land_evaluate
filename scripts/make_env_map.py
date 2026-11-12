@@ -228,32 +228,41 @@ def main():
     ap.add_argument("--loc-parcel", action="store_true",
                     help="畫出「位置／涵蓋地號」角落框（舊版面；預設不畫）")
     ap.add_argument("--out", default=None, help="輸出資料夾（預設 outputs/<案名>）")
+    ap.add_argument("--site", default=None,
+                    help="案場ID（如 S001）：依 csv「案場」欄過濾命中、基地只取該案場宗地、"
+                         "輸出檔名帶案場ID；需搭配 --sitemap。不給＝整份基地（舊行為）")
+    ap.add_argument("--sitemap", default=None,
+                    help="案場定義/sitemap.csv（--site 用；預設 outputs/<案>/案場定義/sitemap.csv）")
     a = ap.parse_args()
+    import env_map_args as ema  # noqa: PLC0415 — 純邏輯（可單測）
 
     out_dir = Path(a.out) if a.out else (REPO_ROOT / "outputs" / a.case)
-    env_csv = Path(a.env_csv) if a.env_csv else (out_dir / "環境敏感套疊.csv")
-    if not env_csv.exists():
-        raise SystemExit(f"找不到 {env_csv}——請先做①b 環境敏感套疊分析")
+    # 案件根目錄：環敏/*.geojson 覆蓋幾何一律從這裡解析，不隨 --out 改變
+    case_root = REPO_ROOT / "outputs" / a.case
+    env_csv, _why = ema.pick_env_csv([out_dir, case_root], a.env_csv)
+    if env_csv is None:
+        raise SystemExit(_why)
+    print(f"環敏 csv：{_why}")
+    site_keys = None
+    if a.site:
+        sm = Path(a.sitemap) if a.sitemap else (case_root / "案場定義" / "sitemap.csv")
+        if not sm.exists():
+            raise SystemExit(f"--site 需要 sitemap：找不到 {sm}")
+        site_keys = ema.load_site_keys(sm, a.site)
+        if not site_keys:
+            raise SystemExit(f"sitemap 中查無案場 {a.site} 的地號：{sm}")
+        if not ema.has_site_column(env_csv):
+            print(f"  ⚠ {env_csv.name} 無「案場」欄（非 --per-site 產物），命中項無法依案場過濾，"
+                  f"以全部列計")
 
     def read_hits(path):
-        got = []
-        with io.open(path, encoding="utf-8-sig") as f:
-            for r in csv.DictReader(f):
-                # 兩種來源欄名不同：①b 平台版寫「套疊面積_m2」、⓪b NGIS 版
-                # （ngis_sensitive.py）寫「重疊面積_m2」。只認前者會讓 NGIS 來源
-                # 靜默回「套疊 0 項 → 不出圖」，明明有命中卻不畫（2026-08-27 麻豆案實踩）。
-                v = (r.get("套疊面積_m2") or r.get("重疊面積_m2") or "").strip()
-                try:
-                    area = float(v)
-                except ValueError:
-                    area = 0.0
-                if area > 0:
-                    got.append((r["圖層名稱"], area))
-        return got
+        return ema.read_hits(path, a.site)[0]
 
-    hits = read_hits(env_csv)
-    n_total = sum(1 for _ in csv.DictReader(io.open(env_csv, encoding="utf-8-sig")))
-    print(f"平台環敏檢核 {n_total} 項，套疊 {len(hits)} 項")
+    hits, n_total, _warns = ema.read_hits_ex(env_csv, a.site)
+    for _w in _warns:
+        print(f"  ⚠ {_w}")
+    print(f"平台環敏檢核 {n_total} 項，套疊 {len(hits)} 項"
+          + (f"（案場 {a.site}）" if a.site else ""))
     extra = Path(a.extra_csv) if a.extra_csv else (out_dir / "環境敏感套疊_本機補充.csv")
     if extra.exists():
         ex = read_hits(extra)
@@ -284,6 +293,25 @@ def main():
     site = QgsVectorLayer(a.joined, "基地地籍", "ogr")
     if not site.isValid():
         raise SystemExit(f"基地 shp 讀取失敗：{a.joined}")
+    if site_keys:
+        # 只留該案場的宗地（段＋地號比對）；以記憶體層承接，後續流程完全不變
+        def _val(feat, *names):
+            for n in names:
+                i = site.fields().indexFromName(n)
+                if i >= 0 and feat[i] not in (None, ""):
+                    return str(feat[i]).strip()
+            return ""
+        picked = [f for f in site.getFeatures()
+                  if ema.in_site(site_keys, _val(f, "地段名稱", "段"), _val(f, "地號"))]
+        if not picked:
+            raise SystemExit(f"基地 shp 內找不到案場 {a.site} 的宗地（sitemap {len(site_keys)} 筆）")
+        mem = QgsVectorLayer(f"MultiPolygon?crs={site.crs().authid() or 'EPSG:3826'}",
+                             "基地地籍", "memory")
+        mem.dataProvider().addAttributes(site.fields().toList())
+        mem.updateFields()
+        mem.dataProvider().addFeatures(picked)
+        print(f"案場 {a.site}：基地宗地 {len(picked)} / {site.featureCount()} 筆")
+        site = mem
     def _fld(feat, *names):
         """欄名容錯（tcdgis 匯出用「縣市名稱/鄉鎮市區/地段名稱」，其他來源可能用短名）。"""
         for n in names:
@@ -332,7 +360,7 @@ def main():
     n_full = sum(1 for _, ar in hits if ar >= 0.99 * geom_area)
     # 先把全部命中項的規則解析出來，才能配「保證不撞色」的代表色（見 assign_layer_colors；
     # 不能像舊版那樣邊解析邊用命中順序的索引取色，索引跟語意色互不相關才會撞色）。
-    resolved = [(name, *resolve_layer(name, county, case_dir=out_dir)) for name, _ in hits]
+    resolved = [(name, *resolve_layer(name, county, case_dir=case_root)) for name, _ in hits]
     layer_colors = assign_layer_colors(resolved, GENERIC_PALETTE)
     env_layers, legend_layers, notes, stats = [], [], [], []
     n_hatch = 0
@@ -423,6 +451,9 @@ def main():
                 keep_alive.append(photo_rl)
             else:
                 photo_rl = None
+                print("  ⚠ 底圖檔無法讀取，成果圖無正射底圖")
+        else:
+            print("  ⚠ 底圖取得失敗（圖磚全抓不到），成果圖無正射底圖——勿當正射套疊圖交付")
     except Exception as exc:  # noqa: BLE001 — 底圖失敗不阻斷出圖
         print(f"  ⚠ 底圖失敗：{type(exc).__name__}: {exc}")
 
@@ -442,7 +473,7 @@ def main():
 
     img_dir = out_dir / "圖檔_maxmap"
     img_dir.mkdir(parents=True, exist_ok=True)
-    fname = "001_%s_環境敏感.png" % a.case
+    fname = ema.env_png_name(a.case, a.site)
     layout, _pl = sheet.build_sheet_layout(
         project, "001_環境敏感", layers, legend, set(), geom, bbox,
         loc, pnote, keep_alive,
@@ -455,7 +486,7 @@ def main():
     print(("已輸出 " if ok else "輸出失敗 ") + str(img_dir / fname))
 
     if stats:
-        p = out_dir / "環境敏感套疊_逐類面積.csv"
+        p = out_dir / ema.env_stats_name(a.site)
         with io.open(p, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
             w.writerow(["敏感圖層", "分級", "套疊面積_m2"])

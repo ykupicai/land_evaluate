@@ -1160,36 +1160,27 @@ def urban_fullname_field(lyr: QgsVectorLayer, candidates: tuple[str, ...],
 
 def registered_area_index(shp_path) -> dict:
     """trust-shp 的 {地號: 登記面積}（僅取有正值者；地號重複者剔除，避免跨段同號誤配）。"""
-    out, dup = {}, set()
+    import area_label_logic as _al
     if not shp_path:
-        return out
+        return {}
     lyr = QgsVectorLayer(str(shp_path), "_area_idx", "ogr")
     if not lyr.isValid():
-        return out
+        return {}
     names = lyr.fields().names()
-    f_no = next((n for n in ("地號", "20251201_4") if n in names), None)
-    f_ar = next((n for n in ("登面積", "登記面積") if n in names), None)
+    f_no = _al.pick_field(names, _al.LANDNO_COLS)
+    f_ar = _al.pick_field(names, _al.REG_COLS)
     if not f_no or not f_ar:
-        return out
-    for f in lyr.getFeatures():
-        k = str(f[f_no]).strip()
-        try:
-            v = float(f[f_ar])
-        except (TypeError, ValueError):
-            continue
-        if k in out:
-            dup.add(k)
-        if v > 0:
-            out[k] = v
-    for k in dup:
-        out.pop(k, None)
-    return out
+        print(f"[警告] 基地 shp 無地號或登記面積欄（認 {_al.REG_COLS}）：基地面積標註將全部以圖面積計算",
+              flush=True)
+        return {}
+    return _al.build_registered_index((f[f_no], f[f_ar]) for f in lyr.getFeatures())
 
 
 AREA_LABEL_MAX_PARTS = 6   # 分離塊數超過此值改標合計（見 site_area_labels）
 
 
-def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) -> list:
+def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry,
+                     force_total: bool = False) -> list:
     """案場基地面積標註：[(點, 文字), …]。逐筆取登記面積、取不到才退回圖面積（登記面積優先）。
 
     案場由多塊分離的基地組成時（如合併案場 A1＋A2），**每塊各標自己的面積、不標加總**
@@ -1199,8 +1190,12 @@ def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) ->
              if g.area() > 1.0]
     # 分離的塊數太多（> AREA_LABEL_MAX_PARTS）時逐塊標會疊成一片看不清（2026-10-22 基隆友二東段
     # 65 筆分 35 塊實見）→ 只在最大那塊標一個合計，並寫明處數；各塊面積交給分塊圖／表格
+    import area_label_logic as _al
+    if not parts:                       # 各塊面積都 ≤1 ㎡：無可標註，避免 max([]) 拋 ValueError
+        return []
     n_total_parts = len(parts)
-    total_mode = n_total_parts > AREA_LABEL_MAX_PARTS
+    # force_total（--area-label-total）：使用者認定整個案場是一宗基地，不論幾塊都只標總面積
+    total_mode = _al.is_total_mode(n_total_parts, force_total, AREA_LABEL_MAX_PARTS)
     if total_mode:
         big = max(parts, key=lambda g: g.area())
         parts = [QgsGeometry.unaryUnion(parts)]
@@ -1208,23 +1203,16 @@ def site_area_labels(l_red: QgsVectorLayer, reg_idx: dict, geom: QgsGeometry) ->
     feats = list(l_red.getFeatures())
     out = []
     for part in parts:
-        total, n_geo, n = 0.0, 0, 0
+        entries = []
         for f in feats:
             g = f.geometry()
             if g.intersection(part).area() < 0.5:          # 只算落在這一塊的宗地
                 continue
-            n += 1
-            k = str(f[idx_no]).strip() if idx_no >= 0 else ""
-            if k in reg_idx:
-                total += reg_idx[k]
-            else:
-                total += g.area()
-                n_geo += 1
-        txt = f"基地面積\n{total:,.2f} ㎡\n（{total / 10000:.4f} 公頃）"
-        if n_geo:
-            txt += "\n（含圖面積計算）" if n_geo < n else "\n（圖面積）"
+            entries.append((str(f[idx_no]).strip() if idx_no >= 0 else "", g.area()))
+        total, n_geo, n = _al.sum_registered(entries, reg_idx)
+        txt = _al.area_label_text(total, n_geo, n, total_mode=total_mode,
+                                  force_total=force_total, n_total_parts=n_total_parts)
         if total_mode:
-            txt = txt.replace("基地面積", f"基地面積合計（{n_total_parts}處）", 1)
             out.append((big.poleOfInaccessibility(0.5)[0].asPoint(), txt))
             continue
         out.append((part.poleOfInaccessibility(0.5)[0].asPoint(), txt))
@@ -1480,6 +1468,8 @@ def road_status_color(status: str) -> tuple:
         return (0, 150, 0)
     if "需搭橋" in s:
         return (255, 140, 0)
+    if s.startswith("須重跑"):          # 例：須重跑(國土利用圖磚缺漏)——資料不完整，醒目警示、不可落灰
+        return (200, 0, 200)
     return (120, 120, 120)
 
 
@@ -1775,9 +1765,12 @@ def _run_maps(start_qgis) -> None:
     NO_LANDNO_THEMES, PARCEL_LINE_THEMES = a.no_landno_themes, a.parcel_line_themes
     AREA_LABEL_THEMES = a.area_label_themes        # 在這些主題的基地上標「基地面積」
     REG_AREA = registered_area_index(a.trust_shp) if AREA_LABEL_THEMES else {}
-    themes = list(THEMES[:4] if a.basic else THEMES)
-    if a.themes:
-        themes = [theme for theme in themes if theme in a.themes]
+    if AREA_LABEL_THEMES and not REG_AREA:
+        print("[警告] 登記面積索引為空（未給 --trust-shp、欄位缺或全無正值）："
+              "基地面積標註一律以圖面積計算，與登記面積可能不同", flush=True)
+    AREA_LABEL_TOTAL = a.area_label_total         # 視為一宗基地：只標總面積
+    from make_maps_cli import is_partial_run, qgz_target, selected_themes
+    themes = selected_themes(a.basic, a.themes, THEMES)
 
     out_dir = REPO_ROOT / "outputs" / case_name
     # maxmap 版面另存，全程不覆蓋既有 compact 成果（圖檔/05/qgz 皆加 _maxmap 後綴）
@@ -1787,7 +1780,10 @@ def _run_maps(start_qgis) -> None:
     # 圖例代理層的落地處；不設就退回記憶體層（圖照出、但 qgz 存不住圖例）
     LEGEND_DIR = out_dir / f"圖例{sfx}"
     gpkg = out_dir / "圖層.gpkg"          # 抽取結果共用，不隨版面而異
-    qgz = out_dir / f"{case_name}{sfx}.qgz"
+    qgz, _qgz_note = qgz_target(out_dir, f"{case_name}{sfx}",
+                                is_partial_run(themes, THEMES, only, exclude), a.force_qgz)
+    if _qgz_note and WRITE_QGZ:
+        print(f"[qgz] {_qgz_note}", flush=True)
     out05 = out_dir / f"05_出圖清單{sfx}.xlsx"
     out05_csv = out_dir / f"05_出圖清單{sfx}.csv"
     styles_dir = REPO_ROOT / "styles"
@@ -2505,7 +2501,7 @@ def _run_maps(start_qgis) -> None:
                 try:
                     _g = (mm_ctx[0] if mm_ctx else
                           QgsGeometry.unaryUnion([f.geometry() for f in l_red.getFeatures()]))
-                    _labels = site_area_labels(l_red, REG_AREA, _g)
+                    _labels = site_area_labels(l_red, REG_AREA, _g, force_total=AREA_LABEL_TOTAL)
                     area_lyr = area_label_layer(_labels, cid, keep_alive, warnings)
                     project.addMapLayer(area_lyr, False)
                     print(f"  [{cid}] 基地面積標註：" + "、".join(

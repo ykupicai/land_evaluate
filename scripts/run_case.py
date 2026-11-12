@@ -446,6 +446,11 @@ def assessment_followups(case_dir: Path) -> list[str]:
     return pending
 
 
+# 透傳給 make_maps 的值型旗標（make_maps 自己兩種寫法都吃）
+PASSTHRU_VALUE_FLAGS = ("--layout", "--themes", "--cases", "--exclude", "--road-margin",
+                        "--basemap-dir", "--area-label-themes")
+
+
 def main():
     args = sys.argv[1:]
     shp = lst = fetch = latlon = case = chosen = from_step = None
@@ -472,12 +477,14 @@ def main():
             resume = True; i += 1
         elif a in ("--no-qgz", "--mem", "--basic",
                    # 2026-07-29 新增：底圖鎖與圖面通則（見 make_maps 說明）
-                   "--reuse-basemap", "--no-loc-parcel"):
+                   "--reuse-basemap", "--no-loc-parcel",
+                   "--force-qgz", "--area-label-total"):
             passthru.append(a); i += 1
-        elif a == "--layout":                      # 透傳 make_maps(maxmap/compact)
+        elif a in PASSTHRU_VALUE_FLAGS:            # 值型旗標同時支援 --flag 值 與 --flag=值
+            if i + 1 >= len(args):
+                sys.exit(f"{a} 需要一個值")
             passthru += [a, args[i + 1]]; i += 2
-        elif a.startswith(("--layout=", "--themes=", "--cases=", "--exclude=",
-                           "--road-margin=", "--basemap-dir=")):
+        elif a.startswith(tuple(f + "=" for f in PASSTHRU_VALUE_FLAGS)):
             passthru.append(a); i += 1             # 透傳 make_maps
         else:
             sys.exit(f"未知參數 {a}")
