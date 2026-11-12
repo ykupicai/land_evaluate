@@ -45,3 +45,7 @@ config/環敏應免查範圍_*.pdf
 styles/國土功能分區.qml
 styles/基地紅框.qml
 styles/周邊地籍.qml
+
+# 本機 QGIS 符號庫與未整理圖資（2026-11-12）
+symbology-style.db
+國家風景區/

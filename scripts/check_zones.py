@@ -37,6 +37,7 @@ import datetime
 import io
 import json
 import os
+import re
 import sys
 
 import geopandas as gpd
@@ -160,6 +161,30 @@ CONTIG_TOL_M = 0.5       # 視為相連的容差（髮絲縫）
 CONTIG_REF_TOL_M = 15.0  # 參考：容差 15 m 的塊數（同一開發、內部路水）
 
 
+RULE_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$")
+
+
+def normalize_rule_ids(v) -> list[str]:
+    """YAML「規則編號」欄（字串或清單，選填）→ 去重清單。格式不符者拋錯。
+
+    格式＝法令檢核規則庫 rule_id，如 AGR-005、GEN-014、SP01-01B、LOCAL-TNN-001。
+    純函式，可單測。
+    """
+    if v is None or v == "" or v == []:
+        return []
+    items = v if isinstance(v, (list, tuple)) else re.split(r"[,，、\s]+", str(v))
+    out = []
+    for s in items:
+        s = str(s).strip()
+        if not s:
+            continue
+        if not RULE_ID_RE.match(s):
+            raise ValueError(f"規則編號格式不符：{s!r}（應如 AGR-005、SP01-01B）")
+        if s not in out:
+            out.append(s)
+    return out
+
+
 def contiguous_blocks(geom, tol: float = CONTIG_TOL_M) -> list[float]:
     """把（已 union 的）基地幾何拆成相連塊，回各塊面積（m²，由大到小）。
 
@@ -205,7 +230,14 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
     name = item.get("名稱", item.get("id", "?"))
     ref = item.get("條號", "")
     mark = item.get("級別", "△")
-    rec = {"名稱": name, "條號": ref, "類型": typ, "級別": mark}
+    rule_ids = normalize_rule_ids(item.get("規則編號"))
+    rec = {"名稱": name, "條號": ref, "類型": typ, "級別": mark,
+           "規則編號": rule_ids}
+    # ★ 2026-11-12：規則編號（法令檢核規則庫 rule_id，選填）。只填經逐條核對條號
+    #   相符者；規則庫未收錄的法源留空（json 為 []），不可拿名稱相近的規則湊。
+    #   顯示用的 ref 帶上編號，json 的「條號」維持 YAML 原文。
+    if rule_ids:
+        ref = f"{ref}［{'、'.join(rule_ids)}］" if ref else "、".join(rule_ids)
 
     # ★ 翻轉條件（2026-08-06 建，安定六塊寮段案教訓）：機械判定容易停在條文表面，
     #   有已知但書/例外款的項目在 YAML 加這個欄位，不管判定結果是什麼都提醒查核，
