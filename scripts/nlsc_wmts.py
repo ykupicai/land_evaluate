@@ -14,6 +14,7 @@ NLSC 圖層：PHOTO2＝通用版正射影像、EMAP＝臺灣通用電子地圖�
 """
 from __future__ import annotations
 import os
+import sys
 import time
 import urllib.request
 
@@ -36,6 +37,21 @@ SMAPS_REFERER = "https://easymap.moi.gov.tw/"   # 讀 capabilities 時帶著較�
 ORIGIN = 20037508.342789244          # web mercator 半幅（公尺）
 _HEADERS = {"User-Agent": "Mozilla/5.0 (QGIS GDAL tile fetch)"}
 MAX_TILES = 64                        # 單張圖磚數上限（自動挑 zoom）
+MAX_FAIL_RATIO = 0.25                 # 抓取失敗圖磚比例超過此值視同失敗（回 None）
+
+
+class BasemapPath(str):
+    """build_basemap 的回傳值：行為與一般路徑字串完全相同，另帶缺磚統計。
+
+    屬性：total（總磚數）、failed（抓取／解碼失敗，成品圖留白）、
+    empty（伺服器回 GIF 空磚或 0 bytes，多為無資料區如外海，不算失敗）、missing（= failed）。"""
+    total = 0
+    failed = 0
+    empty = 0
+
+    @property
+    def missing(self):
+        return self.failed
 
 
 def _is_image(blob):
@@ -82,7 +98,9 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
         不帶會回 0 bytes（坡度圖走這台）：
             build_basemap(ext, tif, layer="MOI_SLOPEP_LV7_2",
                           tile_tpl=SMAPS_TILE, referer=SMAPS_REFERER)
-    回傳 out_tif 路徑；全部圖磚皆抓不到時回傳 None。
+    回傳 out_tif 路徑（BasemapPath，是 str 子類，帶 total／failed／empty 缺磚統計）；
+    全部圖磚皆抓不到、或失敗圖磚比例超過 MAX_FAIL_RATIO（25%）時回傳 None。
+    有任何失敗磚都會在 stderr 印警告（成品圖該處是白底／透明，不是真的沒有資料）。
     """
     tpl = tile_tpl or WMTS_TILE
     hdrs = dict(_HEADERS)
@@ -113,6 +131,8 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
     ok = 0
+    n_failed = 0
+    n_empty = 0
     for r in range(row_min, row_max + 1):
         for c in range(col_min, col_max + 1):
             blob = None
@@ -131,12 +151,21 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
                         os.remove(fn)
                     except OSError:
                         pass
+            # 口徑(與 road_access._fetch_landuse_mosaic_ex 一致):
+            #   無資料＝伺服器正常回 GIF 空磚或 0 bytes 空回應(外海／境外／SMAPS 坡度圖
+            #   無資料區)，不算失敗、不入快取；失敗＝例外、逾時、HTTP 錯誤、回 HTML／
+            #   非圖片、解碼失敗，只有這些計入失敗比例。
+            no_data = False
             if blob is None:
                 u = tpl.format(layer=layer, z=z, row=r, col=c)
                 for attempt in range(3):
                     try:
                         rq = urllib.request.Request(u, headers=hdrs)
                         blob = urllib.request.urlopen(rq, timeout=30).read()
+                        if not blob:                 # 0 bytes 空回應＝無資料
+                            blob = None
+                            no_data = True
+                            break
                         if not _is_image(blob):      # 200＋HTML 錯誤頁，不可入快取
                             blob = None
                             break
@@ -148,7 +177,11 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
                         blob = None
                         if attempt < 2:
                             time.sleep(1)
-            if not blob or blob[:3] == b"GIF":
+            if no_data or (blob and blob[:3] == b"GIF"):
+                n_empty += 1          # 空磚（常為無資料區），不算抓取失敗
+                continue
+            if not blob:
+                n_failed += 1
                 continue
             try:
                 mem = "/vsimem/nlsc_t.png"
@@ -157,6 +190,7 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
                 arr = t.ReadAsArray()
                 gdal.Unlink(mem)
                 if arr is None:
+                    n_failed += 1
                     continue
                 if arr.ndim == 2:
                     arr = np.stack([arr] * 3)
@@ -174,9 +208,19 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
                     mosaic[:, y0:y0 + 256, x0:x0 + 256] = arr[:3]
                 ok += 1
             except Exception:
+                n_failed += 1
                 continue
 
+    total = ncol * nrow
+    if n_failed:
+        print(f"[nlsc_wmts] 警告：{layer} 圖磚 {n_failed}/{total} 塊抓取失敗，"
+              f"成品圖該處為{'透明' if keep_alpha else '白底'}（{out_tif}）",
+              file=sys.stderr)
     if ok == 0:
+        return None
+    if n_failed / total > MAX_FAIL_RATIO:
+        print(f"[nlsc_wmts] 失敗比例 {n_failed / total:.0%} 超過 {MAX_FAIL_RATIO:.0%}，"
+              f"視同底圖取得失敗（回傳 None）", file=sys.stderr)
         return None
     drv = gdal.GetDriverByName("GTiff")
     out = drv.Create(out_tif, W, H, nb, gdal.GDT_Byte,
@@ -190,4 +234,8 @@ def build_basemap(extent_3826, out_tif, layer="PHOTO2", z=None,
         out.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
     out.FlushCache()
     out = None
-    return out_tif
+    res = BasemapPath(out_tif)
+    res.total = total
+    res.failed = n_failed
+    res.empty = n_empty
+    return res

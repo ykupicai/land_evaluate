@@ -125,7 +125,21 @@ def _bbox_3857(gdf, buffer_m):
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+# 缺磚像元的哨兵色(不在 LUIMAP 色表內);向量化時視為無資料、不參與最近色分類
+NODATA_RGB = (1, 2, 3)
+
+
 def _fetch_landuse_mosaic(bbox3857, zoom, out_tif):
+    """相容舊呼叫:只回 tif 路徑。缺磚資訊請用 _fetch_landuse_mosaic_ex。"""
+    return _fetch_landuse_mosaic_ex(bbox3857, zoom, out_tif)[0]
+
+
+def _fetch_landuse_mosaic_ex(bbox3857, zoom, out_tif):
+    """下載國土利用圖磚並拼接。回傳 (tif 路徑, 缺磚 bbox 清單[EPSG:3857])。
+
+    單張重試 3 次仍失敗(例外/逾時/HTTP 錯誤)或內容無法解碼者列為缺磚:畫布以哨兵色
+    (NODATA_RGB)填滿,不留白色(白色會被最近色分到「其他」,道路面消失而誤判不臨路)。
+    GIF/0 bytes 空磚是伺服器正常的無資料回應,不算缺磚,畫布維持白色(同修前)。"""
     xmin, ymin, xmax, ymax = bbox3857
     tile_m = 2 * ORIGIN / (2 ** zoom)
     cmin = int((xmin + ORIGIN) / tile_m); cmax = int((xmax + ORIGIN) / tile_m)
@@ -134,26 +148,64 @@ def _fetch_landuse_mosaic(bbox3857, zoom, out_tif):
     W, H = ncol * 256, nrow * 256
     ox = cmin * tile_m - ORIGIN; oy = ORIGIN - rmin * tile_m; pix = tile_m / 256.0
     canvas = np.full((3, H, W), 255, np.uint8)
+    missing = []
     for r in range(rmin, rmax + 1):
         for c in range(cmin, cmax + 1):
             blob = None
+            failed = False          # 真失敗:例外/逾時/非 200 重試 3 次仍失敗
             url = WMTS_LANDUSE.format(z=zoom, row=r, col=c)
             for att in range(3):
                 try:
                     blob = urllib.request.urlopen(
                         urllib.request.Request(url, headers=_HDR), timeout=30).read()
+                    failed = False
                     break
                 except Exception:
                     if att == 2:
                         blob = None
+                        failed = True
                     else:
                         time.sleep(1)
-            if not blob or blob[:3] == b"GIF":
-                continue
-            arr = np.asarray(Image.open(io.BytesIO(blob)).convert("RGB"))
             y0 = (r - rmin) * 256; x0 = (c - cmin) * 256
+            arr = None
+            # 口徑與 nlsc_wmts.build_basemap 一致:GIF 空磚與 0 bytes 空回應是伺服器的
+            # 正常「無資料」回應(外海、境外),不算缺磚、維持修前行為(留白色);
+            # 只有例外/逾時/HTTP 錯誤、回 HTML 或解碼失敗才算缺磚(哨兵色+旗標)。
+            if not failed:
+                if not blob or blob[:3] == b"GIF":
+                    continue
+                try:
+                    arr = np.asarray(Image.open(io.BytesIO(blob)).convert("RGB"))
+                    if arr.shape[:2] != (256, 256):
+                        arr = None
+                except Exception:
+                    arr = None
+            if arr is None:
+                for b in range(3):
+                    canvas[b, y0:y0 + 256, x0:x0 + 256] = NODATA_RGB[b]
+                bx0 = ox + (c - cmin) * tile_m
+                by1 = oy - (r - rmin) * tile_m
+                missing.append((bx0, by1 - tile_m, bx0 + tile_m, by1))
+                continue
             canvas[:, y0:y0 + 256, x0:x0 + 256] = np.transpose(arr, (2, 0, 1))
-    return _write_rgb_geotiff(out_tif, canvas, 3857, ox, oy, pix)
+    if missing:
+        print(f"警告:國土利用圖磚缺漏 {len(missing)}/{ncol * nrow} 塊(重試仍失敗或無法解碼),"
+              f"缺磚處不參與分類;與基地外擴範圍相交的案場臨路狀態會標「須重跑」",
+              file=sys.stderr)
+    return _write_rgb_geotiff(out_tif, canvas, 3857, ox, oy, pix), missing
+
+
+def missing_polys_in_crs(missing, target_crs):
+    """缺磚 bbox(EPSG:3857) → 目標座標系的多邊形清單(取四角外包矩形)。"""
+    if not missing:
+        return []
+    tf = Transformer.from_crs("EPSG:3857", target_crs, always_xy=True)
+    out = []
+    for x0, y0, x1, y1 in missing:
+        pts = [tf.transform(x, y) for x, y in ((x0, y0), (x0, y1), (x1, y0), (x1, y1))]
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        out.append(shapely.box(min(xs), min(ys), max(xs), max(ys)))
+    return out
 
 
 # ── 國土利用向量化(自 landuse.py 移植;關鍵字對應不可動) ─────────────────────
@@ -164,7 +216,11 @@ def _fetch_landuse_mosaic(bbox3857, zoom, out_tif):
 _KEYWORD_MAP = [
     (("太陽", "光電"), "太陽光電"),
     (("養殖", "魚塭"), "魚塭"),
-    (("道路", "公路", "國道", "省道", "縣道", "市道", "鄉道", "交通", "鐵路", "街", "巷"), "道路"),
+    # ★ 2026-10-20 使用者裁示「鐵路不算道路」:一般鐵路(0302xx)、高速鐵路(0303xx)獨立成
+    #   「鐵路」類,不參與臨路判定與路寬量測(阿里山配置範圍案)。須排在「道路」之前。
+    #   「交通」也已移出道路關鍵字——03「交通利用土地」是父類(含機場/鐵路/港口),不是道路。
+    (("鐵路",), "鐵路"),
+    (("道路", "公路", "國道", "省道", "縣道", "市道", "鄉道", "街", "巷"), "道路"),
     (("建築", "房屋", "建物", "住宅", "工業", "廠房", "商業"), "建物"),
     (("河", "渠", "水域", "水利", "埤", "陂", "塘", "池", "海"), "水道"),
     (("農", "田", "果", "蔗", "旱", "作物", "耕"), "農田"),
@@ -193,6 +249,8 @@ def _vectorize_landuse(mosaic_tif, colortable_csv, target_crs, sieve):
     dist = ((uniq[:, None, :] - pal[None, :, :]) ** 2).sum(2)
     nearest = dist.argmin(1).astype(np.int32) + 1
     cls = nearest[inv].reshape(H, W)
+    # 缺磚哨兵色 → 無資料(0),polygonize 會略過,不參與分類
+    cls[(rgb == np.array(NODATA_RGB, dtype=np.uint8)).all(axis=2)] = 0
     feats = []
     for geom, cid in _polygonize_classes(cls, gt, proj, sieve=sieve):
         i = cid - 1
@@ -344,10 +402,35 @@ def _crossing_check(site_geom, feats, category, margin):
     return outside, (outside / total if total > 0 else 0.0)
 
 
-def _analyze_site(site, feats, cfg):
+def _rail_note(site_geom, feats, road_dist, cfg):
+    """最近的「道路類」其實是鐵路時的註記(鐵路不計入臨路)。
+
+    鐵路面距基地比任何道路面都近、且在 crossing_margin 內 → 回「鐵路不計（鐵路距 X m）」。"""
+    if "category" not in feats.columns:
+        return ""
+    rails = feats[feats["category"] == "鐵路"]
+    if len(rails) == 0:
+        return ""
+    rd = float(rails.geometry.distance(site_geom).min())
+    if rd <= cfg.crossing_margin and rd < road_dist:
+        return f"鐵路不計（鐵路距 {rd:.1f} m）"
+    return ""
+
+
+def _analyze_site(site, feats, cfg, tile_gap=None):
+    """tile_gap:None 或 {"n": 缺磚數, "polys": [缺磚多邊形(目標座標系)]}。"""
     g = site["geometry"]
     comp = _site_composition(g, feats)
     road_status, road_dist, road_note = _classify_road(g, feats, cfg)
+    rn = _rail_note(g, feats, road_dist, cfg)
+    if rn:
+        road_note = f"{road_note}；{rn}" if road_note else rn
+    gap_hit = False
+    if tile_gap and tile_gap.get("n"):
+        zone = g.buffer(cfg.buffer_m)
+        gap_hit = any(p.intersects(zone) for p in tile_gap.get("polys", []))
+        if gap_hit:
+            road_status = "須重跑(國土利用圖磚缺漏)"
     w_mid, w_min, w_max, w_n, w_tot = _road_width(g, feats, cfg)
     pond_a, pond_r = _crossing_check(g, feats, "魚塭", cfg.crossing_margin)
     bld_a, bld_r = _crossing_check(g, feats, "建物", cfg.crossing_margin)
@@ -364,6 +447,8 @@ def _analyze_site(site, feats, cfg):
         flags.append("建物越界")
     if road_status == "不臨路":
         flags.append("未臨路")
+    if gap_hit:      # 只標與缺磚相交的案場(不相交者結論不受影響)
+        flags.append(f"國土利用圖磚缺漏（{tile_gap['n']}塊）")
     # ⚠ 路寬離散警示(2026-08-07 新增;純加旗標,不改臨路三態判定與路寬數值)
     #   兩案人工修正版同時推翻本欄:新化 8m 鄉道量出中位數 22.48m(min 0.36/max 23.11)、
     #   安南現況已開闢約 10m 量出 11.86m。成因是本欄量的是「LUIMAP 道路類圖徵沿**基地
@@ -448,25 +533,31 @@ def main():
     ap.add_argument("--width-gap", type=float, default=Cfg.width_gap,
                     help="路寬量測:取樣點到路緣容許間隔 m(預設8;逾此視為該點未鄰接道路)")
     a = ap.parse_args()
-    cfg = Cfg(buffer_m=a.buffer, tile_zoom=a.tile_zoom)
+    cfg = Cfg(buffer_m=a.buffer, tile_zoom=a.tile_zoom, width_sample=a.width_sample,
+              width_search=a.width_search, width_gap=a.width_gap)
 
     out = Path(a.out); work = out / "_work"; work.mkdir(parents=True, exist_ok=True)
     sites = _build_sites(a.joined, a.sitemap)
     print(f"案場 {len(sites)} 個(依權威 sitemap 分組)", file=sys.stderr)
 
+    tile_gap = None
     if a.reuse_landuse and Path(a.reuse_landuse).exists():
         lu_tif = a.reuse_landuse
         print(f"重用既有 landuse.tif:{lu_tif}", file=sys.stderr)
     else:
         bbox = _bbox_3857(sites, cfg.buffer_m)
-        lu_tif = _fetch_landuse_mosaic(bbox, cfg.tile_zoom, str(work / "landuse.tif"))
-        print(f"已下載 landuse.tif", file=sys.stderr)
+        lu_tif, missing = _fetch_landuse_mosaic_ex(bbox, cfg.tile_zoom, str(work / "landuse.tif"))
+        print(f"已下載 landuse.tif" + (f"(缺磚 {len(missing)} 塊)" if missing else ""),
+              file=sys.stderr)
+        if missing:
+            tile_gap = {"n": len(missing),
+                        "polys": missing_polys_in_crs(missing, cfg.target_crs)}
 
     feats = _vectorize_landuse(lu_tif, a.colortable, cfg.target_crs, cfg.sieve)
     print(f"國土利用向量化 {len(feats)} 面;道路 {int((feats['category']=='道路').sum())} 面",
           file=sys.stderr)
 
-    table = pd.DataFrame([_analyze_site(r, feats, cfg) for _, r in sites.iterrows()])
+    table = pd.DataFrame([_analyze_site(r, feats, cfg, tile_gap) for _, r in sites.iterrows()])
 
     out.mkdir(parents=True, exist_ok=True)
     table.to_excel(out / "成果.xlsx", index=False)
