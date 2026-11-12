@@ -37,3 +37,22 @@ def test_all_checklists_rule_ids_valid():
         for it in d.get("檢核項目", []):
             n += len(normalize_rule_ids(it.get("規則編號")))
     assert n >= 27  # 2026-11-12 首批：共通兩份＋寵物／養生村／社福共 27 個編號
+
+
+def test_all_checklist_rule_ids_exist_in_library():
+    """清單填的規則編號必須存在於知識庫規則庫（讀本機快取 config/規則庫快取/）。
+
+    規則庫由衍古知識庫維護；快取以 scripts/sync_rule_library.py 更新。失敗時先同步快取，
+    仍缺者＝清單填了規則庫沒有的編號，回訊知識庫建立規則，不要自行在快取加列。
+    """
+    from sync_rule_library import CACHE, load_rule_ids
+    lib = load_rule_ids(CACHE)
+    assert len(lib) >= 215
+    missing = []
+    for f in glob.glob(os.path.join(ROOT, "config", "檢核清單", "*.yaml")):
+        d = yaml.safe_load(open(f, encoding="utf-8"))
+        for it in d.get("檢核項目", []):
+            for rid in normalize_rule_ids(it.get("規則編號")):
+                if rid not in lib:
+                    missing.append(f"{os.path.basename(f)}::{it['id']}::{rid}")
+    assert not missing, f"規則庫查無：{missing}"
