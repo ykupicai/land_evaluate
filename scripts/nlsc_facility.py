@@ -72,8 +72,18 @@ def _to_items(rows: list[dict], geom) -> list[dict]:
             for _, r in g.sort_values("實距_m").iterrows()]
 
 
-def nearest(geom, endpoints: list[str], dist: float, log: list) -> dict:
-    """geom 為 EPSG:3826 幾何；回各端點在門檻內的設施與最近距離（皆為到基地面的實距）。"""
+def filter_by_name(items: list[dict], keywords) -> list[dict]:
+    """依名稱關鍵字篩選（任一命中才留）；keywords 為空／None 時原樣回傳。"""
+    if not keywords:
+        return items
+    kws = [keywords] if isinstance(keywords, str) else list(keywords)
+    return [i for i in items if any(k in (i.get("名稱") or "") for k in kws)]
+
+
+def nearest(geom, endpoints: list[str], dist: float, log: list,
+            name_contains=None) -> dict:
+    """geom 為 EPSG:3826 幾何；回各端點在門檻內的設施與最近距離（皆為到基地面的實距）。
+    name_contains：可選，名稱含任一關鍵字才算（例：dis 端點只取加油站類）。不給則行為不變。"""
     cen = gpd.GeoSeries([geom.centroid], crs=3826).to_crs(4326).iloc[0]
     x0, y0, x1, y1 = geom.bounds
     R = max(geom.centroid.distance(Point(x, y))
@@ -83,12 +93,14 @@ def nearest(geom, endpoints: list[str], dist: float, log: list) -> dict:
     for ep in endpoints:
         rec = {"設施類別": NAMES.get(ep, ep), "查詢半徑_m": radius}
         try:
-            items = _to_items(query(ep, cen.x, cen.y, radius), geom)
+            items = filter_by_name(_to_items(query(ep, cen.x, cen.y, radius), geom),
+                                   name_contains)
             # 門檻內查無時往外探測，讓交付文件能寫出「最近者在 N 公尺外」而非只說「無」
             for probe in (3_000, 10_000):
                 if items or probe <= radius:
                     break
-                items = _to_items(query(ep, cen.x, cen.y, int(probe + R)), geom)
+                items = filter_by_name(
+                    _to_items(query(ep, cen.x, cen.y, int(probe + R)), geom), name_contains)
                 rec["探測半徑_m"] = int(probe + R)
         except Exception as e:  # noqa: BLE001
             log.append(f"    ⚠ {NAMES.get(ep, ep)}：{e} → 須人工確認（不得記為查無）")

@@ -154,6 +154,52 @@ def _reverse_hint(item, rev, log):
                     "請核對此項門檻方向是否設反了")
 
 
+# ★ 基地相連性（2026-11 審查：65 筆分 35 塊、最大塊僅 4.52 公頃仍被判符合 10 公頃）
+#   面積下限型門檻（管制規則§52-1、總編§14）要看「相連」的申請範圍，不是合計。
+CONTIG_TOL_M = 0.5       # 視為相連的容差（髮絲縫）
+CONTIG_REF_TOL_M = 15.0  # 參考：容差 15 m 的塊數（同一開發、內部路水）
+
+
+def contiguous_blocks(geom, tol: float = CONTIG_TOL_M) -> list[float]:
+    """把（已 union 的）基地幾何拆成相連塊，回各塊面積（m²，由大到小）。
+
+    tol＝兩塊距離不超過 tol 公尺即視為相連。純函式，可單測。
+    """
+    from shapely.ops import unary_union
+    if geom is None or geom.is_empty:
+        return []
+    parts = list(geom.geoms) if hasattr(geom, "geoms") else [geom]
+    parts = [p for p in parts if not p.is_empty]
+    if len(parts) <= 1:
+        return [float(parts[0].area)] if parts else []
+    r = tol / 2.0
+    merged = unary_union([p.buffer(r) for p in parts])
+    comps = list(merged.geoms) if hasattr(merged, "geoms") else [merged]
+    areas = [0.0] * len(comps)
+    for p in parts:
+        rp = p.representative_point()
+        for i, c in enumerate(comps):
+            if c.intersects(rp):
+                areas[i] += float(p.area)
+                break
+    return sorted((a for a in areas if a > 0), reverse=True)
+
+
+def judge_floor_area(total_m2: float, blocks: list[float], th_ha: float):
+    """面積下限型判定。回 (狀態, 最大塊公頃)。
+    狀態：'符合'／'不足'／'須確認'（合計達標但最大相連塊未達）。
+    只有 1 塊（或無塊資料）時沿用合計，行為與修前相同。"""
+    ha = total_m2 / 10000
+    if len(blocks) <= 1:
+        return ("符合" if ha >= th_ha else "不足"), ha
+    mx = blocks[0] / 10000
+    if mx >= th_ha:
+        return "符合", mx
+    if ha >= th_ha:
+        return "須確認", mx
+    return "不足", mx
+
+
 def run_item(item, site_gdf, su, tot, sites, county, log, results):
     typ = item["類型"]
     name = item.get("名稱", item.get("id", "?"))
@@ -200,6 +246,8 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
                 log.append(f"  ✗ {name}（{ref}）：{len(hit)} 筆 {fld} 含「{val}」"
                            f"（地號 {sorted(hit['地號'].astype(str))}）→ {mark}")
                 rec["判定"] = mark
+                if item.get("備註"):
+                    log.append("      " + str(item["備註"]).strip().replace("\n", " "))
                 # ★ 逐案場拆分（2026-08-06 建）：多案場批次跑時，overlay 型早就有
                 #   逐案場面積，attribute 型之前只知道「整批有沒有」、不知道是哪個
                 #   案場，多案場案子要另外人工比對。用地號跟 sites 空間relate回去。
@@ -250,7 +298,8 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
         dist = float(item.get("距離_m", 200))
         eps_list = item.get("端點", ["med", "edu"])
         log.append(f"  ・{name}（{ref}）：門檻 {dist:,.0f}m（設施到基地面實距）")
-        r = nf.nearest(su, eps_list, dist, log)
+        name_kw = item.get("名稱含")
+        r = nf.nearest(su, eps_list, dist, log, name_contains=name_kw)
         hit = [k for k, v in r.items() if v["判定"] == "觸及"]
         fail = [k for k, v in r.items() if v["判定"] == "API失敗須確認"]
         if hit:
@@ -266,7 +315,7 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
         if hit and sites is not None:
             persite_hit = []
             for _, s in sites.iterrows():
-                rs = nf.nearest(s.geometry, eps_list, dist, log)
+                rs = nf.nearest(s.geometry, eps_list, dist, log, name_contains=name_kw)
                 if any(v["判定"] == "觸及" for v in rs.values()):
                     persite_hit.append(s["site_id"])
             if persite_hit:
@@ -293,12 +342,29 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
 
     if typ == "area":
         # 山坡地屬性 → 決定門檻（area 型的圖層鍵是「山坡地圖層」，不走通用 paths 檢查）
-        slope_paths = _resolve_paths({"圖層": item.get("山坡地圖層", [])}, county)
+        slope_decl = item.get("山坡地圖層")
+        slope_paths = _resolve_paths({"圖層": slope_decl or []}, county)
         in_slope = False
+        slope_fail = bool(slope_decl) and not slope_paths
+        if slope_fail:
+            log.append(f"    ⚠ {name}：宣告了山坡地圖層但檔案不存在（{slope_decl}）"
+                       f"——不可預設非山坡地")
         for p in slope_paths:
             g = _load_layer(p, item, log)
-            if g is not None and len(g):
-                in_slope = bool(g.geometry.intersects(su).any())
+            if g is None:
+                slope_fail = True
+                log.append(f"    ⚠ {name}：山坡地圖層讀取失敗（{p}）——不可預設非山坡地")
+            elif len(g) and bool(g.geometry.intersects(su).any()):
+                in_slope = True
+        if slope_fail and not in_slope:
+            ha0 = tot / 10000
+            log.append(f"  ？ {name}（{ref}）：基地 {ha0:.4f} 公頃，山坡地屬性無法判定 → 須人工確認")
+            rec["判定"] = "山坡地屬性無法判定須確認"
+            rec["公頃"] = round(ha0, 4)
+            rec["反向"] = bool(item.get("反向"))
+            rec["門檻公頃"] = None   # 山坡地屬性未定，無法決定採用哪個門檻
+            results.append(rec)
+            return
         th = item["山坡地_公頃"] if in_slope else item["非山坡地_公頃"]
         ha = tot / 10000
         # ★ 兩種相反的門檻語意，`反向: true` 切換（2026-08-02 龍崎光電案補）：
@@ -309,13 +375,38 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
         #     與「逾門檻＝應辦環評」的真意完全相反（本案實踩，YAML 已寫 反向 但引擎忽略）。
         rev = bool(item.get("反向"))
         _reverse_hint(item, rev, log)
-        ok = (ha < th) if rev else (ha >= th)
+        blocks = contiguous_blocks(su) if not rev else []
+        blk_status, max_ha = judge_floor_area(tot, blocks, th) if not rev else (None, ha)
+        needs_confirm = (blk_status == "須確認")
+        if rev:
+            ok = ha < th
+        else:
+            ok = (blk_status == "符合")
         how = f"逾 {th} 公頃即觸發" if rev else f"門檻 {th} 公頃"
-        res = ("未逾門檻" if ok else f"**逾門檻**→{mark}") if rev else \
-              ("符合" if ok else mark)
-        log.append(f"  {'✓' if ok else '✗'} {name}（{ref}）：基地 {ha:.4f} 公頃、"
+        if rev:
+            res = "未逾門檻" if ok else f"**逾門檻**→{mark}"
+        elif needs_confirm:
+            res = "須人工確認（合計達標但最大相連塊未達）"
+        else:
+            res = "符合" if ok else mark
+        if not rev and len(blocks) > 1:
+            n15 = len(contiguous_blocks(su, CONTIG_REF_TOL_M))
+            top5 = "、".join(f"{a/10000:.4f}" for a in blocks[:5])
+            log.append(f"    基地分 {len(blocks)} 塊不相連（容差 {CONTIG_TOL_M} m；"
+                       f"容差 {CONTIG_REF_TOL_M:.0f} m 則 {n15} 塊），最大相連塊 {max_ha:.4f} 公頃；"
+                       f"前 5 塊（公頃）：{top5}")
+            rec["塊數"] = len(blocks)
+            rec["塊數_15m"] = n15
+            rec["最大塊公頃"] = round(max_ha, 4)
+            rec["各塊公頃前5"] = [round(a / 10000, 4) for a in blocks[:5]]
+        log.append(f"  {'✓' if ok else ('？' if needs_confirm else '✗')} {name}（{ref}）：基地 {ha:.4f} 公頃、"
                    f"{'位於' if in_slope else '非'}山坡地 → {how} → {res}")
-        rec["判定"] = ("未逾門檻" if ok else mark) if rev else ("符合" if ok else mark)
+        if rev:
+            rec["判定"] = "未逾門檻" if ok else mark
+        elif needs_confirm:
+            rec["判定"] = "須人工確認（最大相連塊未達門檻）"
+        else:
+            rec["判定"] = "符合" if ok else mark
         rec["公頃"] = round(ha, 4)
         rec["門檻公頃"] = th
         rec["反向"] = rev
@@ -335,9 +426,14 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
     hit_area = 0.0
     nearest = None
     persite = {}
+    n_ok = n_fail = 0
     for p in paths:
         g = _load_layer(p, item, log)
-        if g is None or len(g) == 0:
+        if g is None:
+            n_fail += 1
+            continue
+        n_ok += 1
+        if len(g) == 0:
             continue
         bbox_target = su.buffer(item.get("距離_m", 0) + 50) if typ == "distance" else su
         cand = g[g.geometry.intersects(bbox_target.envelope.buffer(1000))]
@@ -357,6 +453,16 @@ def run_item(item, site_gdf, su, tot, sites, county, log, results):
             d = float(g.geometry.distance(su).min()) if len(g) else None
             nearest = d if nearest is None else min(nearest, d)
 
+    load_problem = (n_ok == 0 or n_fail > 0)
+    if load_problem and not (hit_area > (1 if typ == "overlay" else 0)):
+        # ★ 圖層讀取失敗不可印「未觸及」（2026-11 審查）
+        log.append(f"  ？ {name}（{ref}）：{len(paths)} 個圖層中 {n_fail} 個讀取／驗證失敗"
+                   f"（成功 {n_ok}）→ 缺圖資須確認，不得記為未觸及")
+        rec["判定"] = "缺圖資須確認"
+        results.append(rec)
+        return
+    if load_problem:
+        log.append(f"    ⚠ {name}：有 {n_fail} 個圖層讀取失敗，以下結果僅含成功載入者")
     if typ == "overlay":
         if hit_area > 1:
             pct = 100 * hit_area / tot
