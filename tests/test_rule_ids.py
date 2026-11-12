@@ -21,7 +21,7 @@ def test_normalize_variants():
         "SP01-01B", "LUR-052-1", "LOCAL-TNN-001"]
 
 
-@pytest.mark.parametrize("bad", ["agr-005", "AGR005", "總編§14", "DTM 20"])
+@pytest.mark.parametrize("bad", ["agr-005", "AGR005", "總編§14", "DTM 20", "BLD-FN-ESS"])
 def test_reject_bad_format(bad):
     with pytest.raises(ValueError):
         normalize_rule_ids(bad)

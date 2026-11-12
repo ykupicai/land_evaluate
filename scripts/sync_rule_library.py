@@ -25,7 +25,7 @@ SRC = (r"Z:\8. AI協作\知識庫\衍古\03_案件經驗知識層\70_法規索�
        r"\法令檢核規則庫\法令檢核規則庫.csv")
 CACHE_DIR = os.path.join(ROOT, "config", "規則庫快取")
 CACHE = os.path.join(CACHE_DIR, "法令檢核規則庫.csv")
-RULE_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$")
+RULE_ID_RE = re.compile(r"^[A-Z][A-Z0-9]*-(?=[A-Z0-9-]*\d)[A-Z0-9]+(-[A-Z0-9]+)*$")  # 第一個連字號後須含數字（與知識庫盤點一致）
 
 
 def load_rule_ids(path: str = CACHE) -> set[str]:
