@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""從衍古知識庫更新「法令檢核規則庫」唯讀快取（2026-11-12 規則庫移交知識庫後建立）。
+"""從衍古知識庫更新「法令檢核規則庫」唯讀快取（2026-11-12 建立；2026-11-17 起來源改由共用 repo 同步）。
 
-規則庫由知識庫唯一維護（Z:\\...\\70_法規索引\\法令檢核規則庫\\），本專案只讀它匯出的 CSV。
+規則庫由三辦公室共用的私有 repo Ykupic_ontology（rules/）維護，同步產生衍古知識庫
+Z:\\...\\70_法規索引\\法令檢核規則庫\\法令檢核規則庫.csv；本專案只讀這份 CSV，路徑不變。
 本腳本把 CSV 複製到 config/規則庫快取/，並寫 .版本.txt（來源、修改時間、MD5、筆數）。
 測試（tests/test_rule_ids.py）只讀快取，不連 NAS。
 
@@ -54,7 +55,8 @@ def main():
     with open(os.path.join(CACHE_DIR, ".版本.txt"), "w", encoding="utf-8") as f:
         f.write(f"來源：{a.src}\n來源修改時間：{mtime}\nMD5：{hashlib.md5(data).hexdigest()}\n"
                 f"規則數：{len(ids)}\n同步時間：{datetime.datetime.now():%Y-%m-%d %H:%M}\n"
-                "維護者：衍古知識庫（本專案唯讀；要新增或修改規則請回訊知識庫，不要改這份快取）\n")
+                "維護者：共用 repo Ykupic_ontology（經衍古知識庫同步；本專案唯讀，"
+                "要新增或修改規則請回訊知識庫工作階段，不要改這份快取）\n")
     print(f"✔ 已更新快取：{len(ids)} 條（來源 {mtime}）→ {CACHE}")
     return 0
 
