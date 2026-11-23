@@ -39,18 +39,28 @@ def test_all_checklists_rule_ids_valid():
     assert n >= 27  # 2026-11-12 首批：共通兩份＋寵物／養生村／社福共 27 個編號
 
 
-PROVISIONAL_PREFIXES = ("XTN-", "XHC-", "XTP-")
+import re  # noqa: E402
+
+# 共用 repo 待覆核編號格式（知識庫 2026-11-23 提供）：X＋辦公室代碼＋流水號，
+# 例 XTN-12、XHC-3、XTP-7、XTN2-5。辦公室會增加，故用正規式不用固定前綴清單。
+PROVISIONAL_RE = re.compile(r"^X(?P<office>[A-Z][A-Z0-9]*)-\d+$")
+
+
+@pytest.mark.parametrize("rid,hit", [("XTN-12", True), ("XHC-3", True), ("XTP-7", True),
+                                     ("XTN2-5", True), ("AGR-005", False), ("LOCAL-TNN-001", False)])
+def test_provisional_pattern(rid, hit):
+    assert bool(PROVISIONAL_RE.match(rid)) is hit
 
 
 def test_no_provisional_rule_ids_in_checklists():
     """只填已轉正的編號（使用者 2026-11-17 定案）：共用 repo 未經另一辦公室覆核轉正的規則
-    帶辦公室前綴 XTN-／XHC-／XTP-，即使已同步進快取也不可填進清單，待轉正後再補。"""
+    帶辦公室前綴（XTN-／XHC-／XTP-／XTN2-…），即使已同步進快取也不可填進清單，待轉正後再補。"""
     found = []
     for f in glob.glob(os.path.join(ROOT, "config", "檢核清單", "*.yaml")):
         d = yaml.safe_load(open(f, encoding="utf-8"))
         for it in d.get("檢核項目", []):
             for rid in normalize_rule_ids(it.get("規則編號")):
-                if rid.startswith(PROVISIONAL_PREFIXES):
+                if PROVISIONAL_RE.match(rid):
                     found.append(f"{os.path.basename(f)}::{it['id']}::{rid}")
     assert not found, f"清單含未轉正編號（待轉正後再填）：{found}"
 
