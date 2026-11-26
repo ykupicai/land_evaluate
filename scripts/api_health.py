@@ -5,7 +5,7 @@
 
 為什麼不是「ping 一下有回 200 就算好」——本專案踩過的三種假綠燈：
   ① NLSC 對**不存在的圖層**回 HTTP 200 + **0 bytes 空 gif**（見 CLAUDE.md）。
-     → image 型探測一律驗位元組數與 content-type。
+     → image 型探測驗 content-type、實際解碼與透明度；多點交叉檢查。
   ② 政府站台前面的代理／錯誤頁會回 200 + HTML，內容根本不是該服務。
      → json 型探測要求「解得出 JSON 且頂層有指定的鍵」。
   ③ 服務活著但**欄位改名／圖層改編號**，程式照樣壞。
@@ -112,18 +112,43 @@ def probe_json(session, spec):
 
 
 def probe_image(session, spec):
+    urls = spec.get("測試網址") or [spec["url"]]
+    results = []
+    for url in urls:
+        try:
+            results.append(_probe_image_one(session, {**spec, "url": url}))
+        except Exception as exc:
+            results.append(("FAIL", explain(exc), 0.0))
+    good = sum(status == "OK" for status, _, _ in results)
+    # 一點異常只能證明該樣本失敗；不可宣稱整個服務停擺。
+    status = "OK" if good == len(results) else "WARN" if good else "FAIL"
+    detail = "；".join(f"樣本{i}: {d}" for i, (_, d, _) in enumerate(results, 1))
+    if good < len(results):
+        detail += "；部分測試點異常，服務仍有圖面" if good else "；所有測試點未通過，不等同已確認全站停用"
+    return status, detail, sum(seconds for _, _, seconds in results)
+
+
+def _probe_image_one(session, spec):
+    from io import BytesIO
+    from PIL import Image
+
     timeout = spec.get("逾時", DEFAULT_TIMEOUT)
     resp, secs = _fetch(session, spec["url"], timeout, spec.get("referer"))
     if resp.status_code != 200:
         return "FAIL", f"HTTP {resp.status_code}", secs
     size = len(resp.content)
-    floor = spec.get("最小位元組", 500)
     ctype = resp.headers.get("Content-Type", "")
-    if size < floor:
-        # NLSC 對不存在的圖層就是回這個：200 + 極小的空 gif
-        return "FAIL", f"只回 {size} bytes（門檻 {floor}）＝空圖磚，該圖層可能已下架或改名", secs
+    if not size:
+        return "FAIL", "空圖磚（0 bytes）", secs
     if not ctype.startswith("image/"):
         return "FAIL", f"Content-Type 是 {ctype or '(空)'}，不是影像", secs
+    try:
+        with Image.open(BytesIO(resp.content)) as im:
+            im.load()
+            if im.convert("RGBA").getchannel("A").getbbox() is None:
+                return "FAIL", f"透明空圖磚（{size} bytes）；測試點可能無資料", secs
+    except (OSError, ValueError) as exc:
+        return "FAIL", f"影像無法解碼：{exc}", secs
     return "OK", f"{ctype} {size} bytes", secs
 
 

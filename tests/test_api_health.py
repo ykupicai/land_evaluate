@@ -5,6 +5,8 @@
 HTTP 200 的空圖磚、HTTP 200 的錯誤頁、圖層還在但欄位改名。
 """
 import json
+from io import BytesIO
+from PIL import Image
 import sys
 from pathlib import Path
 
@@ -48,9 +50,47 @@ def test_空圖磚雖然回200仍判FAIL():
 
 def test_正常圖磚判OK():
     spec = {"檢查": "image", "url": "x", "最小位元組": 500}
-    status, _, _ = _run(spec, FakeResp(200, b"\x89PNG" + b"0" * 2000,
+    status, _, _ = _run(spec, FakeResp(200, _png(),
                                        headers={"Content-Type": "image/png"}))
     assert status == "OK"
+
+
+def _png(alpha=255, compress_level=9):
+    stream = BytesIO()
+    Image.new("RGBA", (256, 256), (30, 100, 50, alpha)).save(
+        stream, format="PNG", compress_level=compress_level)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize("compression", [0, 9])
+def test_透明圖不論檔案大小都失敗(compression):
+    status, detail, _ = _run({"檢查": "image", "url": "x"},
+        FakeResp(content=_png(0, compression), headers={"Content-Type": "image/png"}))
+    assert status == "FAIL"
+    assert "透明空圖磚" in detail
+
+
+def test_損壞影像不能假綠燈():
+    status, detail, _ = _run({"檢查": "image", "url": "x"},
+        FakeResp(content=b"not-png" * 200, headers={"Content-Type": "image/png"}))
+    assert status == "FAIL"
+    assert "無法解碼" in detail
+
+
+@pytest.mark.parametrize("alphas,expected", [([255,255],"OK"), ([0,255],"WARN"), ([0,0],"FAIL")])
+def test_多點圖磚交叉檢查(alphas, expected):
+    status, _, _ = _run({"檢查": "image", "測試網址": ["0","1"]},
+        lambda url: FakeResp(content=_png(alphas[int(url)]), headers={"Content-Type": "image/png"}))
+    assert status == expected
+
+
+def test_單點連線失敗不阻止第二點():
+    def response(url):
+        if url == "0":
+            raise ConnectionError("offline")
+        return FakeResp(content=_png(), headers={"Content-Type": "image/png"})
+    status, _, _ = _run({"檢查": "image", "測試網址": ["0", "1"]}, response)
+    assert status == "WARN"
 
 
 def test_圖磚回HTML判FAIL():
