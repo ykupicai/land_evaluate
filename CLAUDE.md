@@ -100,6 +100,17 @@
 ④ 簡報(parcel-briefing-deck；deck_layout.py 版面引擎，頁數依案情，近期案為 11~12 頁)
 ```
 
+**版面規範權威（2026-08-19 定案）**：簡報與出圖版面以兩份 YAML 為準，改版面＝改引擎一次、全案重跑生效，
+不要在案件資料夾改副本。
+- 簡報：`~/.claude/skills/parcel-briefing-deck/references/簡報版面設計規範.yaml` → 實作 `scripts/deck_layout.py`
+  （純白底、思源宋體家族、章節數字＋灰綠色條、磚紅副標、■條列）。
+- 出圖：`~/.claude/skills/parcel-map-sheet/references/地圖出圖版面規範.yaml` → 實作 `scripts/build_layout.py`＋`overlay_placement.py`
+  （滿版地圖；指北針/比例尺固定左上、圖例 fit-to-content 固定右下離邊 5mm、位置/涵蓋地號左下；
+  基地被框壓到時退比例尺避讓）。
+- skill 內 `scripts/build_layout.py`、`overlay_placement.py` 是本 repo 的副本，改這邊後要同步過去。
+- 兩項刻意不照 YAML：總表圖例沿用「需經後續作業／審議認定」（不改「有條件辦理」）；內文維持 12pt（YAML 16pt 會讓密集條列溢出）。
+- 歷史來源與訓練素材在 `Projects\簡報樣式訓練\`（僅供查閱，不再維護）。
+
 **都市計畫個案變更簡化版**（2026-08-06 安南公塭段醫療専用區案首次走通）：
 ```
 ⓪a 免登入取地籍(cadastre_fetch.py，同上；使分/使類回None即都市土地訊號)
