@@ -23,6 +23,7 @@
      探到門檻仍未命中 → 判「跨母號分割／重測改號」，明確退線上空間反查、不硬掰
 
 權威分工：本機快照只當「候選來源＋縣市定位失敗時的備援」，現行地號一律以農業部為準。
+本機無快照時（NAS 未掛）自動退回農業部線上框查（online_reverse，2026-11-26）。
 可信度：點距邊界 <5m 標「近界、建議人工確認相鄰筆」（Google 地標點常有 5~15m 誤差）。
 """
 from __future__ import annotations
@@ -303,6 +304,80 @@ def neighbor_sweep(shp, x, y, pt, city, town, moa, api, throttle,
 
 
 # --------------------------------------------------------------------------
+# 5b. 線上框查退路（本機快照缺失時；2026-11-26 加）
+# --------------------------------------------------------------------------
+ONLINE_HALF_M = 40.0   # 框查半徑（m）；點在界外 ≤NEAR_EDGE_M 仍認定（同本機路徑的近界容差）
+
+
+def online_reverse(out: dict, pt, county: str | None, why: str) -> dict:
+    """本機沒有地籍快照時（NAS 未掛、新機器）：改向農業部框查點周圍宗地、點面相交取現行地號。
+
+    ＝ cadastre_neighbors.discover_online 同一條線上路徑（moa_parcel_query），不需候選／段名先驗／
+    子號探測——框查回的就是現行宗地，重測改號、分割都不受影響。代價：無「本機候選」交叉，
+    且不回 14 碼／登記日期。失敗不硬掰，回 FAIL_ONLINE。
+    """
+    from shapely.geometry import box  # noqa: PLC0415
+    import moa_parcel_query as mpq  # noqa: PLC0415
+
+    x, y = out["x"], out["y"]
+    out["warnings"].append(f"{why} → 改用農業部線上框查（無本機候選交叉）")
+    try:
+        recs = mpq.query_region(box(x - ONLINE_HALF_M, y - ONLINE_HALF_M,
+                                    x + ONLINE_HALF_M, y + ONLINE_HALF_M),
+                                None, progress=lambda *_a, **_k: None)
+        gdf = mpq.to_gdf(recs, "")
+    except Exception as e:  # noqa: BLE001
+        out["status"] = "FAIL_ONLINE"
+        out["message"] = f"本機無地籍快照，線上框查亦失敗：{type(e).__name__}: {str(e)[:150]}"
+        return out
+    if len(gdf) == 0:
+        out["status"] = "FAIL_ONLINE"
+        out["message"] = "線上框查回 0 筆（離島？或服務異常）；本機亦無快照可退"
+        return out
+
+    dist = gdf.geometry.distance(pt)
+    inside = gdf[gdf.geometry.contains(pt)]
+    if len(inside):
+        row = inside.iloc[0]
+        edge = float(row.geometry.boundary.distance(pt))
+        near = False
+        if len(inside) > 1:
+            out["warnings"].append(f"點同時落在 {len(inside)} 筆宗地內（重疊），取第一筆："
+                                   + "、".join(str(v) for v in inside["地號"]))
+    else:
+        i = dist.idxmin()
+        row, edge = gdf.loc[i], float(dist.min())
+        if edge > NEAR_EDGE_M:
+            out["status"] = "FAIL_NEEDS_SURVEY"
+            out["message"] = (f"線上框查 {len(gdf)} 筆，無宗地含此點，最近者 {row['地號']} 距 {edge:.1f}m "
+                              f"（>{NEAR_EDGE_M}m）→ 需人工地籍鑑界確認")
+            return out
+        near = True
+
+    def _s(v):
+        return None if v is None or str(v).strip() in ("", "nan", "None") else str(v).strip()
+
+    out.update({
+        "status": "OK", "county": _s(row.get("縣市")) or county, "town": _s(row.get("鄉鎮")),
+        "section": _s(row.get("段")), "landno": str(row["地號"]), "code14": None,
+        "zone": _s(row.get("使分")), "land_type": _s(row.get("使類")),
+        "reg_area": _s(row.get("登面積")), "reg_date": None,
+        "map_area": round(row.geometry.area, 2), "dist_to_edge_m": round(edge, 2),
+        "api_calls": 1, "path": "線上框查（本機快照缺失退路；農業部版次 " + str(row.get("版次", "?")) + "）",
+        "_geom": row.geometry,
+        "_landtype_none": _s(row.get("使分")) is None and _s(row.get("使類")) is None,
+    })
+    if out["_landtype_none"]:
+        out["warnings"].append("使分/使類空白：屬都市土地或未登錄地，身分待查證（不可逕寫都市土地）")
+    if near:
+        out["warnings"].append(f"圖釘落在本宗地界址外緣 {edge:.1f}m（座標反查誤差內，已認定為本宗地）"
+                               "→ 界址／相鄰筆以地籍鑑界為準")
+    elif edge < NEAR_EDGE_M:
+        out["warnings"].append(f"點距邊界僅 {edge:.1f}m（近界）→ 建議人工確認相鄰筆")
+    return out
+
+
+# --------------------------------------------------------------------------
 # 6~7. 農業部確認 + 收斂探測
 # --------------------------------------------------------------------------
 def reverse(text: str, throttle: float = PROBE_THROTTLE_S) -> dict:
@@ -321,12 +396,15 @@ def reverse(text: str, throttle: float = PROBE_THROTTLE_S) -> dict:
     county = county_of_point(moa, x, y)
     shp = county_shp_path(county) if county else None
     if shp is None:
-        county = county_by_bbox_scan(x, y, pt)   # 備援
-        shp = county_shp_path(county) if county else None
+        county2 = county_by_bbox_scan(x, y, pt)   # 備援
+        shp = county_shp_path(county2) if county2 else None
+        county = county2 or county
     if shp is None:
-        out["status"] = "FAIL_COUNTY"
-        out["message"] = "縣市定位失敗（農業部 identify 與本機掃描皆未命中）"
-        return out
+        # 本機快照缺（NAS 未掛等）或縣市定位失敗 → 退回線上框查（2026-11-26）。
+        # 注意：county 有值代表農業部 identify 已定位成功，缺的只是本機 shp，別誤報成「縣市定位失敗」。
+        why = (f"縣市定位為「{county}」，但本機無 {os.path.join(CAD_DIR, county)}.shp 快照" if county
+               else "縣市定位失敗（農業部 identify 無回應且本機無快照）")
+        return online_reverse(out, pt, county, why)
 
     # 本機候選
     cand = local_candidate(shp, x, y, pt)
