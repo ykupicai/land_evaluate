@@ -1459,6 +1459,29 @@ def urban_image_legend_layer(urban_lyr: QgsVectorLayer, extent: QgsRectangle,
     return persist_legend_layer(lyr, f"{tag}_都市計畫分區_彩繪取樣", keep_alive, warnings)
 
 
+def national_urban_legend_layer(groups: list, extent: QgsRectangle, keep_alive: list,
+                                tag: str = "", warnings: list | None = None):
+    """全國都市計畫服務的圖例層：[(圖例短名, rgb)] → 落地 gpkg 的分類圖例代理層。
+
+    代理幾何是圖框中心的極小方塊；呼叫端要把它放在**彩繪圖之下**（被圖蓋住、不露出），
+    但仍須在地圖圖層清單裡，否則 setLegendFilterByMapEnabled 會把整段圖例濾掉。
+    """
+    if not groups:
+        return None
+    lyr = QgsVectorLayer(f"Polygon?crs={CRS_3826}&field=cat:string",
+                         URBAN_LAYER_NAME, "memory")
+    cx, cy = extent.center().x(), extent.center().y()
+    half = extent.width() * 0.001
+    cats = []
+    for i, (label, rgb) in enumerate(groups):
+        cats.append(QgsRendererCategory(
+            str(i), fill_symbol(tuple(rgb), outline="120,120,120,255", width="0.1"), label))
+        add_feat(lyr, QgsGeometry.fromRect(QgsRectangle(
+            cx - half, cy - half, cx + half, cy + half)), [str(i)])
+    lyr.setRenderer(QgsCategorizedSymbolRenderer("cat", cats))
+    return persist_legend_layer(lyr, f"{tag}_都市計畫分區_全國服務", keep_alive, warnings)
+
+
 def road_status_color(status: str) -> tuple:
     """臨路狀態文字 → 框色（純規則，見設計文件 Task6 brief）。"""
     s = str(status or "")
@@ -2193,6 +2216,68 @@ def _run_maps(start_qgis) -> None:
                     warnings.append(f"{cid} 官方分區彩繪圖取得失敗（退回向量著色）："
                                     f"{type(exc).__name__}: {exc}")
 
+            # ★全國備援（2026-11-26 布袋見龍段876 案）：基地有使分空白列（疑似都市土地）、
+            #   本機 `都市計畫/` 向量層又不在（NAS 未掛、新機器）→ 原本使用分區圖只剩地籍線、
+            #   卻回報「成功」。改向內政部全國都市計畫使用分區服務取彩繪圖（只能出圖、無屬性，
+            #   分區面積／占比不計算）。取不到就維持原樣並記警告，不阻斷出圖。
+            national_rl = national_legend_lyr = None
+            if (urban_image_rl is None and not urban_ok and c.get("has_urban_rows")):
+                try:
+                    _tok = urbanplan_image._national_token()
+                    _t = urbanplan_image.fetch_national_zone_image(
+                        ext_3826, basemap_dir / f"{cid}_都市計畫全國服務圖.tif", token=_tok,
+                        scale=c["scale"])
+                    _rl = QgsRasterLayer(str(_t), urbanplan_image.NATIONAL["title"])
+                    if _rl.isValid():
+                        project.addMapLayer(_rl, False)
+                        keep_alive.append(_rl)
+                        national_rl = _rl
+                        try:
+                            _groups = urbanplan_image.national_present_legend(
+                                ext_3826, _t, urbanplan_image.national_legend(token=_tok),
+                                scale=c["scale"], token=_tok)
+                        except Exception as _exc:  # noqa: BLE001 — 逐類確認失敗退回色群名
+                            warnings.append(f"{cid} 全國分區圖例逐類確認失敗（改列色群名）："
+                                            f"{type(_exc).__name__}: {_exc}")
+                            _groups = urbanplan_image.legend_in_image(
+                                _t, urbanplan_image.national_legend(token=_tok))
+                        # 都市／非都市組成改以全國分區圖判定（本機無向量層時原判定必為 UNKNOWN）：
+                        # 基地內部點落在有分區色處＝在都市計畫區內。判定不足仍兩張都出。
+                        if mix_kind == urban_mix.UNKNOWN:
+                            try:
+                                _fn = [fl.name() for fl in l_red.fields()]
+                                _iz = _fn.index("使分") if "使分" in _fn else -1
+                                _it = _fn.index("使類") if "使類" in _fn else -1
+                                _il = _fn.index("地號") if "地號" in _fn else -1
+                                _rows = []
+                                for bf in l_red.getFeatures():
+                                    _p = bf.geometry().pointOnSurface().asPoint()
+                                    _hit = urbanplan_image.opaque_at(_t, [(_p.x(), _p.y())])[0]
+                                    _ln = str(bf[_il]) if _il >= 0 else ""
+                                    _rows.append((bf[_iz] if _iz >= 0 else None,
+                                                  bf[_it] if _it >= 0 else None, _hit,
+                                                  bool(_ln) and is_unregistered(_ln)))
+                                mix_kind = urban_mix.classify(_rows)
+                                skip_by_mix = urban_mix.themes_to_skip(mix_kind)
+                                if skip_by_mix:
+                                    print(f"  [{cid}] {urban_mix.skip_reason(mix_kind)}"
+                                          f"（依全國都市計畫分區圖判定）→ 略過 "
+                                          f"{'、'.join(sorted(skip_by_mix))}", flush=True)
+                            except Exception as _exc:  # noqa: BLE001
+                                warnings.append(f"{cid} 以全國分區圖判定都市組成失敗"
+                                                f"（兩張分區圖照常出）：{_exc}")
+                        national_legend_lyr = national_urban_legend_layer(
+                            _groups, c["extent"], keep_alive, tag=cid, warnings=warnings)
+                        if national_legend_lyr is not None:
+                            project.addMapLayer(national_legend_lyr, False)
+                        print(f"  [{cid}] 本機無都市計畫向量層 → 使用分區改用全國服務彩繪圖"
+                              f"（圖例 {len(_groups)} 類）", flush=True)
+                    else:
+                        warnings.append(f"{cid} 全國都市計畫分區圖讀取失敗 → 使用分區圖無分區著色")
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"{cid} 全國都市計畫分區圖取得失敗（使用分區圖無分區著色）："
+                                    f"{type(exc).__name__}: {exc}")
+
             # maxmap 臨路判定專用底圖:基地外擴 ROAD_MARGIN_M,正射＋EMAP2 電子地圖(疊路名/
             # 道路分類),圖框放大到可見最近的區道/市道/縣道/鄉道(使用者定案)。
             road_photo_rl = road_emap_rl = None
@@ -2442,6 +2527,19 @@ def _run_maps(start_qgis) -> None:
                                + "都發局官方分區彩繪圖（ArcGIS export，查詢日期 "
                                + datetime.now().strftime("%Y-%m-%d") + "）"
                                + "\n面積與占比仍以都發局向量圖層實算")
+            if national_rl is not None:
+                # 圖例代理層放在彩繪圖之下（清單後＝下層）：被圖蓋住不露出，但仍在圖層清單內。
+                zoning_layers = ([l_red, *gray_opt, national_rl]
+                                 + ([national_legend_lyr] if national_legend_lyr is not None
+                                    else []))
+                zoning_legend = ([national_legend_lyr, l_red] if national_legend_lyr is not None
+                                 else [l_red])
+                zoning_note = (common_note + "\n都市計畫分區圖面：內政部國土管理署全國都市計畫"
+                               "使用分區服務（ArcGIS export，查詢日期 "
+                               + datetime.now().strftime("%Y-%m-%d") + "）"
+                               + "\n圖例列圖框內出現之分區類別，細分區名稱以圖面標註為準；"
+                               "僅供參考，以縣（市）政府核發之使用分區證明為準"
+                               + "\n本機無都市計畫向量圖層，未計算分區面積與占比")
             theme_defs = {
                 "使用分區": (zoning_layers, zoning_legend, {"宗地-使用分區"}, zoning_note, None),
                 "使用地編定": (landtype_layers, landtype_legend, {"宗地-使用地編定"}, landtype_note,
