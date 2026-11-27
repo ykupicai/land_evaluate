@@ -451,10 +451,34 @@ PASSTHRU_VALUE_FLAGS = ("--layout", "--themes", "--cases", "--exclude", "--road-
                         "--basemap-dir", "--area-label-themes")
 
 
+# 跑完自動清掉的中間檔（2026-11-27 使用者定案）：圖磚快取一案常占總檔數七成以上，
+# 只用來加速重出圖；臨路評估 _work 只在 road_access 內部使用。都不被 qgz 引用、不入 NAS。
+# 刪了的代價＝下次重出圖要重抓圖磚（慢幾十秒）。--keep-cache 可保留。
+CLEANUP_DIRS = (Path("底圖") / "_tilecache", Path("臨路評估") / "_work")
+
+
+def cleanup_intermediate(case_dir: Path) -> list:
+    """刪除案件資料夾內的中間檔目錄，回傳 (相對路徑, 檔數) 清單。單一目錄刪失敗只警告。"""
+    import shutil
+    removed = []
+    for rel in CLEANUP_DIRS:
+        d = case_dir / rel
+        if not d.is_dir():
+            continue
+        n = sum(1 for p in d.rglob("*") if p.is_file())
+        try:
+            shutil.rmtree(d)
+            removed.append((str(rel), n))
+        except OSError as e:
+            print(f"[run_case] 警告：清理 {rel} 失敗（{e}），保留不動", flush=True)
+    return removed
+
+
 def main():
     args = sys.argv[1:]
     shp = lst = fetch = latlon = case = chosen = from_step = None
     resume = False
+    keep_cache = False
     passthru = []
     i = 0
     while i < len(args):
@@ -475,6 +499,8 @@ def main():
             from_step = args[i + 1]; i += 2
         elif a == "--resume":
             resume = True; i += 1
+        elif a == "--keep-cache":          # 不自動清理圖磚快取與臨路評估 _work
+            keep_cache = True; i += 1
         elif a in ("--no-qgz", "--mem", "--basic",
                    # 2026-07-29 新增：底圖鎖與圖面通則（見 make_maps 說明）
                    "--reuse-basemap", "--no-loc-parcel",
@@ -658,6 +684,11 @@ def main():
     executed = execute_steps(steps, run_step, art)
     if not (executed and executed[-1] in ("parse", "STOP_MODE", "STOP_CHECK")):
         print("\n[run_case] 基礎圖資與製圖階段完成")
+        if not keep_cache:
+            removed = cleanup_intermediate(case_dir)
+            if removed:
+                print("[run_case] 已清理中間檔（--keep-cache 可保留）："
+                      + "、".join(f"{r} {n} 檔" for r, n in removed))
         pending = assessment_followups(case_dir)
         if pending:
             print("[run_case] 整案評估尚待：")

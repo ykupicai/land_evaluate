@@ -499,3 +499,19 @@ def test_fetch_roster_skips_when_shp_exists(tmp_path):
     shp = tmp_path / "cadastre" / "基地.shp"
     shp.write_bytes(b"")
     assert fetch_roster(tmp_path / "不存在的清冊.csv", tmp_path) == shp
+
+
+def test_cleanup_intermediate_removes_only_cache_dirs(tmp_path):
+    """自動清理只刪圖磚快取與臨路評估 _work，成果圖、底圖 tif、qgz 引用檔都不可動。"""
+    keep = [tmp_path / "底圖" / "001_正射.tif", tmp_path / "臨路評估" / "sites.shp",
+            tmp_path / "圖檔_maxmap" / "a.png", tmp_path / "x_maxmap.qgz"]
+    gone = [tmp_path / "底圖" / "_tilecache" / "17" / "1.png", tmp_path / "臨路評估" / "_work" / "landuse.tif"]
+    for p in keep + gone:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    removed = rc.cleanup_intermediate(tmp_path)
+    assert sorted(n for _, n in removed) == [1, 1]
+    assert all(p.exists() for p in keep)
+    assert not (tmp_path / "底圖" / "_tilecache").exists()
+    assert not (tmp_path / "臨路評估" / "_work").exists()
+    assert rc.cleanup_intermediate(tmp_path) == []   # 重跑不報錯
